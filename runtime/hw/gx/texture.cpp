@@ -3,7 +3,13 @@
 //   0 I4 8x8   1 I8 8x4   2 IA4 8x4   3 IA8 4x4   4 RGB565 4x4   5 RGB5A3 4x4   6 RGBA8 4x4
 //   8 C4 8x8   9 C8 8x4   10 C14X2 4x4   14 CMPR 8x8 (four DXT1-like 4x4 sub-blocks)
 //
-// Palettes (TLUTs) live in TMEM; formats 0 IA8, 1 RGB565, 2 RGB5A3.
+// Palettes (TLUTs) live in TMEM; formats 0 IA8, 1 RGB565, 2 RGB5A3. A texture can also be
+// preloaded into TMEM (BP 0x60-0x63, GXPreLoadEntireTexture) and drawn from there: its SETIMAGE1
+// has the "preloaded" bit and TMEM addresses (RGBA8: the AR halves of its 64-byte blocks in the
+// even bank, the GB halves in the odd one) instead of a memory address in SETIMAGE3.
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 #include "regs.h"
@@ -14,6 +20,7 @@ namespace guest {
 namespace {
 
 u8 s_tmem[1 << 20];
+u32 s_tmem_serial = 1;  // moves on with every preload
 
 struct Key {
     u32 addr, fmt, w, h, tlut_addr, tlut_fmt;
@@ -203,28 +210,63 @@ void gx_load_tlut(u32 bp64, u32 bp65) {
     read_g(&s_tmem[tmem], src, n);
 }
 
+void gx_preload(u32 bp60, u32 bp61, u32 bp62, u32 bp63) {
+    const u32 LINE = 32;
+    u32 src = 0x80000000 | ((bp60 & 0xFFFFFF) << 5 & 0x1FFFFFFF);
+    u32 even = bits(bp61, 0, 15) * LINE, odd = bits(bp62, 0, 15) * LINE;
+    u32 count = bits(bp63, 0, 15), type = bits(bp63, 15, 2);
+    if (type != 3) {  // one bank
+        u32 n = std::min<u32>(count * LINE, sizeof(s_tmem) - std::min<u32>(even, sizeof(s_tmem)));
+        read_g(&s_tmem[even], src, n);
+    } else {  // RGBA8: 64-byte blocks split between the banks
+        for (u32 i = 0; i < count && even + LINE <= sizeof(s_tmem) && odd + LINE <= sizeof(s_tmem); i++) {
+            read_g(&s_tmem[even], src, LINE);
+            read_g(&s_tmem[odd], src + LINE, LINE);
+            even += LINE, odd += LINE, src += 2 * LINE;
+        }
+    }
+    s_tmem_serial++;
+}
+
 const GxTexture* gx_texture(u32 map) {
     u32 img0 = g_gx.bp[bp_tex(BP_TX_SETIMAGE0, map)];
+    u32 img1 = g_gx.bp[bp_tex(BP_TX_SETIMAGE1, map)];
     u32 img3 = g_gx.bp[bp_tex(BP_TX_SETIMAGE3, map)];
     u32 tlut = g_gx.bp[bp_tex(BP_TX_SETTLUT, map)];
     Key k;
     k.w = bits(img0, 0, 10) + 1;
     k.h = bits(img0, 10, 10) + 1;
     k.fmt = bits(img0, 20, 4);
-    k.addr = 0x80000000 | ((img3 & 0xFFFFFF) << 5);
     bool paletted = k.fmt == 8 || k.fmt == 9 || k.fmt == 10;
     k.tlut_addr = paletted ? bits(tlut, 0, 10) << 9 : 0;
     k.tlut_fmt = paletted ? bits(tlut, 10, 2) : 0;
-    const u8* src = host_ptr(k.addr);
-    if (!src)
-        return nullptr;
     u32 bytes = gx_texture_bytes(k.fmt, k.w, k.h);
+    const bool preloaded = bits(img1, 21, 1);
+    const u8* src;
+    if (preloaded) {
+        // from TMEM, gathered into the layout it has in memory (keyed by a TMEM pseudo-address)
+        u32 even = bits(img1, 0, 15) * 32, odd = bits(g_gx.bp[bp_tex(BP_TX_SETIMAGE2, map)], 0, 15) * 32;
+        k.addr = 0xF0000000 | even;
+        static std::vector<u8> s_buf;
+        s_buf.assign(bytes, 0);
+        for (u32 at = 0; at < bytes; at += 32) {
+            u32 from = k.fmt == 6 ? ((at / 64) * 32 + ((at & 32) ? odd : even)) : even + at;
+            if (from + 32 <= sizeof(s_tmem))
+                memcpy(&s_buf[at], &s_tmem[from], std::min<u32>(32, bytes - at));
+        }
+        src = s_buf.data();
+    } else {
+        k.addr = 0x80000000 | ((img3 & 0xFFFFFF) << 5);
+        src = host_ptr(k.addr);
+        if (!src)
+            return nullptr;
+    }
     Entry& e = s_cache[k];
     e.used_frame = s_frame;
-    if (e.checked_frame != s_frame) {
+    if (e.checked_frame != s_frame || (preloaded && e.gen != s_tmem_serial)) {
         NOMA_PROF_SCOPE("(gx texture check)");
         e.checked_frame = s_frame;
-        u32 gen = mem_generation(k.addr, bytes);
+        u32 gen = preloaded ? s_tmem_serial : mem_generation(k.addr, bytes);
         if (!paletted && !e.tex.rgba.empty() && gen == e.gen && s_frame - e.hashed_frame < HASH_EVERY)
             return &e.tex;
         e.gen = gen;

@@ -71,6 +71,9 @@ void __mtspr(u32 spr, u32 v) {
     case 1009: g_hid[1] = v; break;
     case 920: g_hid[2] = v; break;
     case 1011: g_hid[4] = v; break;
+    case 921:  // WPAR: the write-gather pipe is reset
+        gx_gather_reset();
+        break;
     case 923:  // DMA_L
         if (v & 2)
             lc_dma(s_spr[922], v);

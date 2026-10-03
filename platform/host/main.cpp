@@ -166,12 +166,24 @@ void platform_audio_push(const s16* lr, u32 frames) {
 
 // The software renderer. With NOMA_DUMP_FRAMES (and not NOMA_RENDER_ALL), it only rasterizes the
 // few frames before each one that is saved (the GPU state is kept up to date all along): a run
-// that only needs the saved frames goes at the game's own speed.
+// that only needs the saved frames goes at the game's own speed. Until the game copies the EFB
+// to a texture (Mii faces, effects): what it draws for that is needed whenever it happens, so
+// from then on every frame is drawn.
 struct HostRenderer : SoftRenderer {
     bool drawing = true;
+    bool texture_copies = false;  // seen one: draw every frame
     void draw(u32 prim, u32 vat, u32 count, const u8* data) override {
         if (drawing)
             SoftRenderer::draw(prim, vat, count, data);
+    }
+    void efb_copy(u32 value) override {
+        if (!(value & 0x4000) && !texture_copies) {  // (bit 14: a copy to the frame buffer)
+            texture_copies = true;
+            if (!drawing)
+                log("host: the EFB was copied to a texture in a frame that wasn't drawn; drawing every frame "
+                    "from now on");
+        }
+        SoftRenderer::efb_copy(value);
     }
 };
 static HostRenderer s_renderer;
@@ -185,7 +197,7 @@ void platform_present(u32 xfb) {
     static bool all = every <= 0 || getenv("NOMA_RENDER_ALL") || getenv("NOMA_GX_THREAD");
     static u32 n;
     n++;
-    s_renderer.drawing = all || (n + 4) % (u32)every < 5;
+    s_renderer.drawing = all || s_renderer.texture_copies || (n + 4) % (u32)every < 5;
     if (every <= 0 || n % (u32)every || !xfb)
         return;
     const XfbCopy* r = gx_xfb_region(xfb);

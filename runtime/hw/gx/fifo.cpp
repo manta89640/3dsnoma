@@ -99,6 +99,11 @@ static void store_burst() {
     }
 }
 
+// GXResetWriteGatherPipe (after GXSetCPUFifo, as in GXBeginDisplayList): what the pipe held for
+// the old FIFO is not written to the new one. A display list that fills its buffer exactly would
+// otherwise wrap, and GXEndDisplayList returns 0 (RFL's Mii face mask, 864 of 896 bytes)
+void gx_gather_reset() { s_gather_n = 0; }
+
 void gx_fifo_write(u32 off, u32 value, int size) {
     for (int i = size - 1; i >= 0; i--) {
         s_gather[s_gather_n++] = (u8)(value >> (i * 8));

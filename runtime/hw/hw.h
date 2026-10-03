@@ -24,6 +24,8 @@ DEVICE(ai)
 DEVICE(hollywood)
 #undef DEVICE
 void gx_fifo_write(u32 off, u32 value, int size);
+// WPAR (SPR 921) written: the write-gather pipe starts empty (bytes not yet sent are dropped)
+void gx_gather_reset();
 
 // register file helper for devices that mostly just remember what was written
 struct RegFile {

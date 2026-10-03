@@ -21,6 +21,8 @@ const GxTexture* gx_texture(u32 map);
 void gx_texture_frame();
 // TMEM (palettes): BP 0x65 copies main memory into it
 void gx_load_tlut(u32 bp64, u32 bp65);
+// TMEM (preloaded textures): BP 0x63 copies main memory into it (BP 0x60-0x62: source and banks)
+void gx_preload(u32 bp60, u32 bp61, u32 bp62, u32 bp63);
 // bytes a texture of this format and size takes in memory
 u32 gx_texture_bytes(u32 fmt, u32 w, u32 h);
 // memory that textures may come from changed (an EFB copy): check those again when used

@@ -177,6 +177,10 @@ static void load_bp(u32 cmd) {
     case 0x65:  // load a palette into TMEM
         gx_load_tlut(g_gx.bp[0x64], v);
         break;
+    case 0x63:  // preload a texture into TMEM (0: GXTexModeSync, no load)
+        if (v)
+            gx_preload(g_gx.bp[0x60], g_gx.bp[0x61], g_gx.bp[0x62], v);
+        break;
     case 0x52:  // EFB copy
         s_stats.copies++;
         s_renderer->efb_copy(v);

@@ -13,6 +13,8 @@
 #include <cstring>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include "raster.h"
 #include "regs.h"
 #include "texture.h"
@@ -886,11 +888,62 @@ void SoftRenderer::bp_write(u32 reg, u32 value) {}
 
 // NOMA_DEBUG_DRAWS=N: describe every draw of the Nth frame (counted in XFB copies)
 static u32 s_copies;
+// NOMA_DEBUG_DRAWS=tN instead: the draws between texture copies N-1 and N (NOMA_DUMP_TEX_COPIES)
+static u32 s_tex_copies;
+// NOMA_DEBUG_DRAWS=xADDR (hex): the first 40 draws that sample the texture image at ADDR;
+// x alone: that sample an EFB copy
+static std::vector<u32> s_copy_dsts;
 static bool debug_draws() {
-    static int frame = getenv("NOMA_DEBUG_DRAWS") ? atoi(getenv("NOMA_DEBUG_DRAWS")) : -1;
-    return frame >= 0 && s_copies / 3 == (u32)frame;
+    static const char* e = getenv("NOMA_DEBUG_DRAWS");
+    static char mode = e && (e[0] == 't' || e[0] == 'x') ? e[0] : 0;
+    static long n = e ? strtol(e + (mode != 0), nullptr, mode == 'x' ? 16 : 10) : -1;
+    if (mode == 't')
+        return n >= 1 && s_tex_copies + 1 == (u32)n;
+    if (mode == 'x') {
+        static u32 s_hits;
+        if (s_hits >= 40)
+            return false;
+        for (u32 m = 0; m < 8; m++)
+            if (u32 img = (g_gx.bp[bp_tex(BP_TX_SETIMAGE3, m)] & 0xFFFFFF) << 5;
+                n > 0 ? img == ((u32)n & 0x1FFFFFFF)
+                      : std::find(s_copy_dsts.begin(), s_copy_dsts.end(), img) != s_copy_dsts.end() ||
+                            bits(g_gx.bp[bp_tex(BP_TX_SETIMAGE1, m)], 21, 1)) {
+                s_hits++;
+                return true;
+            }
+        return false;
+    }
+    return n >= 0 && s_copies / 3 == (u32)n;
 }
-bool gx_debug_frame() { return debug_draws(); }
+// once per draw (debug_draws counts its hits); what the other debug output follows
+static bool s_debug_now;
+// NOMA_DEBUG_DRAWS=rX0,Y0,X1,Y1,F: the first 60 draws after game frame F whose screen box
+// (640x456 frame) has its centre inside the rectangle
+static bool debug_draws_rect(const GxOutVertex* out, u32 count);
+static bool debug_draws_now(const GxOutVertex* out, u32 count) {
+    return s_debug_now = debug_draws() || debug_draws_rect(out, count);
+}
+bool gx_debug_frame() { return s_debug_now; }
+
+static bool debug_draws_rect(const GxOutVertex* out, u32 count) {
+    static const char* e = getenv("NOMA_DEBUG_DRAWS");
+    static float r[5] = {0, 0, 0, 0, 0};
+    static bool on = e && e[0] == 'r' && sscanf(e + 1, "%f,%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3], &r[4]) == 5;
+    static u32 s_hits;
+    if (!on || s_hits >= 600 || vi_game_frames() < (u32)r[4])
+        return false;
+    f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (u32 i = 0; i < count; i++) {
+        RV v;
+        to_screen(out[i], v);
+        x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), y0 = std::min(y0, v.y), y1 = std::max(y1, v.y);
+    }
+    f32 cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    if (cx < r[0] || cx > r[2] || cy < r[1] || cy > r[3])
+        return false;
+    s_hits++;
+    return true;
+}
 
 void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     static std::vector<GxVertex> in;
@@ -901,7 +954,7 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     gx_transform(in.data(), count, out.data());
     gx_check_transform_draw(vat, count, data, out.data());
     load_state();
-    if (debug_draws()) {
+    if (debug_draws_now(out.data(), count)) {
         f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
         for (u32 i = 0; i < count; i++) {
             RV r;
@@ -922,8 +975,15 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             bp[BP_TEV_COLOR_ENV + 2], bp[BP_TEV_COLOR_ENV + 3], bp[BP_TREF]);
         if (S.tex[0] && !S.tex[0]->rgba.empty()) {
             const GxTexture* t = S.tex[0];
-            log("     tex0 texels: %08X %08X %08X %08X (corner, mid, ...)", t->rgba[0], t->rgba[t->rgba.size() / 2],
-                t->rgba[t->width / 2], t->rgba[t->rgba.size() - 1]);
+            u32 nonzero = 0;
+            for (u32 px : t->rgba)
+                nonzero += px != 0;
+            u32 img3 = g_gx.bp[BP_TX_SETIMAGE3];
+            const u8* raw = host_ptr(0x80000000 | ((img3 & 0xFFFFFF) << 5));
+            log("     tex0 texels: %08X %08X %08X %08X (corner, mid, ...), %u of %zu not zero; memory %02X%02X%02X%02X%02X%02X%02X%02X",
+                t->rgba[0], t->rgba[t->rgba.size() / 2], t->rgba[t->width / 2], t->rgba[t->rgba.size() - 1], nonzero,
+                t->rgba.size(), raw ? raw[0] : 0, raw ? raw[1] : 0, raw ? raw[2] : 0, raw ? raw[3] : 0, raw ? raw[32] : 0,
+                raw ? raw[33] : 0, raw ? raw[64] : 0, raw ? raw[65] : 0);
         }
         for (u32 i = 0; i < count && i < 4; i++)
             log("     vtx%u in tex (%.3f %.3f) out tex (%.3f %.3f %.3f) col %02X%02X%02X%02X", i, in[i].tex[0][0],
@@ -987,8 +1047,53 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     }
 }
 
+// NOMA_DUMP_TEX_COPIES=N: log the first N EFB copies to textures and save each as it lands in
+// memory, decoded (color left, alpha right), to tex_copies/NNNN.bmp
+static void dump_texture_copy(const EfbCopy& c, u32 v) {
+    static int s_left = getenv("NOMA_DUMP_TEX_COPIES") ? atoi(getenv("NOMA_DUMP_TEX_COPIES")) : 0;
+    static u32 s_n;
+    if (s_left <= 0)
+        return;
+    s_left--;
+    u32 w = c.half ? std::max<u32>(1, c.w / 2) : c.w, h = c.half ? std::max<u32>(1, c.h / 2) : c.h;
+    const u32* bp = g_gx.bp;
+    log("gx: texture copy %u: %06X (%u,%u) %ux%u%s fmt %u%s -> %08X stride %u; pixel format %u, cmode0 %04X "
+        "cmode1 %04X, clear %02X%02X%02X%02X",
+        s_n, v, c.sx, c.sy, c.w, c.h, c.half ? " halved" : "", c.fmt, c.intensity ? " (intensity)" : "", c.dst,
+        c.stride, bits(bp[BP_ZCONTROL], 0, 3), bp[BP_CMODE0], bp[BP_CMODE1], bp[BP_CLEAR_AR] & 255,
+        bp[BP_CLEAR_GB] >> 8, bp[BP_CLEAR_GB] & 255, bp[BP_CLEAR_AR] >> 8);
+    const u8* src = host_ptr(0x80000000 | (c.dst & 0x1FFFFFFF));
+    if (!src)
+        return;
+    std::vector<u32> rgba((size_t)w * h);
+    gx_decode_texture(src, c.fmt, w, h, rgba.data());
+    mkdir("tex_copies", 0777);
+    char path[64];
+    snprintf(path, sizeof(path), "tex_copies/%04u.bmp", s_n++);
+    FILE* f = fopen(path, "wb");
+    if (!f)
+        return;
+    u32 W = 2 * w, row = (W * 3 + 3) & ~3u, size = 54 + row * h;
+    u8 hdr[54] = {'B', 'M'};
+    auto put32 = [&](int at, u32 x) { memcpy(hdr + at, &x, 4); };
+    put32(2, size), put32(10, 54), put32(14, 40), put32(18, W), put32(22, h), put32(34, row * h);
+    hdr[26] = 1, hdr[28] = 24;
+    fwrite(hdr, 1, 54, f);
+    std::vector<u8> line(row, 0);
+    for (u32 y = h; y-- > 0;) {
+        for (u32 x = 0; x < w; x++) {
+            u32 p = rgba[y * w + x];  // R in bits 0-7
+            line[x * 3 + 0] = (u8)(p >> 16), line[x * 3 + 1] = (u8)(p >> 8), line[x * 3 + 2] = (u8)p;
+            u8 a = (u8)(p >> 24);
+            line[(w + x) * 3 + 0] = line[(w + x) * 3 + 1] = line[(w + x) * 3 + 2] = a;
+        }
+        fwrite(line.data(), 1, row, f);
+    }
+    fclose(f);
+}
+
 void SoftRenderer::efb_copy(u32 v) {
-    if (debug_draws())
+    if (s_debug_now)
         log("efb copy %06X", v);
     s_copies++;
     const u32* bp = g_gx.bp;
@@ -1013,6 +1118,10 @@ void SoftRenderer::efb_copy(u32 v) {
             }
         } else {
             gx_copy_to_texture(c, efb_rgba);
+            dump_texture_copy(c, v);
+            s_tex_copies++;
+            if (std::find(s_copy_dsts.begin(), s_copy_dsts.end(), c.dst & 0x1FFFFFFF) == s_copy_dsts.end())
+                s_copy_dsts.push_back(c.dst & 0x1FFFFFFF);
         }
     }
     if (bits(v, 11, 1))

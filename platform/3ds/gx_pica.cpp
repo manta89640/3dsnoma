@@ -1194,9 +1194,9 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
 }  // namespace
 
 void PicaRenderer::bp_write(u32 reg, u32 value) {
-    // a changed register moves the state serial on, and so does a palette load (paletted
-    // textures change with it); EFB copies set the state up again themselves (read_back)
-    if (P.bp_shadow[reg] != value || reg == BP_LOADTLUT1) {
+    // a changed register moves the state serial on, and so do palette loads and texture
+    // preloads (TMEM changes); EFB copies set the state up again themselves (read_back)
+    if (P.bp_shadow[reg] != value || reg == BP_LOADTLUT1 || reg == 0x63) {
         P.bp_shadow[reg] = value;
         P.state_serial++;
     }

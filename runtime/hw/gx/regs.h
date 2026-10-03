@@ -68,6 +68,8 @@ enum : u32 {
     BP_TX_SETMODE0 = 0x80,
     BP_TX_SETMODE1 = 0x84,
     BP_TX_SETIMAGE0 = 0x88,
+    BP_TX_SETIMAGE1 = 0x8C,
+    BP_TX_SETIMAGE2 = 0x90,
     BP_TX_SETIMAGE3 = 0x94,
     BP_TX_SETTLUT = 0x98,
     BP_TEV_COLOR_ENV = 0xC0,  // + 2 * stage; alpha env at + 1
