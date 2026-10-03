@@ -172,7 +172,7 @@ PATCHED_NAMES = {
     "scene_TitleScene_Opening_OnOpeningEnd",  # ... and ends
     "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, the license agreement
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
-    # the AX's aux buses: no effects where the 3DS's DSP plays the voices (engine/audio/aux.cpp)
+    # the AX's aux buses: their effect callbacks, logged as they're registered (engine/audio/aux.cpp)
     "AXRegisterAuxACallback", "AXRegisterAuxBCallback", "AXRegisterAuxCCallback",
     # parts about the Wii itself, left out on the 3DS (runtime/patches/wii_parts.cpp): the Wii Remote
     # strap screen at the start, the setup's video quality step, frames rounded up to TV retraces

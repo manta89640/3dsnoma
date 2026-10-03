@@ -153,8 +153,6 @@ u32 g_ax_lists;
 
 // run one command list (size in words) from main memory
 void dsp_ax_command_list(u32 list_addr, u32 words) {
-    if (audio_dsp_native())
-        return audio_dsp_frame(list_addr, words);
     NOMA_PROF_SCOPE("(ax)");
     g_ax_lists++;
     static bool s_debug = getenv("NOMA_DEBUG_AX") != nullptr;

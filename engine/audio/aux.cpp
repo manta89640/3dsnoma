@@ -1,7 +1,7 @@
-// The AX's aux buses, which feed the channel's effects (nw4r's reverb). With the voices on the 3DS's
-// DSP (dsp_ndsp.cpp) their aux sends aren't mixed, so an effect would only process silence -- the
-// reverb was 5% of all the CPU's time. Its callbacks aren't registered then; where the CPU mixes
-// the voices (the host, dsp_ax.cpp) they are, as on the Wii.
+// The AX's aux buses, which feed the channel's effects (nw4r's reverb): their callbacks, logged as
+// they're registered (the channel registers none at start, in the room or in the theater). The
+// voices are mixed natively, aux buses included (runtime/hw/dsp_ax.cpp), so effects run as on
+// the Wii.
 #include "noma_decomp.h"
 #include "runtime.h"
 
@@ -17,17 +17,17 @@ static void log_aux(char bus, u32 callback, u32 context) {
 
 u64 AXRegisterAuxACallback(u32 callback, u32 context) {
     log_aux('A', callback, context);
-    return AXRegisterAuxACallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
+    return AXRegisterAuxACallback_orig(callback, context);
 }
 
 void AXRegisterAuxBCallback(u32 callback, u32 context) {
     log_aux('B', callback, context);
-    AXRegisterAuxBCallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
+    AXRegisterAuxBCallback_orig(callback, context);
 }
 
 void AXRegisterAuxCCallback(u32 callback, u32 context) {
     log_aux('C', callback, context);
-    AXRegisterAuxCCallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
+    AXRegisterAuxCCallback_orig(callback, context);
 }
 
 }  // namespace g

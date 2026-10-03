@@ -1,6 +1,6 @@
 // nw4r::snd::detail::AxVoice, native (engine/snd/ax_voice.cpp): the layer between nw4r's voices
 // and the SDK's AX voices. It writes the AX parameter blocks (AXVPB) exactly as nw4r does -- the
-// fields, and the sync flags that tell the DSP (runtime/hw/dsp_ax.cpp, engine/audio/dsp_ndsp.cpp)
+// fields, and the sync flags that tell the DSP (runtime/hw/dsp_ax.cpp)
 // what changed -- so the backends see the same blocks as from the decompiled code.
 //
 // An AxVoice (guest memory) starts with its AxVoiceParamBlock: the AXVPB and the sync flags

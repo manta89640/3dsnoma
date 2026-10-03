@@ -54,20 +54,8 @@ HostSignal* platform_signal_new();
 void platform_signal(HostSignal* s);
 void platform_wait(HostSignal* s, u64 timeout_us);
 
-// ---- sound on the 3DS's DSP (engine/audio/dsp_ndsp.cpp): AX voices as ndsp channels, nothing
-// mixed by the CPU. Off where the platform has no DSP for it (the host mixes, dsp_ax.cpp).
-#ifdef __3DS__
-bool audio_dsp_native();
-void audio_dsp_init();
-void audio_dsp_frame(u32 list_addr, u32 words);
-void audio_dsp_flushed(u32 addr, u32 n);
-// linear heap the voices' decoded sounds may still take (the renderer's textures leave it free)
-u32 audio_dsp_linear_reserve();
-#else
-static inline bool audio_dsp_native() { return false; }
-static inline void audio_dsp_frame(u32, u32) {}
-static inline void audio_dsp_flushed(u32, u32) {}
-#endif
+// (gone with the voices on the 3DS's DSP: platform/3ds/gx_pica.cpp still asks, until it doesn't)
+static inline u32 audio_dsp_linear_reserve() { return 0; }
 
 // ---- the sampling profiler (profile.cpp; NOMA_PROFILE=seconds in -DNOMA_PROFILE_CALLS builds)
 #ifdef NOMA_PROFILE_CALLS

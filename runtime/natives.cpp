@@ -40,7 +40,6 @@ void OSSwitchFPUContext(u32, u32) {}
 static u32 cache_lines(u32 a, u32 n) { return n ? (n + (a & 0x1F) + 0x1F) >> 5 : 0; }
 static void flushed(u32 a, u32 n) {
     guest::mem_mark_written(a, n);
-    guest::audio_dsp_flushed(a, n);  // sample data a voice plays (the 3DS's DSP reads memory)
 }
 void DCFlushRange(u32 a, u32 n) { flushed(a, n); }
 void DCStoreRange(u32 a, u32 n) { flushed(a, n); }
