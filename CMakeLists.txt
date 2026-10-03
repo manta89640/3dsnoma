@@ -88,6 +88,7 @@ set(RUNTIME_SOURCES
   runtime/natives.cpp
   runtime/threads.cpp
   runtime/patches/debug.cpp
+  runtime/patches/graphics.cpp
   runtime/patches/heap.cpp
   runtime/patches/offline.cpp
   runtime/patches/profile.cpp

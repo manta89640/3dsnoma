@@ -180,6 +180,8 @@ PATCHED_NAMES = {
     "wii_MessageData_Load", "VIWaitForRetrace", "app_Exit_Dispatch",
     # the profile's birth year: selectable up to 2099, not just the current year (runtime/patches/profile.cpp)
     "profile_BirthYear_Max",
+    # the frame renderer draws in one pass, not as two anti-aliased bands (runtime/patches/graphics.cpp)
+    "app_Renderer_ctor", "app_Renderer_SetAntiAlias",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes

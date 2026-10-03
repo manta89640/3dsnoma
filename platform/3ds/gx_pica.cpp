@@ -194,13 +194,13 @@ bool evict_texture() {
     return true;
 }
 
-// texture memory, from the linear heap: what the sound cache may still take and a little for
-// screenshots and read-backs stay free; older textures make room
+// texture memory, from the linear heap: a little stays free for screenshots and read-backs;
+// older textures make room
 bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     const u32 MARGIN = 512 << 10;
     u32 need = w * h * texel_bytes(f);
     for (;;) {
-        if (linearSpaceFree() >= need + audio_dsp_linear_reserve() + MARGIN && C3D_TexInit(t, w, h, f))
+        if (linearSpaceFree() >= need + MARGIN && C3D_TexInit(t, w, h, f))
             return true;
         if (!evict_texture())
             return C3D_TexInit(t, w, h, f);  // nothing left to drop: whatever fits
@@ -256,7 +256,7 @@ void upload(const GxTexture* gt, u8* out, u32 W, u32 H, GPU_TEXCOLOR fmt, bool r
 // the PICA texture for texture map `map`; scale: what to multiply its coordinates with
 C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     const GxTexture* gt = gx_texture(map);
-    if (!gt || gt->rgba.empty())
+    if (!gt || !gt->width)
         return nullptr;
     u32 mode = g_gx.bp[bp_tex(BP_TX_SETMODE0, map)];
     u32 ws = bits(mode, 0, 2), wt = bits(mode, 2, 2);
@@ -268,6 +268,11 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     GPU_TEXCOLOR fmt = pica_format(gt);
     if (e.version != gt->version || !e.tex.data) {
         NOMA_PROF_SCOPE("(gx texture upload)");
+        if (gt->rgba.empty()) {  // released after an earlier upload: decoded again
+            gt = gx_texture_pixels(map);
+            if (!gt || gt->rgba.empty())
+                return nullptr;
+        }
         if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt)) {
             P.dead.push_back(e.tex);
             e.tex.data = nullptr;
@@ -284,6 +289,7 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
         upload(gt, out, W, H, fmt, repeat);
         C3D_TexFlush(&e.tex);
         e.version = gt->version;
+        gx_texture_release(gt);  // the PICA texture has the pixels now
         e.sx = repeat ? 1.0f : (float)gt->width / (float)W;
         e.sy = repeat ? 1.0f : (float)gt->height / (float)H;
     }

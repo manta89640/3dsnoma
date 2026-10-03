@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <malloc.h>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -275,6 +276,27 @@ HostSignal* platform_signal_new() {
 void platform_signal(HostSignal* s) { LightEvent_Signal(&s->e); }
 void platform_wait(HostSignal* s, u64 timeout_us) { LightEvent_WaitTimeout(&s->e, (s64)timeout_us * 1000); }
 
+// ---- ARM exceptions (data/prefetch aborts, undefined instructions, VFP): logged with the
+// registers and the guest's function stack (profiling builds), where the process would otherwise
+// just end. Each thread that runs guest or GPU work sets the handler with its own stack.
+static void on_arm_exception(ERRF_ExceptionInfo* e, CpuRegisters* r) {
+    guest::fatal("ARM exception %u at pc %08lX (lr %08lX, sp %08lX), address %08lX, fsr %08lX; r0-r3 %08lX %08lX "
+                 "%08lX %08lX r4-r7 %08lX %08lX %08lX %08lX",
+                 (unsigned)e->type, r->pc, r->lr, r->sp, e->far, e->fsr, r->r[0], r->r[1], r->r[2], r->r[3],
+                 r->r[4], r->r[5], r->r[6], r->r[7]);
+}
+// operator new failing aborts without a word (-fno-exceptions): say so first
+static void on_out_of_memory() {
+    guest::fatal("out of memory: the heap has %u KB in use of %u KB", (u32)(mallinfo().uordblks >> 10),
+                 __ctru_heap_size >> 10);
+}
+static void catch_arm_exceptions() {
+    const u32 STACK = 32 << 10;
+    u8* stack = (u8*)memalign(8, STACK);
+    if (stack)
+        threadOnException(on_arm_exception, stack + STACK, WRITE_DATA_TO_HANDLER_STACK);
+}
+
 static void (*s_gpu_fn)();
 bool platform_gpu_thread_start(void (*fn)()) {
     if (getenv("NOMA_GX_INLINE"))
@@ -287,7 +309,12 @@ bool platform_gpu_thread_start(void (*fn)()) {
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     s_gpu_fn = fn;
-    Thread t = threadCreate([](void*) { s_gpu_fn(); }, nullptr, 128 * 1024, prio - 1, core, true);
+    Thread t = threadCreate(
+        [](void*) {
+            catch_arm_exceptions();
+            s_gpu_fn();
+        },
+        nullptr, 128 * 1024, prio - 1, core, true);
     if (!t) {
         log("gx: no thread on core %d: commands decoded on the main thread", core);
         return false;
@@ -429,6 +456,8 @@ __attribute__((constructor(101))) static void read_env_txt() {
 }
 
 int main(int argc, char** argv) {
+    guest::catch_arm_exceptions();
+    std::set_new_handler(guest::on_out_of_memory);
     osSetSpeedupEnable(true);
     gfxInitDefault();
     gfxSetDoubleBuffering(GFX_TOP, true);

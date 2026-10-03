@@ -40,6 +40,7 @@ struct Entry {
     u32 checked_frame = ~0u;
     u32 used_frame = 0;
     u32 gen = 0;           // write generation of its memory when last hashed
+    bool decoded = false;  // tex is up to date (its pixels may have been released since)
     u32 hashed_frame = 0;  // the frame it was last hashed in
 };
 // A texture's memory is hashed again when the guest marked it written (cache flushes, IOS and GPU
@@ -228,6 +229,8 @@ void gx_preload(u32 bp60, u32 bp61, u32 bp62, u32 bp63) {
     s_tmem_serial++;
 }
 
+bool s_want_pixels;  // gx_texture_pixels: decode again what was released
+
 const GxTexture* gx_texture(u32 map) {
     u32 img0 = g_gx.bp[bp_tex(BP_TX_SETIMAGE0, map)];
     u32 img1 = g_gx.bp[bp_tex(BP_TX_SETIMAGE1, map)];
@@ -263,19 +266,21 @@ const GxTexture* gx_texture(u32 map) {
     }
     Entry& e = s_cache[k];
     e.used_frame = s_frame;
-    if (e.checked_frame != s_frame || (preloaded && e.gen != s_tmem_serial)) {
+    const bool refill = s_want_pixels && e.decoded && e.tex.rgba.empty();
+    if (e.checked_frame != s_frame || (preloaded && e.gen != s_tmem_serial) || refill) {
         NOMA_PROF_SCOPE("(gx texture check)");
         e.checked_frame = s_frame;
         u32 gen = preloaded ? s_tmem_serial : mem_generation(k.addr, bytes);
-        if (!paletted && !e.tex.rgba.empty() && gen == e.gen && s_frame - e.hashed_frame < HASH_EVERY)
+        if (!paletted && e.decoded && !refill && gen == e.gen && s_frame - e.hashed_frame < HASH_EVERY)
             return &e.tex;
         e.gen = gen;
         e.hashed_frame = s_frame;
         u64 h = hash_bytes(src, bytes);
         if (paletted)
             h ^= hash_bytes(&s_tmem[k.tlut_addr], k.fmt == 8 ? 32 : k.fmt == 9 ? 512 : 0x8000) * 31;
-        if (h != e.hash || e.tex.rgba.empty()) {
+        if (h != e.hash || !e.decoded || refill) {
             e.hash = h;
+            e.decoded = true;
             e.tex.width = k.w;
             e.tex.height = k.h;
             e.tex.fmt = k.fmt;
@@ -304,6 +309,17 @@ void gx_texture_invalidate(u32 addr, u32 size) {
 }
 
 void gx_decode_texture(const u8* src, u32 fmt, u32 w, u32 h, u32* rgba) { decode(src, fmt, w, h, 0, 0, rgba); }
+
+void gx_texture_release(const GxTexture* t) {
+    std::vector<u32>().swap(const_cast<GxTexture*>(t)->rgba);
+}
+
+const GxTexture* gx_texture_pixels(u32 map) {
+    s_want_pixels = true;
+    const GxTexture* t = gx_texture(map);
+    s_want_pixels = false;
+    return t;
+}
 
 void gx_texture_frame() {
     s_frame++;

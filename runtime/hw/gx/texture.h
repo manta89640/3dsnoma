@@ -8,7 +8,7 @@ namespace guest {
 
 struct GxTexture {
     u32 width = 0, height = 0;
-    std::vector<u32> rgba;  // R in bits 0-7 ... A in bits 24-31 (host order)
+    std::vector<u32> rgba;  // R in bits 0-7 ... A in bits 24-31 (host order); empty once released
     u32 version = 0;        // changes whenever the contents are decoded again
     u32 id = 0;             // unique per cache entry
     u32 fmt = 0;            // the GX format it came from (paletted: and its palette's), for
@@ -17,6 +17,11 @@ struct GxTexture {
 
 // texture map 0-7 as the BP registers describe it now (null if it has no image)
 const GxTexture* gx_texture(u32 map);
+// A renderer that keeps the pixels itself (the 3DS: in a PICA texture) frees the RGBA8 copy
+// once it has it; gx_texture_pixels decodes it again if it is needed later (same version
+// semantics: a new decode is a new version).
+void gx_texture_release(const GxTexture* t);
+const GxTexture* gx_texture_pixels(u32 map);
 // the texture cache forgets textures not used for a while; called once per frame
 void gx_texture_frame();
 // TMEM (palettes): BP 0x65 copies main memory into it

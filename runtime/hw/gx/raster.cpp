@@ -917,7 +917,7 @@ static bool debug_draws() {
 }
 // once per draw (debug_draws counts its hits); what the other debug output follows
 static bool s_debug_now;
-// NOMA_DEBUG_DRAWS=rX0,Y0,X1,Y1,F: the first 60 draws after game frame F whose screen box
+// NOMA_DEBUG_DRAWS=rX0,Y0,X1,Y1,F[,N]: the first N (80) draws after game frame F whose screen box
 // (640x456 frame) has its centre inside the rectangle
 static bool debug_draws_rect(const GxOutVertex* out, u32 count);
 static bool debug_draws_now(const GxOutVertex* out, u32 count) {
@@ -927,10 +927,11 @@ bool gx_debug_frame() { return s_debug_now; }
 
 static bool debug_draws_rect(const GxOutVertex* out, u32 count) {
     static const char* e = getenv("NOMA_DEBUG_DRAWS");
-    static float r[5] = {0, 0, 0, 0, 0};
-    static bool on = e && e[0] == 'r' && sscanf(e + 1, "%f,%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3], &r[4]) == 5;
+    static float r[6] = {0, 0, 0, 0, 0, 80};
+    static bool on = e && e[0] == 'r' &&
+                     sscanf(e + 1, "%f,%f,%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3], &r[4], &r[5]) >= 5;
     static u32 s_hits;
-    if (!on || s_hits >= 600 || vi_game_frames() < (u32)r[4])
+    if (!on || s_hits >= (u32)r[5] || vi_game_frames() < (u32)r[4])
         return false;
     f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     for (u32 i = 0; i < count; i++) {
@@ -1094,7 +1095,8 @@ static void dump_texture_copy(const EfbCopy& c, u32 v) {
 
 void SoftRenderer::efb_copy(u32 v) {
     if (s_debug_now)
-        log("efb copy %06X", v);
+        log("efb copy %06X (clear color %04X%04X, z %06X)", v, g_gx.bp[BP_CLEAR_AR], g_gx.bp[BP_CLEAR_GB],
+            g_gx.bp[BP_CLEAR_Z]);
     s_copies++;
     const u32* bp = g_gx.bp;
     u32 sx = bits(bp[BP_EFB_TL], 0, 10), sy = bits(bp[BP_EFB_TL], 10, 10);
