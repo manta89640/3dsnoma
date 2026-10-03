@@ -178,6 +178,11 @@ PATCHED_NAMES = {
     "scene_TitleScene_Opening_OnOpeningEnd",  # ... and ends
     "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, the license agreement
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
+    "model_Weather_Read",  # the forecast, read through WiiConnect24: none offline
+    "comm_message_ReceiveMessageManager_WaitNextRead",  # the WC24 inbox, read again every 5 minutes
+    # the EC and WiiConnect24 managers' threads: waiting for requests offline instead of polling
+    "comm_ec_EcManager_UpdateOff", "comm_ec_EcManager_AddRequest",
+    "comm_nwc24_Nwc24Manager_UpdateClosed", "comm_nwc24_Nwc24Manager_AddRequest",
     # the AX's aux buses: their effect callbacks, logged as they're registered (engine/audio/aux.cpp)
     "AXRegisterAuxACallback", "AXRegisterAuxBCallback", "AXRegisterAuxCCallback",
     # parts about the Wii itself, left out on the 3DS (runtime/patches/wii_parts.cpp): the Wii Remote

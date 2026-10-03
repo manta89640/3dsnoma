@@ -19,6 +19,12 @@ void scene_TitleScene_PosterInfoLoader_Update_orig(u32 r3);
 u32 scene_FirstSetupScene_StateWelcome_OnEnd_orig(u32 r3, u32 r4);
 u32 scene_TitleScene_Opening_OnLogoEnd_orig(u32 r3);
 u32 scene_TitleScene_Opening_OnOpeningEnd_orig(u32 r3);
+u32 model_Weather_Read_orig(u32 r3);
+void comm_message_ReceiveMessageManager_WaitNextRead_orig(u32 r3);
+u32 comm_ec_EcManager_UpdateOff_orig(u32 r3);
+void comm_ec_EcManager_AddRequest_orig(u32 r3, u32 r4);
+u32 comm_nwc24_Nwc24Manager_UpdateClosed_orig(u32 r3);
+void comm_nwc24_Nwc24Manager_AddRequest_orig(u32 r3, u32 r4);
 
 // The title scene's startup task (TitleScene + 0x150): the WiiConnect24 friend data
 // (comm_friends_FriendInitializer_ReadNwc24Friends, local), then the online checks (comm_friends_FriendInitializer_CheckOnline: network up to the DWC_Tac
@@ -137,6 +143,101 @@ u32 scene_TitleScene_Opening_OnOpeningEnd(u32 r3) {
     if (guest::net_offline() && M2C_FIELD(r3, gp<s32>, 0x0) == 2)
         M2C_FIELD(r3, gp<s32>, 0x4) = 1;
     return r;
+}
+
+// ---- background services. The channel keeps managers on threads of their own that work
+// through requests from the rest of the program; offline some have nothing to do at all.
+
+// model::Weather reads the Forecast Channel's forecast (its WiiConnect24 download) at the start
+// and when the room comes up after 30 minutes, on a thread of its own: through the WC24
+// library, opened for it by the Nwc24Manager (11 files and devices). Offline, and on a 3DS,
+// there is no forecast to read: the thread ends as it does when the library can't be opened
+// (+0 done, no data at +2), and the room shows its weather without one.
+u32 model_Weather_Read(u32 r3) {
+    if (!guest::net_offline())
+        return model_Weather_Read_orig(r3);
+    M2C_FIELD(r3, gp<s8>, 0x0) = 1;
+    return 0;
+}
+
+// comm::message::ReceiveMessageManager reads the WiiConnect24 inbox at the start, then again
+// every 5 minutes (+0x3BBC: 5 waits until the time at +0x3BB0, then 0 reads again). Offline
+// nothing delivers mail, so the inbox read at the start is the last: it waits for good.
+void comm_message_ReceiveMessageManager_WaitNextRead(u32 r3) {
+    if (!guest::net_offline())
+        comm_message_ReceiveMessageManager_WaitNextRead_orig(r3);
+}
+
+// The EC manager (comm::ec::EcManager, the Wii Shop's library) and the Nwc24Manager (the
+// WiiConnect24 library, opened for its users) are request queues with a thread each that looks
+// at its queue every 16 ms, idle or not. Offline they wait instead: when the thread finds itself
+// idle (the EC library off and nothing asked: state 0 at its target 2; the WC24 library closed
+// and no request), it suspends itself until a request is added, which resumes it.
+namespace {
+
+struct IdleWait {
+    u32 thread = 0;  // the manager's thread (an OSThread) while it waits
+
+    // the manager's thread: suspended if `idle` still holds with interrupts off, so that a
+    // request added from another thread can't come between the check and the suspend
+    template <class F>
+    void wait_while(F idle) {
+        u32 level = NOMA_HI32(OSDisableInterrupts());
+        if (idle()) {
+            thread = OSGetCurrentThread();
+            OSSuspendThread(thread);
+            thread = 0;
+        }
+        OSRestoreInterrupts(level);
+    }
+    // a request was added: the thread looks at it (a resume of a thread that isn't suspended
+    // does nothing)
+    void wake() {
+        if (thread)
+            OSResumeThread(thread);
+    }
+};
+
+IdleWait s_ec_idle, s_nwc24_idle;
+
+// an empty list head (next and prev pointing back at it)
+bool list_empty(u32 head) { return guest::load32(head) == head && guest::load32(head + 4) == head; }
+
+}  // namespace
+
+// EcManager state 0 (the library off): returns 1 when the target is off too (+0x53C8 == 2),
+// after marking the current request (+0x53C4) done if it asked for that.
+u32 comm_ec_EcManager_UpdateOff(u32 r3) {
+    u32 r = comm_ec_EcManager_UpdateOff_orig(r3);
+    if (r == 1 && guest::net_offline()) {
+        s_ec_idle.wait_while([r3] {
+            return list_empty(r3 + 0x53BC) && M2C_FIELD(r3, gp<s32>, 0x53C8) == 2;
+        });
+        return 0;  // (look at the queue again at once)
+    }
+    return r;
+}
+
+void comm_ec_EcManager_AddRequest(u32 r3, u32 r4) {
+    comm_ec_EcManager_AddRequest_orig(r3, r4);
+    if (guest::net_offline())
+        s_ec_idle.wake();
+}
+
+// Nwc24Manager state 0 (the library closed): returns 1 when no request is queued (+0x3A8).
+u32 comm_nwc24_Nwc24Manager_UpdateClosed(u32 r3) {
+    u32 r = comm_nwc24_Nwc24Manager_UpdateClosed_orig(r3);
+    if (r == 1 && guest::net_offline()) {
+        s_nwc24_idle.wait_while([r3] { return list_empty(r3 + 0x3A8); });
+        return 0;
+    }
+    return r;
+}
+
+void comm_nwc24_Nwc24Manager_AddRequest(u32 r3, u32 r4) {
+    comm_nwc24_Nwc24Manager_AddRequest_orig(r3, r4);
+    if (guest::net_offline())
+        s_nwc24_idle.wake();
 }
 
 }  // namespace g
