@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 from ppc.decode import decode  # noqa: E402
 from ppc.dol import Dol  # noqa: E402
 from ppc.symbols import SymbolTable  # noqa: E402
-from decomp.regions import REGIONS, region_of  # noqa: E402
+from decomp.regions import KEEP, REGIONS, region_of  # noqa: E402
 
 M2C_DIR = os.environ.get("M2C_DIR", os.path.expanduser("~/devkitpro-3ds/decomp-tools/m2c"))
 OUT = os.path.join(ROOT, "build", "decomp")
@@ -383,7 +383,7 @@ def treatments(dol, st, protos):
         rname, how = region_of(f.addr)
         if f.name in NATIVE_NAMES:
             t = "native"
-        elif how == "stub":
+        elif how == "stub" and f.addr not in KEEP:
             t = "stub"
         elif f.addr in native_auto:
             t = "native"

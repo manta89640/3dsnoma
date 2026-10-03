@@ -38,12 +38,34 @@ REGIONS = [
     # the content players, left out (runtime/patches/players.cpp): nothing starts them
     (0x804922E0, 0x804C4D90, "mobiclip", "stub"),       # Actimagine MobiClip (video)
     (0x804C4D90, 0x804CF4DC, "rfl", "decomp"),          # from RFLGetWorkSize
-    (0x804CF4DC, 0x80520000, "atok", "decomp"),
-    (0x80520000, 0x8055BB2C, "swkbd", "decomp"),        # (its last function: 0x8055BA10)
+    # the SDK's software keyboard and its ATOK text conversion, left out: the 3DS's keyboard took
+    # their place (engine/system/keyboard.cpp); KEEP below is what the rest still reaches in them
+    (0x804CF4DC, 0x80520000, "atok", "stub"),
+    (0x80520000, 0x8055BB2C, "swkbd", "stub"),          # (its last function: 0x8055BA10)
+    # (its 14 static constructors, which fill only its own tables, run at boot as stubs: 14
+    # "stub:" log lines)
     (0x8055BB2C, 0x806D50A0, "flash", "stub"),          # Adobe Flash
     # (Flash's static constructor, fn_8057F784 in .ctors, runs at boot as a stub: its one
     # "stub:" log line)
 ]
+
+# Functions in stubbed regions that the rest of the program still reaches (tools/decomp/reachable.py
+# --range): they stay decompiled. In the keyboard's ranges, one-line accessors that the linker
+# shared between its classes and the channel's.
+KEEP = {
+    0x8051E8F0: "shared_GetWord10",
+    0x8051E900: "shared_GetByte04",
+    0x8051E960: "shared_GetWord14",
+    0x80520BB0: "shared_GetWord04",
+    0x8052DC20: "shared_GetWord08",
+    0x8052DFE0: "shared_GetByte14",
+    0x80536B20: "shared_GetByte104",
+    0x80536D20: "shared_GetByte15",
+    0x80538C90: "shared_GetByte18",
+    0x80541440: "shared_Return2",
+    0x80547020: "shared_Return5",
+    0x80550D40: "shared_Return3",
+}
 
 
 def region_of(addr):
