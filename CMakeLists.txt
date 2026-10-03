@@ -54,6 +54,7 @@ endif()
 # ---- the engine: native 3DS code replacing the program's SDK functions ----
 set(ENGINE_SOURCES
   engine/audio/aux.cpp
+  engine/audio/ax_render.cpp
   engine/audio/dsp_ndsp.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp

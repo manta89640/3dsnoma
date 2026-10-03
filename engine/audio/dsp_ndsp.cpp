@@ -429,13 +429,14 @@ void process_pbs(u32 pb) {
         u32 ratio = pb32(pb, PB_RATIO);
         ndspChnSetRate(ch, pb16(pb, PB_SRC_TYPE) == 2 ? 32000.0f : 32000.0f * (float)ratio / 65536.0f);
         set_volume(ch, pb);
-        // the one-pole low-pass nw4r sets per note: y = a0·x + b0·y[n-1] (1.15); the DSP's mono
-        // IIR computes y = b0·x + a1·y[n-1] from what ndspChnIirMonoSetParamsCustomFilter takes
+        // the one-pole low-pass nw4r sets per note: y = a0·x + b0·y[n-1] (1.15). The DSP's mono
+        // IIR is y = b0·x + a1·y[n-1] (H(z) = b0 / (1 - a1·z^-1)); libctru's
+        // ndspChnIirMonoSetParamsCustomFilter(a0, a1, b0) hands it b0/a0 and -a1/a0
         u16 lpf_on = pb16(pb, PB_LPF), a0 = pb16(pb, PB_LPF + 4), b0 = pb16(pb, PB_LPF + 6);
         if (!v->lpf_set || lpf_on != v->lpf_on || (lpf_on && (a0 != v->lpf_a0 || b0 != v->lpf_b0))) {
             ndspChnIirMonoSetEnable(ch, lpf_on != 0);
             if (lpf_on)
-                ndspChnIirMonoSetParamsCustomFilter(ch, 1.0f, b0 / 32768.0f, a0 / 32768.0f);
+                ndspChnIirMonoSetParamsCustomFilter(ch, 1.0f, -(b0 / 32768.0f), a0 / 32768.0f);
             v->lpf_set = true, v->lpf_on = lpf_on, v->lpf_a0 = a0, v->lpf_b0 = b0;
         }
         // what the DSP writes back: where the voice is, and whether it still runs

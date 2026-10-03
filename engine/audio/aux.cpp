@@ -11,15 +11,22 @@ u64 AXRegisterAuxACallback_orig(u32 callback, u32 context);
 void AXRegisterAuxBCallback_orig(u32 callback, u32 context);
 void AXRegisterAuxCCallback_orig(u32 callback, u32 context);
 
+static void log_aux(char bus, u32 callback, u32 context) {
+    guest::log("ax: aux %c callback %08X (context %08X)", bus, callback, context);
+}
+
 u64 AXRegisterAuxACallback(u32 callback, u32 context) {
+    log_aux('A', callback, context);
     return AXRegisterAuxACallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
 }
 
 void AXRegisterAuxBCallback(u32 callback, u32 context) {
+    log_aux('B', callback, context);
     AXRegisterAuxBCallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
 }
 
 void AXRegisterAuxCCallback(u32 callback, u32 context) {
+    log_aux('C', callback, context);
     AXRegisterAuxCCallback_orig(guest::audio_dsp_native() ? 0 : callback, context);
 }
 

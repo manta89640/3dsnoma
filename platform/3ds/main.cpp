@@ -77,10 +77,8 @@ static void audio_init() {
         return;
     }
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
-    if (s_guest_linear) {  // the voices play on the DSP; the AI DMA's (silent) blocks go nowhere
-        audio_dsp_init();
-        return;
-    }
+    // the AX voices are mixed natively (engine/audio/ax_render.cpp, as the Wii's DSP mixes them:
+    // every voice, ramp, filter and aux effect), and the DSP plays the AI DMA's frames
     ndspChnReset(0);
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
     ndspChnSetRate(0, 32000.0f);
@@ -188,16 +186,14 @@ void platform_fatal(const char* msg) {
 
 void platform_backtrace(const char* why) { log("%s", why); }
 
-// Guest memory (MEM1, MEM2: 96 MB) lives in the linear heap, where the 3DS's DSP can read it: the
-// voices play the game's samples where they are (engine/audio/dsp_ndsp.cpp). If it doesn't fit,
-// the normal heap holds it and the CPU mixes the sound (runtime/hw/dsp_ax.cpp).
+// Guest memory (MEM1, MEM2: 96 MB) goes in the linear heap while it fits, else in the normal heap.
 
 void* platform_alloc_guest(u32 size) {
     void* p = s_guest_linear ? linearAlloc(size) : nullptr;
     if (!p) {
         if (s_guest_linear)
-            log("memory: no %u MB in the linear heap (%u KB free): guest memory in the heap, sound mixed by "
-                "the CPU", size >> 20, (u32)(linearSpaceFree() >> 10));
+            log("memory: no %u MB in the linear heap (%u KB free): guest memory in the heap", size >> 20,
+                (u32)(linearSpaceFree() >> 10));
         s_guest_linear = false;
         return calloc(1, size);
     }
