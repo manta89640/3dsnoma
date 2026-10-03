@@ -21,13 +21,10 @@
 //          std::tr1::function<void(bool)> wrappers (0x6C bytes each), as in the SDK keyboard
 //   +0x460 mode (KeyboardMode)               +0x464 the scene's cursor object, while open
 #include "noma_decomp.h"
+#include "runtime/hw/gx/gx.h"
 #include "runtime/runtime.h"
 
 #include <string>
-
-namespace guest {
-void gx_sync();
-}
 
 namespace {
 
@@ -146,7 +143,7 @@ u32 keyboard_Keyboard_Open(u32 k, u32 cursor) {
     in.multiline = mode != 5 && field(k, MAX_LINES) > 1;
     in.text = utf8_of(field(k, TEXT), MAX_LENGTH);
     in.title = utf8_of(field(k, TITLE), 256);
-    guest::gx_sync();  // (the GPU's thread idle while the keyboard has the screens)
+    guest::gx_end_frame_for_applet();  // (the GPU idle, no frame open, while the keyboard has the screens)
     std::string out;
     bool ok = guest::platform_text_input(in, out);
     guest::log("keyboard: mode %u, max %u: %s", mode, in.max_length, ok ? "entered" : "cancelled");
