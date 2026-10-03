@@ -41,6 +41,8 @@ REGIONS = [
     (0x804CF4DC, 0x80520000, "atok", "decomp"),
     (0x80520000, 0x8055BB2C, "swkbd", "decomp"),        # (its last function: 0x8055BA10)
     (0x8055BB2C, 0x806D50A0, "flash", "stub"),          # Adobe Flash
+    # (Flash's static constructor, fn_8057F784 in .ctors, runs at boot as a stub: its one
+    # "stub:" log line)
 ]
 
 
