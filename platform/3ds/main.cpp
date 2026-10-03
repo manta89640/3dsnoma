@@ -396,6 +396,28 @@ bool platform_audio_thread_start(void (*fn)()) {
     return true;
 }
 
+// ---- the I/O thread (runtime/hw/ios/ios.cpp): on the main thread's core, above it; it mostly
+// waits for the SD card in the FS service, and the guest runs meanwhile
+static void (*s_io_fn)();
+bool platform_io_thread_start(void (*fn)()) {
+    if (getenv("NOMA_IO_INLINE"))
+        return false;
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    s_io_fn = fn;
+    Thread t = threadCreate(
+        [](void*) {
+            catch_arm_exceptions();
+            s_io_fn();
+        },
+        nullptr, 32 * 1024, prio - 1, -2, true);
+    if (!t) {
+        log("ios: no I/O thread: reads are done at once");
+        return false;
+    }
+    return true;
+}
+
 // ---- input: the 3DS controls as a Wii Remote
 static WiimoteInput s_in;
 

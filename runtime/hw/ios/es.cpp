@@ -1,4 +1,5 @@
 // /dev/es: title information and the channel's own contents (what the CNT library reads).
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,9 +13,11 @@ namespace guest {
 static const u64 TITLE_ID = 0x000100014843494Aull;  // 00010001-HCIJ
 static const bool s_debug = getenv("NOMA_DEBUG_ES") != nullptr;
 
+// (the position is kept here: the file itself may be in use by the I/O thread)
 struct ContentHandle {
     FILE* f = nullptr;
     u32 index = 0;
+    u64 pos = 0, size = 0;
 };
 
 // A ticket view (0xD8 bytes: a version word, then the ticket from its ticket id on, which leaves
@@ -32,8 +35,10 @@ class EsDevice : public IosHandle {
 public:
     std::map<u32, ContentHandle> contents;
     u32 next_cfd = 1;
+    bool pending = false;  // the read is on the I/O thread: it answers later
 
     ~EsDevice() override {
+        ios_async_drain();
         for (auto& c : contents)
             if (c.second.f)
                 fclose(c.second.f);
@@ -47,13 +52,19 @@ public:
             log("es: content %u missing (%s%s)", index, content_dir().c_str(), name);
             return ES_ENOENT;
         }
+        fseek(f, 0, SEEK_END);
+        u64 size = (u64)ftell(f);
+        rewind(f);
         u32 cfd = next_cfd++;
-        contents[cfd] = {f, index};
+        contents[cfd] = {f, index, 0, size};
         log("es: open content %u -> cfd %u", index, cfd);
         return (s32)cfd;
     }
 
+    bool reply_now() override { return !pending; }
+
     s32 ioctlv(u32 cmd, const std::vector<IoVec>& in, const std::vector<IoVec>& io) override {
+        pending = false;
         switch (cmd) {
         case 0x20:  // GetTitleID
             store64(io[0].addr, TITLE_ID);
@@ -76,19 +87,29 @@ public:
             auto it = contents.find(load32(in[0].addr));
             if (it == contents.end())
                 return ES_EINVAL;
-            std::vector<u8> tmp(io[0].size);
-            long at = ftell(it->second.f);
-            size_t n = fread(tmp.data(), 1, io[0].size, it->second.f);
-            write_g(io[0].addr, tmp.data(), (u32)n);
+            ContentHandle& c = it->second;
+            u64 at = c.pos;
+            u32 n = (u32)std::min<u64>(io[0].size, c.size > at ? c.size - at : 0);
+            c.pos += n;
             static int s_n;
             if (s_n++ < 40 || s_debug)
-                log("es: read content cfd %u at %ld: %u bytes -> %zu", load32(in[0].addr), at, io[0].size, n);
-            return (s32)n;
+                log("es: read content cfd %u at %llu: %u bytes -> %u", load32(in[0].addr), (unsigned long long)at,
+                    io[0].size, n);
+            if (ios_async_read(cur_request, c.f, at, io[0].addr, n)) {
+                pending = true;
+                return 0;
+            }
+            ios_async_drain();
+            std::vector<u8> tmp(n);
+            size_t got = ios_read_at(c.f, at, tmp.data(), n);
+            write_g(io[0].addr, tmp.data(), (u32)got);
+            return (s32)got;
         }
         case 0x0B: {  // CloseContent
             auto it = contents.find(load32(in[0].addr));
             if (it == contents.end())
                 return ES_EINVAL;
+            ios_async_drain();
             fclose(it->second.f);
             contents.erase(it);
             return IOS_OK;
@@ -99,11 +120,15 @@ public:
                 return ES_EINVAL;
             s32 off = (s32)load32(in[1].addr);
             u32 whence = load32(in[2].addr);
-            fseek(it->second.f, off, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+            ContentHandle& c = it->second;
+            s64 to = (s64)(whence == 0 ? 0 : whence == 1 ? c.pos : c.size) + off;
+            if (to >= 0)  // (a seek before the start fails and leaves the position)
+                c.pos = (u64)to;
             static int s_n;
             if (s_n++ < 40 || s_debug)
-                log("es: seek content cfd %u to %d (whence %u) -> %ld", load32(in[0].addr), off, whence, ftell(it->second.f));
-            return (s32)ftell(it->second.f);
+                log("es: seek content cfd %u to %d (whence %u) -> %llu", load32(in[0].addr), off, whence,
+                    (unsigned long long)c.pos);
+            return (s32)c.pos;
         }
         case 0x16:  // GetConsumption: no limits
             if (io.size() > 1)

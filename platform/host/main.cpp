@@ -136,6 +136,13 @@ bool platform_gpu_thread_start(void (*fn)()) {
     std::thread(fn).detach();
     return true;
 }
+// (NOMA_IO_INLINE=1: reads on the CPU's thread, as with NOMA_GX_INLINE)
+bool platform_io_thread_start(void (*fn)()) {
+    if (getenv("NOMA_IO_INLINE"))
+        return false;
+    std::thread(fn).detach();
+    return true;
+}
 // NOMA_AX_THREAD=1: the AX frames on a thread of their own, as the New 3DS can (the host doesn't
 // need it; for testing that path)
 bool platform_audio_thread_start(void (*fn)()) {

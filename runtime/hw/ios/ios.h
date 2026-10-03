@@ -1,5 +1,6 @@
 // IOS (the Wii's ARM-side OS) emulation: the requests the decompiled SDK sends over IPC.
 #pragma once
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -63,6 +64,17 @@ public:
 
 // Answer a request that a device kept pending.
 void ios_complete(u32 request_phys, s32 result);
+
+// Reads on the I/O thread (ios.cpp): n bytes of f at off into guest memory at addr, answering the
+// request with n when they are there. False: do the read now (no I/O thread, or the buffer spans
+// two banks). Whatever touches a file on the CPU's thread drains first (ios_async_drain), as the
+// I/O thread may be using it.
+bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n);
+size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n);  // the read itself (either thread)
+void ios_async_drain();  // wait for every read in flight and send its reply
+void ios_async_poll();   // (poll_devices) replies for the reads done
+bool ios_async_busy();   // reads in flight
+void ios_async_wait(u64 us);  // until a read is done, or at most us
 
 // device factories (by path)
 std::unique_ptr<IosHandle> fs_open_device();

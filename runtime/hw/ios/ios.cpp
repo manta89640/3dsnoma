@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include <atomic>
 #include <map>
 
 namespace guest {
@@ -98,6 +99,90 @@ static void reply(u32 req, s32 result) {
 }
 
 void ios_complete(u32 request_phys, s32 result) { reply(phys_to_virt(request_phys), result); }
+
+// ---- the I/O thread: reads while the guest runs on, as IOS reads beside the Wii's CPU. The
+// requests stay pending; the replies go out from the device poll, in the order of the reads.
+namespace {
+struct IoJob {
+    FILE* f;
+    u64 off;
+    u8* dst;
+    u32 n;
+    u32 request;
+    s32 result;
+};
+const u32 IO_JOBS = 64;
+IoJob s_jobs[IO_JOBS];
+std::atomic<u32> s_job_put{0}, s_job_done{0};  // queued (CPU's thread), finished (I/O thread)
+u32 s_job_replied;                              // answered (CPU's thread)
+HostSignal *s_io_wake, *s_io_done;
+int s_io_state;  // 0: not started, 1: running, -1: none (reads are done at once)
+
+void io_thread();
+}  // namespace
+
+// NOMA_READ_MBPS=N: reads take as long as at N MB/s (the 3DS's SD card on a fast host)
+size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n) {
+    static int s_mbps = getenv("NOMA_READ_MBPS") ? atoi(getenv("NOMA_READ_MBPS")) : 0;
+    u64 t0 = s_mbps > 0 ? host_time_us() : 0;
+    size_t got = fseek(f, (long)off, SEEK_SET) == 0 ? fread(dst, 1, n, f) : 0;
+    if (s_mbps > 0) {
+        u64 until = t0 + (u64)n / (u64)s_mbps;  // (bytes / (MB/s) = microseconds)
+        if (host_time_us() < until)
+            host_sleep_us(until - host_time_us());
+    }
+    return got;
+}
+
+namespace {
+void io_thread() {
+    for (;;) {
+        u32 d = s_job_done.load(std::memory_order_relaxed);
+        if (d == s_job_put.load(std::memory_order_acquire)) {
+            platform_wait(s_io_wake, 100000);
+            continue;
+        }
+        IoJob& j = s_jobs[d % IO_JOBS];
+        j.result = (s32)ios_read_at(j.f, j.off, j.dst, j.n);
+        s_job_done.store(d + 1, std::memory_order_release);
+        platform_signal(s_io_done);
+    }
+}
+}  // namespace
+
+bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n) {
+    if (s_io_state == 0) {
+        s_io_wake = platform_signal_new(), s_io_done = platform_signal_new();
+        s_io_state = platform_io_thread_start(io_thread) ? 1 : -1;
+    }
+    u8* p = host_ptr(addr);
+    if (s_io_state < 0 || !n || !p || host_ptr(addr + n - 1) != p + n - 1)
+        return false;
+    u32 put = s_job_put.load(std::memory_order_relaxed);
+    while (put - s_job_replied >= IO_JOBS)
+        ios_async_wait(1000), ios_async_poll();
+    s_jobs[put % IO_JOBS] = {f, off, p, n, request_phys, 0};
+    s_job_put.store(put + 1, std::memory_order_release);
+    platform_signal(s_io_wake);
+    return true;
+}
+
+void ios_async_poll() {
+    u32 done = s_job_done.load(std::memory_order_acquire);
+    for (; s_job_replied != done; s_job_replied++) {
+        const IoJob& j = s_jobs[s_job_replied % IO_JOBS];
+        ios_complete(j.request, j.result);
+    }
+}
+
+bool ios_async_busy() { return s_job_replied != s_job_put.load(std::memory_order_relaxed); }
+
+void ios_async_wait(u64 us) { platform_wait(s_io_done, us); }
+
+void ios_async_drain() {
+    while (ios_async_busy())
+        ios_async_wait(1000), ios_async_poll();
+}
 
 void ios_execute(u32 request_phys) {
     NOMA_PROF_SCOPE("(ios)");

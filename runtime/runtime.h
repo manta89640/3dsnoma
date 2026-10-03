@@ -63,6 +63,9 @@ bool platform_gpu_thread_start(void (*fn)());
 // The audio thread, which mixes the AX frames (runtime/hw/dsp_hle.cpp) like the Wii's DSP beside
 // its CPU; false where there is no spare core for it (the frames are then mixed inline).
 bool platform_audio_thread_start(void (*fn)());
+// The I/O thread, which reads the channel's contents for IOS (runtime/hw/ios/ios.cpp) while the
+// guest runs on; false where it can't start (reads are then done at once).
+bool platform_io_thread_start(void (*fn)());
 // a wake-up between host threads: one waiting thread wakes per signal (or at the timeout)
 struct HostSignal;
 HostSignal* platform_signal_new();

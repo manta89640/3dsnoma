@@ -58,6 +58,9 @@ static void deliver(int kind) {
 
 void ai_tick();
 void net_tick();
+void ios_async_poll();
+bool ios_async_busy();
+void ios_async_wait(u64 us);
 void ipc_tick();
 bool ipc_reply_waiting();
 
@@ -73,6 +76,7 @@ void poll_devices() {
     dsp_tick(now);
     ai_tick();
     ipc_tick();
+    ios_async_poll();
     gx_poll();
     // the sockets (system calls on the 3DS) at most every millisecond
     static u64 s_slow;
@@ -151,7 +155,10 @@ void idle_wait() {
         }
         if (ipc_reply_waiting())
             continue;  // posted at the next poll
-        host_sleep_us(500);
+        if (ios_async_busy())
+            ios_async_wait(500);  // a read in flight: its end wakes us
+        else
+            host_sleep_us(500);
     }
 }
 

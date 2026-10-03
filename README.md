@@ -137,7 +137,8 @@ Useful environment variables:
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
-| `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us` | slow guest code / file writes down to reproduce 3DS timing on the host |
+| `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
+| `NOMA_IO_INLINE=1` | read the channel's contents on the CPU's thread instead of the I/O thread |
 
 On the 3DS, the same switches go in `sdmc:/3ds/noma/env.txt` as `KEY=VALUE` lines (including
 `NOMA_INPUT`, for unattended runs in an emulator); there `NOMA_SHOT_EVERY=N` also saves every
