@@ -1,7 +1,8 @@
 // NOMA_INPUT: scripted Wii Remote input, "TIME:BUTTONS[:SECONDS],..." -- e.g. "3:A,6.5:A+B:1"
 // presses A at 3 s and A+B for one second at 6.5 s (a press lasts 0.15 s by default).
 // Buttons: A B 1 2 + - H(ome) U D L R; "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
-// would: the platform's own input (the touch screen, the circle pad) moves it on. Times are on the game's
+// would: the platform's own input (the touch screen, the circle pad) moves it on; "OFF" presses the
+// Wii's power button once (what closing from the 3DS's HOME Menu does). Times are on the game's
 // clock: the frames it has finished, 60 to a second (so a script reaches the same screens
 // however fast the machine runs the game); both platforms merge the script into their input.
 // A time can also count from a text: "M0x10255+1.5:A" presses A 1.5 s (game time) after the
@@ -16,6 +17,7 @@
 
 #include "engine/input/remote.h"
 #include "../hw.h"
+#include "ios.h"
 
 namespace guest {
 
@@ -24,7 +26,7 @@ namespace {
 struct ScriptEvent {
     double t, len;
     u16 buttons;
-    bool point;
+    bool point, power;
     float x, y;
     bool after_message;  // t counts from the first time the game asked for message `message`
     u32 message;
@@ -50,7 +52,7 @@ const std::vector<ScriptEvent>& script() {
             q = sc.size();
         std::string item = sc.substr(p, q - p);
         p = q + 1;
-        ScriptEvent ev{0, 0.15, 0, false, 0, 0, false, 0};
+        ScriptEvent ev{0, 0.15, 0, false, false, 0, 0, false, 0};
         size_t c1 = item.find(':');
         if (c1 == std::string::npos)
             continue;
@@ -70,7 +72,9 @@ const std::vector<ScriptEvent>& script() {
             ev.len = atof(what.substr(c2 + 1).c_str());
             what = what.substr(0, c2);
         }
-        if (!what.empty() && what[0] == 'P') {
+        if (what == "OFF") {
+            ev.power = true;
+        } else if (!what.empty() && what[0] == 'P') {
             ev.point = true;
             sscanf(what.c_str(), "P(%f;%f)", &ev.x, &ev.y);
         } else {
@@ -144,7 +148,7 @@ void input_script_message(u32 id, u32 text) {
 void input_script_apply(WiimoteInput& in) {
     double t = vi_game_frames() / 60.0;
     const std::vector<ScriptEvent>& s = script();
-    static std::vector<bool> s_moved;  // the P events that have moved the pointer
+    static std::vector<bool> s_moved;  // the P and OFF events that have happened
     s_moved.resize(s.size());
     for (size_t i = 0; i < s.size(); i++) {
         const ScriptEvent& ev = s[i];
@@ -155,7 +159,10 @@ void input_script_apply(WiimoteInput& in) {
                 continue;
             at += m->second;
         }
-        if (ev.point) {
+        if (ev.power) {
+            if (t >= at && !s_moved[i])
+                stm_power_event(), s_moved[i] = true;
+        } else if (ev.point) {
             if (t >= at && !s_moved[i])
                 in.x = ev.x, in.y = ev.y, s_moved[i] = true;
         } else if (t >= at && t < at + ev.len) {

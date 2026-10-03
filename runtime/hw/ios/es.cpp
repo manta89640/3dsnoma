@@ -137,14 +137,23 @@ public:
 std::unique_ptr<IosHandle> es_open_device() { return std::make_unique<EsDevice>(); }
 
 // ---------------------------------------------------------------------------- /dev/stm
+class StmDevice;
+static StmDevice* s_event_hook;  // the event hook device, while it has a request waiting
+
 class StmDevice : public IosHandle {
 public:
     bool eventhook = false;
     bool pending = false;
+    u32 hook = 0, hook_out = 0;  // the event hook's request and its output buffer, while waiting
+    ~StmDevice() override {
+        if (s_event_hook == this)
+            s_event_hook = nullptr;
+    }
     s32 ioctl(u32 cmd, u32 in, u32 in_len, u32 out, u32 out_len) override {
         pending = false;
         if (eventhook && cmd == 0x1000) {
-            pending = true;  // answered when the power/reset button is pressed (never here)
+            pending = true;  // answered when the power button is pressed (stm_power_event)
+            hook = cur_request, hook_out = out, s_event_hook = this;
             return IOS_OK;
         }
         switch (cmd) {
@@ -156,8 +165,11 @@ public:
         case 0x2004:  // idle (standby with WiiConnect24)
             platform_quit("the game turned the console off");
             return IOS_OK;
+        case 0x3002:  // release the event hook (its request is left unanswered)
+            if (s_event_hook)
+                s_event_hook->hook = 0, s_event_hook = nullptr;
+            return IOS_OK;
         case 0x3001:  // get idle mode
-        case 0x3002:  // release the event hook
         case 0x5001:  // VI dimming
         case 0x6001:  // LED flash
         case 0x6002:  // LED mode
@@ -173,6 +185,19 @@ std::unique_ptr<IosHandle> stm_open_device(const std::string& path) {
     auto h = std::make_unique<StmDevice>();
     h->eventhook = path == "/dev/stm/eventhook";
     return h;
+}
+
+// The power button: the event hook answers with event 0x800, and the SDK calls the game's power
+// callback (OSSetPowerCallback), which ends the game as it would end on the Wii.
+bool stm_power_event() {
+    StmDevice* d = s_event_hook;
+    if (!d || !d->hook)
+        return false;
+    log("stm: the power button");
+    store32(d->hook_out, 0x800);
+    ios_complete(d->hook, IOS_OK);
+    d->hook = 0, s_event_hook = nullptr;
+    return true;
 }
 
 }  // namespace guest

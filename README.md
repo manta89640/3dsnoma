@@ -121,7 +121,7 @@ Useful environment variables:
 | variable | effect |
 | --- | --- |
 | `NOMA_DUMP_FRAMES=N` | write every Nth displayed frame to `frames/NNNNN.png` |
-| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them |
+| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `OFF` presses the Wii's power button (as closing from the HOME Menu does) |
 | `NOMA_DEBUG_MSG=1` | log each text (BMG message) the game asks for, the first time, with its id and the game time: the screens a run went through, without frames |
 | `NOMA_OFFLINE=0` | go online (the default is offline: no network, online steps skipped) |
 | `NOMA_PROFILE=seconds` | profiling builds (`-DNOMA_PROFILE_CALLS=ON`): where the time goes |
@@ -151,7 +151,9 @@ The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engin
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.
 The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button suspends the app):
-`engine/system/home_button.cpp` keeps it from loading or opening.
+`engine/system/home_button.cpp` keeps it from loading or opening. Closing the app from the HOME
+Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
+progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
 
 ## Layout
 

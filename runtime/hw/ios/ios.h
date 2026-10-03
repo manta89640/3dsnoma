@@ -70,6 +70,8 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
 std::unique_ptr<IosHandle> es_open_device();
 std::unique_ptr<IosHandle> di_open_device();
 std::unique_ptr<IosHandle> stm_open_device(const std::string& path);
+// press the Wii's power button (STM's event hook): false if the game isn't waiting for it
+bool stm_power_event();
 std::unique_ptr<IosHandle> net_open_device(const std::string& path, s32* err);
 std::unique_ptr<IosHandle> usb_hid_open_device();
 

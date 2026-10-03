@@ -21,6 +21,7 @@
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
+#include "runtime/hw/ios/ios.h"
 #include "runtime/hw/ios/net.h"
 #include "runtime/runtime.h"
 
@@ -441,12 +442,25 @@ static void poll_input() {
 static std::vector<u32> s_rgba;
 static bool s_gpu;
 
+// Closing from the HOME Menu (its close, or the power button's power-off): the game gets the
+// Wii's power button, and ends the way it does there -- its fade, a save in progress finished,
+// then the shutdown (STM, platform_quit). The 3DS has handed the GPU back by then. If the game
+// isn't waiting for the button, or hasn't ended within 10 s, the app ends here.
+static void closing() {
+    static u64 s_since;
+    if (!s_since) {
+        s_since = host_time_us() | 1;
+        if (!stm_power_event())
+            platform_quit("closed from the HOME Menu");
+    } else if (host_time_us() - s_since > 10000000) {
+        platform_quit("closed from the HOME Menu (the game hadn't ended 10 s later)");
+    }
+}
+
 void platform_present(u32 xfb) {
     NOMA_PROF_SCOPE("(present)");
-    if (!aptMainLoop()) {
-        gfxExit();
-        exit(0);
-    }
+    if (!aptMainLoop())
+        closing();
     poll_input();
     if (s_gpu)
         return;
