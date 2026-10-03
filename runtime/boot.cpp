@@ -69,8 +69,11 @@ void setup_low_memory(u32 title_id_hi, u32 title_id_lo) {
     w32(0x8000310C, 0x00000000);   // MEM1 arena start (0: the OS computes it)
     w32(0x80003110, 0x00000000);   // MEM1 arena end (0: arena hi from 0x80000034)
     w32(0x80003114, 0x00000000);
-    w32(0x80003118, mem2_size());  // physical MEM2 size
-    w32(0x8000311C, mem2_size());  // simulated MEM2 size
+    // A retail Wii's 64 MB: OSGetConsoleType calls any other physical size a development
+    // kit (NDEV), and SDK code takes other paths on one. Only mem2_size() is backed; the
+    // ends below keep every allocation inside it, as IOS's top 12 MB do on a Wii.
+    w32(0x80003118, 0x04000000);   // physical MEM2 size
+    w32(0x8000311C, 0x04000000);   // simulated MEM2 size
     w32(0x80003120, mem2_end);     // end of MEM2 the PPC can address
     w32(0x80003124, 0x90000800);   // usable MEM2 start
     w32(0x80003128, mem2_end - 0x20000);  // usable MEM2 end (IPC buffers above)
