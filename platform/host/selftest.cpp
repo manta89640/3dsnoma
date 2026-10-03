@@ -1,5 +1,6 @@
 // NOMA_SELFTEST=name: run a decompiled routine on known inputs and compare with the expected
 // output, before the game starts (checks of the decompilation against reference vectors).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -7,6 +8,8 @@
 
 #include "noma_decomp.h"
 #include "runtime.h"
+#include "engine/audio/ax_reference.h"
+#include "engine/audio/ax_render.h"
 
 namespace guest {
 
@@ -356,6 +359,76 @@ static void selftest_mtx() {
     log("selftest mtx: PSMTXQuat %s", bad ? "MISMATCH" : "ok");
 }
 
+// ---- AX voices: engine/audio/ax_render.cpp against the sample-by-sample definition
+// (engine/audio/ax_reference.h) on random voices, several frames each: sample for sample and PB
+// word for PB word, they must agree.
+namespace axref = engine::audio::reference;
+
+static void selftest_ax() {
+    // the samples straddle a 16 MB page boundary (the renderer reads RAM a page at a time)
+    const u32 data = 0x90FF8000, data_size = 0x10000, pb_ref = 0x81700000, pb_nat = 0x81700400;
+    axref::Rng rnd{12345};
+    for (u32 i = 0; i < data_size; i++)
+        store8(data + i, (u8)rnd());
+    int bad = 0, frames = 0;
+    for (int t = 0; t < 4000 && bad < 5; t++) {
+        u16 w[0xD6 / 2];
+        axref::random_voice(rnd, w, data, data_size);
+        u16 fmt = w[0x70 / 2];
+        for (u32 k = 0; k < 0xD6 / 2; k++)
+            store16(pb_ref + 2 * k, w[k]), store16(pb_nat + 2 * k, w[k]);
+        for (int f = 0; f < 4 && bad < 5; f++, frames++) {
+            static s32 ref_bus[12][axref::SPF];
+            static engine::audio::AxBuses nat_bus;
+            memset(ref_bus, 0, sizeof(ref_bus));
+            memset(nat_bus, 0, sizeof(nat_bus));
+            axref::Pb pb;
+            pb.read(pb_ref);
+            axref::process_voice(pb, ref_bus);
+            pb.write();
+            engine::audio::ax_render_voice(pb_nat, nat_bus);
+            bool same = memcmp(ref_bus, nat_bus, sizeof(ref_bus)) == 0;
+            for (u32 k = 0; k < 0xD6 && same; k += 2)
+                same = load16(pb_ref + k) == load16(pb_nat + k);
+            if (!same) {
+                bad++;
+                log("selftest ax: voice %d frame %d differs (format %02X, src %u, ratio %08X)", t, f, fmt,
+                    w[0x08 / 2], (u32)w[0xA6 / 2] << 16 | w[0xA8 / 2]);
+            }
+        }
+    }
+    log("selftest ax: %d voice frames, %s", frames, bad ? "MISMATCH" : "ok");
+
+    // speed, on voices like the room's: looped ADPCM resampled by about 1.1, into main L and R
+    auto room_voice = [&](u32 pb) {
+        u32 phys = data & 0x1FFFFFFF;
+        for (u32 k = 0; k < 0xD6; k += 2)
+            store16(pb + k, 0);
+        store16(pb + 0x10, 1), store32(pb + 0x0C, 3), store16(pb + 0x14, 0x6000), store16(pb + 0x18, 0x5000);
+        store16(pb + 0x6A, 0x48EF), store16(pb + 0x6E, 1);
+        store32(pb + 0x72, phys * 2 + 2), store32(pb + 0x76, phys * 2 + 0x1F000), store32(pb + 0x7A, phys * 2 + 2);
+        for (u32 k = 0; k < 16; k++)
+            store16(pb + 0x7E + 2 * k, (u16)(k & 1 ? -1200 : 2400));
+        store32(pb + 0xA6, 0x11EF0);
+    };
+    room_voice(pb_ref), room_voice(pb_nat);
+    const int FRAMES = 20000;
+    static s32 bus[12][axref::SPF];
+    u64 t0 = host_time_us();
+    for (int f = 0; f < FRAMES; f++) {
+        axref::Pb pb;
+        pb.read(pb_ref);
+        axref::process_voice(pb, bus);
+        pb.write();
+    }
+    u64 t1 = host_time_us();
+    for (int f = 0; f < FRAMES; f++)
+        engine::audio::ax_render_voice(pb_nat, *(engine::audio::AxBuses*)bus);
+    u64 t2 = host_time_us();
+    log("selftest ax: a room voice's frame takes %.2f us (sample by sample: %.2f us)",
+        (double)(t2 - t1) / FRAMES, (double)(t1 - t0) / FRAMES);
+}
+
 bool run_selftest(const std::string& name) {
     g_sp = 0x81710000;
     if (name == "aes")
@@ -374,6 +447,8 @@ bool run_selftest(const std::string& name) {
         selftest_rfl();
     else if (name == "mtx")
         selftest_mtx();
+    else if (name == "ax")
+        selftest_ax();
     else if (name == "all") {
         selftest_rfl();
         selftest_time();
@@ -383,6 +458,7 @@ bool run_selftest(const std::string& name) {
         selftest_math();
         selftest_strtol();
         selftest_mtx();
+        selftest_ax();
     }
     else
         return false;
