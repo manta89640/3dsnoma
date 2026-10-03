@@ -1,0 +1,33 @@
+; Vertex shader for the GX renderer (platform/3ds/gx_pica.cpp). Vertices arrive transformed by
+; the emulated GX transform unit (clip space, colors 0-255, texture coordinates); xform maps GX
+; clip space to the 3DS: the GX viewport, the frame buffer scaled to 400x240, the rotated
+; render target and the depth range.
+
+.fvec xform[4]
+
+.constf consts(1.0, 0.00392156862745098, 0.0, 0.0)
+.alias inv255 consts.yyyy
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.alias inpos v0
+.alias inclr v1
+.alias intc0 v2
+.alias intc1 v3
+.alias intc2 v4
+
+.proc main
+  dp4 outpos.x, xform[0], inpos
+  dp4 outpos.y, xform[1], inpos
+  dp4 outpos.z, xform[2], inpos
+  dp4 outpos.w, xform[3], inpos
+  mul outclr, inv255, inclr
+  mov outtc0, intc0
+  mov outtc1, intc1
+  mov outtc2, intc2
+  end
+.end

@@ -1,0 +1,32 @@
+# Nintendo data never goes into this repository: bring your own WAD.
+*.wad
+*.app
+*.dol
+keys/
+extracted/
+orig/
+
+# Everything generated from the WAD (recompiled code, romfs, packed data)
+build/
+build-*/
+gen/
+
+# Build outputs
+*.3dsx
+*.cia
+*.elf
+*.smdh
+*.bnr
+*.o
+*.a
+*.map
+
+# Local test runs
+runs/
+.DS_Store
+__pycache__/
+*.pyc
+
+# Local tool state and logs
+.claude/
+*.log

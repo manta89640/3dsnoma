@@ -1,0 +1,2033 @@
+diff --git a/m2c/arch_ppc.py b/m2c/arch_ppc.py
+index 018f2b7..cf773e7 100644
+--- a/m2c/arch_ppc.py
++++ b/m2c/arch_ppc.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
++import re
+ from dataclasses import replace
+ from typing import (
++    Any,
+     Callable,
+     ClassVar,
+     Dict,
+@@ -46,8 +48,12 @@ from .translate import (
+     AddressMode,
+     Arch,
+     ArgLoc,
++    ArrayAccess,
+     BinaryOp,
+     Cast,
++    EvalOnceExpr,
++    StructAccess,
++    early_unwrap,
+     ErrorExpr,
+     ExprStmt,
+     Expression,
+@@ -93,10 +99,282 @@ from .evaluate import (
+     load_upper,
+     make_store,
+     make_storex,
++    make_store_real,
++    deref,
+     void_fn_op,
+ )
+ from .flow_graph import ArchFlowGraph, FlowGraph, InstrRef, RefSet
+-from .types import FunctionSignature, Type
++from .types import NOMA_GUEST, FunctionSignature, Type
++
++
++# ---------------------------------------------------------------------------------------
++# noma (Wii no Ma 3DS decomp) extensions: paired singles, carry, special registers
++
++NOMA_PS_ARITH: Dict[str, int] = {
++    "ps_add": 2, "ps_sub": 2, "ps_mul": 2, "ps_div": 2, "ps_madd": 3, "ps_msub": 3,
++    "ps_nmadd": 3, "ps_nmsub": 3, "ps_madds0": 3, "ps_madds1": 3, "ps_muls0": 2,
++    "ps_muls1": 2, "ps_sum0": 3, "ps_sum1": 3, "ps_merge00": 2, "ps_merge01": 2,
++    "ps_merge10": 2, "ps_merge11": 2, "ps_mr": 1, "ps_neg": 1, "ps_abs": 1, "ps_nabs": 1,
++    "ps_res": 1, "ps_rsqrte": 1, "ps_sel": 3,
++}
++
++# Gekko also writes single-precision results to ps1 (lfs: see the load branches). The IR
++# patterns ignore these extra outputs like the carry; the single-precision conversions they
++# produce write ps1 too.
++NOMA_PS1_FROM_PS0: Set[str] = {
++    "fadds", "fsubs", "fmuls", "fdivs", "fres", "frsp", "fmadds", "fmsubs", "fnmadds",
++    "fnmsubs", "cvt.s.i.fictive", "cvt.s.u.fictive",
++}
++
++NOMA_SPRS: Dict[str, int] = {
++    "XER": 1, "LR": 8, "CTR": 9, "DSISR": 18, "DAR": 19, "DEC": 22, "SDR1": 25, "SRR0": 26,
++    "SRR1": 27, "SPRG0": 272, "SPRG1": 273, "SPRG2": 274, "SPRG3": 275, "EAR": 282,
++    "TBL": 284, "TBU": 285, "PVR": 287, "GQR0": 912, "GQR1": 913, "GQR2": 914, "GQR3": 915,
++    "GQR4": 916, "GQR5": 917, "GQR6": 918, "GQR7": 919, "HID2": 920, "WPAR": 921,
++    "DMA_U": 922, "DMA_L": 923, "UMMCR0": 936, "UPMC1": 937, "UPMC2": 938, "USIA": 939,
++    "UMMCR1": 940, "UPMC3": 941, "UPMC4": 942, "MMCR0": 952, "PMC1": 953, "PMC2": 954,
++    "SIA": 955, "MMCR1": 956, "PMC3": 957, "PMC4": 958, "HID0": 1008, "HID1": 1009,
++    "IABR": 1010, "HID4": 1011, "DABR": 1013, "L2CR": 1017, "ICTC": 1019, "THRM1": 1020,
++    "THRM2": 1021, "THRM3": 1022,
++}
++
++
++def noma_var_shift(a: InstrArgs, kind: str) -> Optional[Expression]:
++    """noma: slw/srw/sraw use six bits of the shift register (32-63 shift everything out);
++    a C shift by 32 or more is undefined. None: the shift amount is a constant below 32."""
++    if not NOMA_GUEST:
++        return None
++    x, n = a.reg(1), a.reg(2)
++    un = early_unwrap(n)
++    if isinstance(un, Literal):
++        if (un.value & 63) < 32:
++            return None
++        if kind == "sraw":
++            return BinaryOp.sshift(x, ">>", Literal(31))
++        return Literal(0)
++    name = {"slw": "NOMA_SLW", "srw": "NOMA_SRW", "sraw": "NOMA_SRAW"}[kind]
++    return fn_op(name, [x, n], Type.s32() if kind == "sraw" else Type.u32())
++
++
++def noma_spr_number(arg: Argument) -> int:
++    if isinstance(arg, AsmLiteral):
++        return arg.value
++    name = getattr(arg, "symbol_name", None) or getattr(arg, "register_name", None) or str(arg)
++    key = name.upper()
++    if key not in NOMA_SPRS:
++        raise DecompFailure(f"unknown special-purpose register {name}")
++    return NOMA_SPRS[key]
++
++
++def noma_ps_pair(a: InstrArgs, i: int) -> "tuple[Expression, Expression]":
++    reg = a.reg_ref(i)
++    return a.reg(i), a.regs[Register(reg.register_name + "_1")]
++
++
++def noma_ps_eval(m: str, a: InstrArgs) -> "tuple[Expression, Expression]":
++    f = BinaryOp.f32
++    neg = lambda e: UnaryOp("-", e, type=Type.f32())
++    fabs = lambda e: fn_op("fabsf", [e], Type.f32())
++    if m in ("ps_add", "ps_sub", "ps_div"):
++        op = {"ps_add": "+", "ps_sub": "-", "ps_div": "/"}[m]
++        (a0, a1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2)
++        return f(a0, op, b0), f(a1, op, b1)
++    if m == "ps_mul":
++        (a0, a1), (c0, c1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2)
++        return f(a0, "*", c0), f(a1, "*", c1)
++    if m in ("ps_madd", "ps_msub", "ps_nmadd", "ps_nmsub"):
++        (a0, a1), (c0, c1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2), noma_ps_pair(a, 3)
++        op = "+" if m in ("ps_madd", "ps_nmadd") else "-"
++        r0, r1 = f(f(a0, "*", c0), op, b0), f(f(a1, "*", c1), op, b1)
++        if m.startswith("ps_nm"):
++            return neg(r0), neg(r1)
++        return r0, r1
++    if m in ("ps_madds0", "ps_madds1"):
++        (a0, a1), (c0, c1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2), noma_ps_pair(a, 3)
++        c = c0 if m.endswith("0") else c1
++        return f(f(a0, "*", c), "+", b0), f(f(a1, "*", c), "+", b1)
++    if m in ("ps_muls0", "ps_muls1"):
++        (a0, a1), (c0, c1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2)
++        c = c0 if m.endswith("0") else c1
++        return f(a0, "*", c), f(a1, "*", c)
++    if m in ("ps_sum0", "ps_sum1"):
++        (a0, a1), (c0, c1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2), noma_ps_pair(a, 3)
++        if m == "ps_sum0":
++            return f(a0, "+", b1), c1
++        return c0, f(a0, "+", b1)
++    if m.startswith("ps_merge"):
++        (a0, a1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2)
++        return (a0 if m[8] == "0" else a1), (b0 if m[9] == "0" else b1)
++    if m in ("ps_mr", "ps_neg", "ps_abs", "ps_nabs", "ps_res", "ps_rsqrte"):
++        b0, b1 = noma_ps_pair(a, 1)
++        if m == "ps_mr":
++            return b0, b1
++        if m == "ps_neg":
++            return neg(b0), neg(b1)
++        if m == "ps_abs":
++            return fabs(b0), fabs(b1)
++        if m == "ps_nabs":
++            return neg(fabs(b0)), neg(fabs(b1))
++        fname = "__fres" if m == "ps_res" else "__frsqrte"
++        return fn_op(fname, [b0], Type.f32()), fn_op(fname, [b1], Type.f32())
++    if m == "ps_sel":
++        (a0, a1), (c0, c1), (b0, b1) = noma_ps_pair(a, 1), noma_ps_pair(a, 2), noma_ps_pair(a, 3)
++        zero = Literal(0, type=Type.f32())
++        return (TernaryOp(BinaryOp.fcmp(a0, ">=", zero), c0, b0, type=Type.f32()),
++                TernaryOp(BinaryOp.fcmp(a1, ">=", zero), c1, b1, type=Type.f32()))
++    raise DecompFailure(f"unhandled paired-single op {m}")
++
++
++def noma_psq(s: NodeState, a: InstrArgs, m: str, indexed: bool, update: bool,
++             is_store: bool, w_arg: Argument, i_arg: Argument) -> None:
++    def qnum(arg: Argument) -> int:
++        if isinstance(arg, AsmLiteral):
++            return arg.value
++        txt = str(getattr(arg, "symbol_name", None) or getattr(arg, "register_name", None) or arg)
++        mq = re.match(r"^\$?qr(\d)$", txt)
++        if mq:
++            return int(mq.group(1))
++        raise DecompFailure(f"{m}: bad quantization operand {arg}")
++
++    w, qi = qnum(w_arg), qnum(i_arg)
++    freg = a.reg_ref(0)
++    freg1 = Register(freg.register_name + "_1")
++    stack_info = a.stack_info
++    if indexed:
++        base_reg = a.reg_ref(1)
++        ea = handle_add_real(a.reg(1), a.reg(2), a)
++    else:
++        mem = a.memory_ref(1)
++        if not isinstance(mem, AddressMode):
++            raise DecompFailure(f"{m}: unsupported address {mem}")
++        base_reg = mem.base
++        ea = add_imm(base_reg, a.regs[base_reg], Literal(mem.offset), a)
++    fnum = int(freg.register_name[1:])
++    if indexed and stack_info.is_stack_reg(base_reg) and fnum >= 14 and not update:
++        # prologue/epilogue: li r0, off; psq_stx/psq_lx fN, r1, r0
++        return
++    if not indexed and stack_info.is_stack_reg(base_reg) and fnum >= 14 and not update:
++        # prologue save / epilogue restore of a callee-saved paired single
++        return
++    if qi == 0 and not indexed and not update:
++        m0 = AddressMode(offset=mem.offset, base=base_reg)
++        m1 = AddressMode(offset=mem.offset + 4, base=base_reg)
++        if is_store:
++            st = make_store_real(a.reg(0), None, m0, a.regs, stack_info, Type.f32())
++            if st is not None:
++                s.store_memory(st, freg)
++            if w == 0:
++                st = make_store_real(a.regs[freg1], None, m1, a.regs, stack_info, Type.f32())
++                if st is not None:
++                    s.store_memory(st, freg1)
++        else:
++            v0 = deref(m0, a.regs, stack_info, size=4)
++            v0.type.unify(Type.f32())
++            s.set_reg(freg, v0)
++            if w:
++                s.set_reg(freg1, Literal(0x3F800000, type=Type.f32()))
++            else:
++                v1 = deref(m1, a.regs, stack_info, size=4)
++                v1.type.unify(Type.f32())
++                s.set_reg(freg1, v1)
++    else:
++        if is_store:
++            s.write_statement(void_fn_op("__psq_st", [ea, a.reg(0), a.regs[freg1], Literal(w), Literal(qi)]))
++        else:
++            s.set_reg(freg, fn_op("__psq_ld0", [ea, Literal(qi)], Type.f32()))
++            s.set_reg(freg1, fn_op("__psq_ld1", [ea, Literal(w), Literal(qi)], Type.f32()))
++    if update:
++        s.set_reg(base_reg, ea)
++
++
++def noma_is_mmio_access(e: Expression) -> bool:
++    """A load from a literal hardware address (0xCC/0xCD: the GameCube and Hollywood
++    registers; 0xC8: the EFB). Reading these can have side effects (taking a mail, acking
++    an interrupt), so their order matters."""
++    e = early_unwrap(e)
++    while isinstance(e, Cast):
++        e = early_unwrap(e.expr)
++    if isinstance(e, (StructAccess, ArrayAccess)):
++        base = early_unwrap(e.struct_var if isinstance(e, StructAccess) else e.ptr)
++        while isinstance(base, Cast):
++            base = early_unwrap(base.expr)
++        if isinstance(base, Literal):
++            addr = (base.value + (e.offset if isinstance(e, StructAccess) else 0)) & 0xFFFFFFFF
++            return 0xC8000000 <= addr < 0xCE000000
++    return False
++
++
++def noma_force_mmio_loads(s: NodeState, a: InstrArgs) -> None:
++    """noma: give each hardware register read its own statement, in program order. Two reads
++    combined into one expression (`(*0xCC005006) | (*0xCC005004 << 16)`) could otherwise run
++    in either order -- and reading the DSP mailbox's low half takes the mail."""
++    for out in a.instruction_ref.instruction.outputs:
++        if not isinstance(out, Register):
++            continue
++        raw = s.regs.get_raw(out)
++        if isinstance(raw, EvalOnceExpr) and noma_is_mmio_access(raw.wrapped_expr):
++            raw.force()
++
++
++def noma_crbit(arg: Argument) -> Register:
++    if isinstance(arg, AsmLiteral):
++        n = arg.value
++        return Register(f"cr{n // 4}_{('lt', 'gt', 'eq', 'so')[n % 4]}")
++    raise DecompFailure(f"CR bit operand {arg} was not numbered by the asm rewrite")
++
++
++def noma_crop(m: str, x: "Condition", y: "Condition") -> Expression:
++    if m == "cror":
++        return BinaryOp(x, "||", y, type=Type.boolean())
++    if m == "crand":
++        return BinaryOp(x, "&&", y, type=Type.boolean())
++    if m == "crnor":
++        return BinaryOp(x, "||", y, type=Type.boolean()).negated()
++    if m == "crnand":
++        return BinaryOp(x, "&&", y, type=Type.boolean()).negated()
++    if m == "crandc":
++        return BinaryOp(x, "&&", y.negated(), type=Type.boolean())
++    if m == "crorc":
++        return BinaryOp(x, "||", y.negated(), type=Type.boolean())
++    if m == "crxor":
++        return BinaryOp(x, "!=", y, type=Type.boolean())
++    return BinaryOp(x, "==", y, type=Type.boolean())  # creqv
++
++
++def noma_carry_out(m: str, a: InstrArgs, result: Expression) -> Expression:
++    if m in ("addc", "addic"):
++        return BinaryOp.ucmp(result, "<", a.reg(1))
++    if m == "subfc":
++        return BinaryOp.ucmp(a.reg(2), ">=", a.reg(1))
++    if m == "subfic":
++        return BinaryOp.ucmp(Literal(a.imm_value(2) & 0xFFFFFFFF), ">=", a.reg(1))
++    if m == "srawi":
++        return fn_op("__srawi_ca", [a.reg(1), Literal(a.imm_value(2))], Type.u32())
++    if m == "sraw":
++        return fn_op("__sraw_ca", [a.reg(1), a.reg(2)], Type.u32())
++    if m in ("adde", "addze", "addme", "subfe", "subfze", "subfme"):
++        # the carry out of x + y + CA (subtractions add ~rA)
++        x = a.reg(1)
++        if m.startswith("subf"):
++            x = UnaryOp("~", x, type=Type.intish())
++        if m in ("adde", "subfe"):
++            y: Expression = a.reg(2)
++        else:
++            y = Literal(0 if m.endswith("ze") else 0xFFFFFFFF)
++        return fn_op("__adde_ca", [x, y, noma_carry_in(a)], Type.u32())
++    return fn_op("M2C_CARRY", [result], type=Type.s32())
++
++
++def noma_carry_in(a: InstrArgs) -> Expression:
++    return a.regs[Register("carry")]
++
++
++def noma_addze(a: InstrArgs) -> Expression:
++    carry = a.regs[Register("carry")]
++    if getattr(getattr(carry, "function", None), "c_symbol_name", None) == "__srawi_ca":
++        # srawi + addze: signed division by a power of two
++        return carry_add_to(a.reg(1))
++    return BinaryOp.intptr(a.reg(1), "+", carry)
+ 
+ 
+ class FcmpoCrorPattern(SimpleAsmPattern):
+@@ -739,6 +1017,9 @@ class PpcArch(Arch):
+         ]
+     ]
+     simple_temp_regs = [Register(r) for r in ["r11", "r12"]]
++    # noma: second halves of the paired-single FPRs (ps1), and XER[CA]
++    ps1_temp_regs = [Register(f"f{i}_1") for i in range(0, 14)]
++    ps1_saved_regs = [Register(f"f{i}_1") for i in range(14, 32)]
+     temp_regs = (
+         argument_regs
+         + simple_temp_regs
+@@ -752,8 +1033,11 @@ class PpcArch(Arch):
+                 "cr0_eq",
+                 "cr0_so",
+                 "ctr",
++                "carry",
+             ]
+         ]
++        + ps1_temp_regs
++        + [Register(f"cr{n}_{b}") for n in (1, 5, 6, 7) for b in ("lt", "gt", "eq", "so")]
+     )
+     saved_regs = [
+         Register(r)
+@@ -804,6 +1088,8 @@ class PpcArch(Arch):
+     ]
+     all_regs = (
+         saved_regs
++        + ps1_saved_regs
++        + [Register(f"cr{n}_{b}") for n in (2, 3, 4) for b in ("lt", "gt", "eq", "so")]
+         + temp_regs
+         + [stack_pointer_reg]
+         + [
+@@ -1123,12 +1409,19 @@ class PpcArch(Arch):
+             jump_target = get_jump_target(args[0])
+         elif mnemonic in cls.instrs_branches:
+             # Normal branch
+-            # TODO: Support crN argument
+             assert 1 <= len(args) <= 2
+             # If the name starts with "!", negate the condition
+             raw_name = cls.instrs_branches[mnemonic]
+             negated = raw_name.startswith("!")
+             reg_name = raw_name.lstrip("!")
++            if (
++                len(args) == 2
++                and isinstance(args[0], Register)
++                and args[0].register_name.startswith("cr")
++                and reg_name.startswith("cr0_")
++            ):
++                # noma: branch on crN
++                reg_name = args[0].register_name + reg_name[3:]
+ 
+             inputs = [Register(reg_name)]
+             jump_target = get_jump_target(args[-1])
+@@ -1140,6 +1433,152 @@ class PpcArch(Arch):
+                     cond = cond.negated()
+                 s.set_branch_condition(cond)
+ 
++        elif mnemonic in ("cror", "crand", "crxor", "crnor", "crnand", "creqv", "crandc", "crorc"):
++            # noma: CR bit logic (bits are numbered by the asm rewrite: 4*field + lt/gt/eq/so)
++            bt, ba, bb = (noma_crbit(x) for x in args)
++            inputs = [ba, bb]
++            outputs = [bt]
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                x = a.cmp_reg(ba.register_name)
++                y = a.cmp_reg(bb.register_name)
++                s.set_reg(bt, noma_crop(mnemonic, x, y))
++
++        elif mnemonic in NOMA_PS_ARITH:
++            # noma: paired-single arithmetic, ps0 in fN and ps1 in fN_1
++            assert all(isinstance(r, Register) for r in args)
++            inputs = []
++            for r in args[1:]:
++                inputs += [r, Register(r.register_name + "_1")]
++            outputs = [args[0], Register(args[0].register_name + "_1")]
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                ps0, ps1 = noma_ps_eval(mnemonic, a)
++                s.set_reg(a.reg_ref(0), ps0)
++                s.set_reg(Register(a.reg_ref(0).register_name + "_1"), ps1)
++
++        elif mnemonic in ("ps_cmpu0", "ps_cmpo0", "ps_cmpu1", "ps_cmpo1"):
++            # noma: compare one half; only cr0 is modelled
++            assert isinstance(args[0], Register) and isinstance(args[1], Register)
++            half = "" if mnemonic.endswith("0") else "_1"
++            inputs = [Register(args[1].register_name + half), Register(args[2].register_name + half)]
++            outputs = list(cr0_bits) if args[0].register_name == "cr0" else []
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                if a.reg_ref(0).register_name != "cr0":
++                    raise DecompFailure(f"{instr_str}: only cr0 is supported")
++                x = a.regs[Register(a.reg_ref(1).register_name + half)]
++                y = a.regs[Register(a.reg_ref(2).register_name + half)]
++                s.set_reg(Register("cr0_lt"), BinaryOp.fcmp(x, "<", y))
++                s.set_reg(Register("cr0_gt"), BinaryOp.fcmp(x, ">", y))
++                s.set_reg(Register("cr0_eq"), BinaryOp.fcmp(x, "==", y))
++                s.set_reg(Register("cr0_so"), Literal(0))
++
++        elif mnemonic in ("psq_l", "psq_lu", "psq_lx", "psq_lux", "psq_st", "psq_stu", "psq_stx", "psq_stux"):
++            # noma: quantized paired-single load/store. qr0 is plain f32 (the OS sets GQR0 = 0);
++            # other GQRs go through __psq_ld/__psq_st, which read the guest's GQR values.
++            assert isinstance(args[0], Register)
++            is_store = "st" in mnemonic
++            is_load = not is_store
++            indexed = mnemonic.endswith("x")
++            update = mnemonic.rstrip("x").endswith("u")
++            w_arg, i_arg = args[-2], args[-1]
++            freg = args[0]
++            freg1 = Register(freg.register_name + "_1")
++            if indexed:
++                assert isinstance(args[1], Register) and isinstance(args[2], Register)
++                inputs = [args[1], args[2]]
++            else:
++                assert isinstance(args[1], AsmAddressMode)
++                inputs = [args[1].base]
++            if is_store:
++                inputs += [freg, freg1]
++            else:
++                outputs = [freg, freg1]
++            if update:
++                outputs = outputs + [args[1] if indexed else args[1].base]
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                noma_psq(s, a, mnemonic, indexed, update, is_store, w_arg, i_arg)
++
++        elif mnemonic in ("mtspr", "mfspr"):
++            # noma: special-purpose registers other than lr/ctr (GQRs, HIDs, WPAR, ...)
++            if mnemonic == "mtspr":
++                spr_arg, val_arg = args[0], args[1]
++                assert isinstance(val_arg, Register)
++                inputs = [val_arg]
++                eval_fn = lambda s, a: s.write_statement(
++                    void_fn_op("__mtspr", [Literal(noma_spr_number(spr_arg)), a.reg(1)])
++                )
++            else:
++                assert isinstance(args[0], Register)
++                spr_arg = args[1]
++                outputs = [args[0]]
++                eval_fn = lambda s, a: s.set_reg(
++                    a.reg_ref(0), fn_op("__mfspr", [Literal(noma_spr_number(spr_arg))], Type.u32())
++                )
++
++        elif mnemonic in ("mftb", "mftbu", "mfmsr", "mtmsr", "mfcr_raw"):
++            if mnemonic == "mtmsr":
++                inputs = [args[0]]
++                eval_fn = lambda s, a: s.write_statement(void_fn_op("__mtmsr", [a.reg(0)]))
++            else:
++                outputs = [args[0]]
++                fname = {"mftb": "__mftb", "mftbu": "__mftbu", "mfmsr": "__mfmsr"}[mnemonic]
++                # noma: "mftb rD, 269" reads the upper half of the time base (TBU)
++                if mnemonic == "mftb" and len(args) > 1 and args[1] == AsmLiteral(269):
++                    fname = "__mftbu"
++                eval_fn = lambda s, a: s.set_reg(a.reg_ref(0), fn_op(fname, [], Type.u32()))
++
++        elif mnemonic == "mfcr":
++            # noma: the condition register as a word, built from the CR bits that hold a value
++            # here (cr0.lt is bit 31); code reads it to turn a comparison into 0/1
++            assert isinstance(args[0], Register)
++            crbits = [Register(f"cr{n}_{b}") for n in range(8) for b in ("lt", "gt", "eq", "so")]
++            inputs = list(crbits)
++            outputs = [args[0]]
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                word: Optional[Expression] = None
++                for i, r in enumerate(crbits):
++                    if r not in a.regs.contents:
++                        continue
++                    bit = fn_op("NOMA_CRBIT", [a.cmp_reg(r.register_name), Literal(31 - i)], Type.u32())
++                    word = bit if word is None else BinaryOp.int(word, "|", bit)
++                s.set_reg(a.reg_ref(0), word if word is not None else Literal(0))
++
++        elif mnemonic in ("twui", "trap") or (mnemonic == "tw" and args and args[0] == AsmLiteral(31)):
++            # noma: an unconditional trap (a breakpoint for the debugger)
++            inputs = []
++            eval_fn = lambda s, a: s.write_statement(void_fn_op("NOMA_TRAP", []))
++
++        elif mnemonic in ("lwbrx", "lhbrx", "lwarx"):
++            # noma: byte-reversed loads read little-endian; lwarx is a plain load here
++            assert isinstance(args[0], Register) and isinstance(args[1], Register) and isinstance(args[2], Register)
++            inputs = [args[1], args[2]]
++            outputs = [args[0]]
++            is_load = True
++            fname = {"lwbrx": "__lwbrx", "lhbrx": "__lhbrx", "lwarx": "__lwarx"}[mnemonic]
++            eval_fn = lambda s, a: s.set_reg(
++                a.reg_ref(0), fn_op(fname, [handle_add_real(a.reg(1), a.reg(2), a)], Type.u32())
++            )
++
++        elif mnemonic in ("stwbrx", "sthbrx", "stwcx."):
++            assert isinstance(args[0], Register) and isinstance(args[1], Register) and isinstance(args[2], Register)
++            inputs = [args[0], args[1], args[2]]
++            is_store = True
++            if mnemonic == "stwcx.":
++                outputs = list(cr0_bits)
++            fname = {"stwbrx": "__stwbrx", "sthbrx": "__sthbrx", "stwcx.": "__stwcx"}[mnemonic]
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                s.write_statement(void_fn_op(fname, [handle_add_real(a.reg(1), a.reg(2), a), a.reg(0)]))
++                if mnemonic == "stwcx.":
++                    s.set_reg(Register("cr0_eq"), Literal(1))
++                    s.set_reg(Register("cr0_lt"), Literal(0))
++                    s.set_reg(Register("cr0_gt"), Literal(0))
++                    s.set_reg(Register("cr0_so"), Literal(0))
++
+         elif mnemonic in cls.instrs_store:
+             assert isinstance(args[0], Register) and size is not None
+             is_store = True
+@@ -1175,15 +1614,16 @@ class PpcArch(Arch):
+ 
+                 def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                     store = cls.instrs_store_update[mnemonic](a)
+-
+-                    # Update the register in the second argument
++                    # noma: emit the store (which uses the old base) before updating the base;
++                    # the other order wrote "p += 4; p->unk4 = x" for "stwux"
+                     update = a.reg_ref(1)
+                     offset = a.reg(2)
+-                    s.set_reg(update, add_imm(update, a.regs[update], offset, a))
+-
+                     if store is not None:
+                         s.store_memory(store, a.reg_ref(0))
+ 
++                    # Update the register in the second argument
++                    s.set_reg(update, add_imm(update, a.regs[update], offset, a))
++
+             else:
+                 assert len(args) == 2 + psq_imms and isinstance(args[1], AsmAddressMode)
+                 inputs = [args[0], args[1].base]
+@@ -1198,16 +1638,16 @@ class PpcArch(Arch):
+                         raise DecompFailure(
+                             f"Unhandled store-and-update arg in {instr_str}: {update!r}"
+                         )
++                    old_base = a.regs[update.base]
++                    # noma: the store uses the old base; emit it before the update
++                    # (the other order wrote "p += 4; p->unk4 = x" for "stwu x, 4(p)")
++                    if store is not None:
++                        s.store_memory(store, a.reg_ref(0))
+                     s.set_reg(
+                         update.base,
+-                        add_imm(
+-                            update.base, a.regs[update.base], Literal(update.offset), a
+-                        ),
++                        add_imm(update.base, old_base, Literal(update.offset), a),
+                     )
+ 
+-                    if store is not None:
+-                        s.store_memory(store, a.reg_ref(0))
+-
+         elif mnemonic in cls.instrs_load:
+             assert isinstance(args[0], Register) and size is not None
+             if mnemonic.endswith("x"):
+@@ -1223,7 +1663,13 @@ class PpcArch(Arch):
+                     inputs = make_memory_access(args[1], size) + [args[1].base]
+             is_load = True
+             outputs = [args[0]]
+-            eval_fn = lambda s, a: s.set_reg(a.reg_ref(0), cls.instrs_load[mnemonic](a))
++            if mnemonic in ("lfs", "lfsx"):
++                outputs.append(Register(args[0].register_name + "_1"))
++
++            def eval_fn(s: NodeState, a: InstrArgs) -> None:
++                v = s.set_reg(a.reg_ref(0), cls.instrs_load[mnemonic](a))
++                if mnemonic in ("lfs", "lfsx"):
++                    s.set_reg(Register(a.reg_ref(0).register_name + "_1"), v)
+         elif mnemonic in cls.instrs_load_update:
+             assert isinstance(args[0], Register) and size is not None
+             is_load = True
+@@ -1235,31 +1681,39 @@ class PpcArch(Arch):
+                 )
+                 inputs = [args[1], args[2]]
+                 outputs = [args[0], args[1]]
++                if mnemonic == "lfsux":
++                    outputs.append(Register(args[0].register_name + "_1"))
+ 
+                 def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                     target = a.reg_ref(0)
+-                    val = cls.instrs_load_update[mnemonic](a)
+-                    s.set_reg(target, val)
+-                    # In `rD, rA, rB`, update `rA = rA + rB`
++                    # noma: read rA and rB before rD is written (rD may be rB: lwzux r0, r4, r0)
+                     update_reg = a.reg_ref(1)
+                     offset = a.reg(2)
++                    base = a.regs[update_reg]
++                    val = cls.instrs_load_update[mnemonic](a)
++                    v = s.set_reg(target, val)
++                    if mnemonic == "lfsux":
++                        s.set_reg(Register(target.register_name + "_1"), v)
++                    # In `rD, rA, rB`, update `rA = rA + rB`
+                     if update_reg == target:
+                         raise DecompFailure(
+                             f"Invalid instruction, rA and rD must be different in {instr_str}"
+                         )
+-                    s.set_reg(
+-                        update_reg, add_imm(update_reg, a.regs[update_reg], offset, a)
+-                    )
++                    s.set_reg(update_reg, add_imm(update_reg, base, offset, a))
+ 
+             else:
+                 assert len(args) == 2 + psq_imms and isinstance(args[1], AsmAddressMode)
+                 inputs = make_memory_access(args[1], size) + [args[1].base]
+                 outputs = [args[0], args[1].base]
++                if mnemonic == "lfsu":
++                    outputs.append(Register(args[0].register_name + "_1"))
+ 
+                 def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                     target = a.reg_ref(0)
+                     val = cls.instrs_load_update[mnemonic](a)
+-                    s.set_reg(target, val)
++                    v = s.set_reg(target, val)
++                    if mnemonic == "lfsu":
++                        s.set_reg(Register(target.register_name + "_1"), v)
+                     # In `rD, rA(N)`, update `rA = rA + N`
+                     update = a.memory_ref(1)
+                     if not isinstance(update, AddressMode):
+@@ -1340,10 +1794,14 @@ class PpcArch(Arch):
+             else:
+                 assert not any(isinstance(a, AsmAddressMode) for a in args)
+                 inputs = [r for r in args[1:] if isinstance(r, Register)]
+-            if mnemonic.rstrip(".") in ("adde", "addme", "addze", "subfe", "subfze"):
++            if mnemonic.rstrip(".") in ("adde", "addme", "addze", "subfe", "subfze", "subfme"):
+                 inputs.append(Register("carry"))
+-            if mnemonic.rstrip(".") in ("addc", "addic", "subfc", "subfic"):
++            if mnemonic.rstrip(".") in ("addc", "addic", "subfc", "subfic", "srawi", "sraw",
++                                        "adde", "addze", "addme", "subfe", "subfze", "subfme"):
+                 outputs.append(Register("carry"))
++            if mnemonic.rstrip(".") in NOMA_PS1_FROM_PS0:
++                # Gekko: single-precision results and lfs also land in ps1
++                outputs.append(Register(args[0].register_name + "_1"))
+             if mnemonic.endswith("."):
+                 # Instructions ending in `.` update the condition reg
+                 outputs.extend(cr0_bits)
+@@ -1351,6 +1809,17 @@ class PpcArch(Arch):
+             def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                 target = a.reg_ref(0)
+                 val = cls.instrs_destination_first[mnemonic.rstrip(".")](a)
++                # noma: the carry out reads the inputs, so compute it before the destination
++                # (often one of them) is written
++                carry_val = None
++                if Register("carry") in outputs:
++                    carry_val = noma_carry_out(mnemonic.rstrip("."), a, val)
++                    # ...and evaluate it there: the destination may be a loop variable that
++                    # the carry expression names (adde r4, r4, r4 in a loop)
++                    carry_reg_val = s.set_reg(Register("carry"), carry_val)
++                    if isinstance(carry_reg_val, EvalOnceExpr):
++                        carry_reg_val.force()
++                    carry_val = None
+                 target_val = s.set_reg(target, val)
+                 # Instructions ending in `.` update the condition reg
+                 if mnemonic.endswith("."):
+@@ -1367,21 +1836,20 @@ class PpcArch(Arch):
+                     )
+                     s.set_reg(
+                         Register("cr0_gt"),
+-                        BinaryOp(target_s32, ">", Literal(0), type=Type.s32()),
++                        BinaryOp(target_s32, ">", Literal(0), type=Type.s32(), noma_sign="s32"),
+                     )
+                     s.set_reg(
+                         Register("cr0_lt"),
+-                        BinaryOp(target_s32, "<", Literal(0), type=Type.s32()),
++                        BinaryOp(target_s32, "<", Literal(0), type=Type.s32(), noma_sign="s32"),
+                     )
+                     s.set_reg(
+                         Register("cr0_so"),
+                         fn_op("M2C_OVERFLOW", [target_val], type=Type.s32()),
+                     )
+-                if Register("carry") in outputs:
+-                    s.set_reg(
+-                        Register("carry"),
+-                        fn_op("M2C_CARRY", [target_val], type=Type.s32()),
+-                    )
++                if carry_val is not None:
++                    s.set_reg(Register("carry"), carry_val)
++                if mnemonic.rstrip(".") in NOMA_PS1_FROM_PS0:
++                    s.set_reg(Register(target.register_name + "_1"), target_val)
+ 
+         elif mnemonic in ("mtctr", "mtlr"):
+             assert len(args) == 1 and isinstance(args[0], Register)
+@@ -1436,19 +1904,16 @@ class PpcArch(Arch):
+         elif mnemonic in cls.instrs_ppc_compare:
+             assert len(args) == 3 and isinstance(args[1], Register)
+             inputs = [r for r in args[1:] if isinstance(r, Register)]
+-            outputs = list(cr0_bits)
++            assert isinstance(args[0], Register) and args[0].register_name.startswith("cr")
++            crf = args[0].register_name
++            outputs = [Register(f"{crf}_{b}") for b in ("lt", "gt", "eq", "so")]
+ 
+             def eval_fn(s: NodeState, a: InstrArgs) -> None:
+-                base_reg = a.reg_ref(0)
+-                if base_reg != Register("cr0"):
+-                    error = f'"{instr_str}" is not supported, the first arg is not $cr0'
+-                    s.write_statement(error_stmt(error))
+-                    return
+-
+-                s.set_reg(Register("cr0_eq"), cls.instrs_ppc_compare[mnemonic](a, "=="))
+-                s.set_reg(Register("cr0_gt"), cls.instrs_ppc_compare[mnemonic](a, ">"))
+-                s.set_reg(Register("cr0_lt"), cls.instrs_ppc_compare[mnemonic](a, "<"))
+-                s.set_reg(Register("cr0_so"), Literal(0))
++                # noma: any CR field, not just cr0
++                s.set_reg(Register(f"{crf}_eq"), cls.instrs_ppc_compare[mnemonic](a, "=="))
++                s.set_reg(Register(f"{crf}_gt"), cls.instrs_ppc_compare[mnemonic](a, ">"))
++                s.set_reg(Register(f"{crf}_lt"), cls.instrs_ppc_compare[mnemonic](a, "<"))
++                s.set_reg(Register(f"{crf}_so"), Literal(0))
+ 
+         elif mnemonic in cls.instrs_ignore:
+             pass
+@@ -1478,6 +1943,17 @@ class PpcArch(Arch):
+ 
+         assert Register("zero") not in outputs
+         assert Register("zero") not in clobbers
++        if is_load and eval_fn is not None:
++            # noma: emit pending calls before a load. Otherwise "x = f(); y = *p; g(y, x)"
++            # can come out as g(*p, f()), and C++ may evaluate *p first although f
++            # changes it (argument evaluation order is unspecified).
++            load_eval_fn = eval_fn
++
++            def eval_fn(s: NodeState, a: InstrArgs, _load: Any = load_eval_fn) -> None:
++                s.prevent_later_function_calls()
++                _load(s, a)
++                noma_force_mmio_loads(s, a)
++
+         return Instruction(
+             mnemonic=mnemonic,
+             args=args,
+@@ -1495,7 +1971,7 @@ class PpcArch(Arch):
+         )
+ 
+     ir_patterns = [
+-        LoopStructCopySetupPattern(),
++        *([] if NOMA_GUEST else [LoopStructCopySetupPattern()]),
+         FloatishToSintIrPattern(),
+         SintToDoubleIrPattern(),
+         UintToDoubleIrPattern(),
+@@ -1517,15 +1993,18 @@ class PpcArch(Arch):
+         CmpltuPattern3(),
+     ]
+ 
++    # noma: no struct-copy patterns -- they assume the copy's source base survives the first
++    # load and that the loaded registers are dead afterwards (lwz r3,0(r3); lwz r4,4(r3) is
++    # a linked-list walk, not a copy); plain loads and stores are always exact
+     asm_patterns = [
+         FcmpoCrorPattern(),
+         MfcrPattern(),
+         TailCallPattern(),
+         SaveRestoreRegsFnPattern(),
+-        LoopStructCopyPattern(),
++        *([] if NOMA_GUEST else [LoopStructCopyPattern()]),
+         BranchCtrPattern(),
+         FloatishToUintPattern(),
+-        StructCopyPattern(),
++        *([] if NOMA_GUEST else [StructCopyPattern()]),
+     ]
+ 
+     instrs_ignore: Set[str] = {
+@@ -1551,7 +2030,6 @@ class PpcArch(Arch):
+         "stfd": lambda a: make_store(a, type=Type.f64()),
+         "stfsx": lambda a: make_storex(a, type=Type.f32()),
+         "stfdx": lambda a: make_storex(a, type=Type.f64()),
+-        "psq_st": lambda a: None,
+     }
+     instrs_store_update: StoreInstrMap = {
+         "stbu": lambda a: make_store(a, type=Type.int_of_size(8)),
+@@ -1581,7 +2059,6 @@ class PpcArch(Arch):
+         "lfd": lambda a: handle_load(a, type=Type.f64()),
+         "lfsx": lambda a: handle_loadx(a, type=Type.f32()),
+         "lfdx": lambda a: handle_loadx(a, type=Type.f64()),
+-        "psq_l": lambda a: ErrorExpr("psq_l unimplemented"),
+     }
+     instrs_load_update: InstrMap = {
+         "lbau": lambda a: handle_load(a, type=Type.s8()),
+@@ -1653,8 +2130,9 @@ class PpcArch(Arch):
+         # TODO: Read XER_CA in extended instrs, instead of using CarryBit
+         "add": lambda a: handle_add(a),
+         "addc": lambda a: handle_add(a),
+-        "adde": lambda a: carry_add_to(handle_add(a)),
+-        "addze": lambda a: carry_add_to(a.reg(1)),
++        "adde": lambda a: BinaryOp.intptr(handle_add(a), "+", noma_carry_in(a)),
++        "addze": lambda a: noma_addze(a),
++        "addme": lambda a: BinaryOp.intptr(BinaryOp.intptr(a.reg(1), "+", noma_carry_in(a)), "-", Literal(1)),
+         "addi": lambda a: handle_addi(
+             a.reg_ref(0), a.reg_ref(1), a.reg(1), a.s16_imm(2), a
+         ),
+@@ -1664,12 +2142,21 @@ class PpcArch(Arch):
+         "addis": lambda a: handle_addis(a),
+         "subf": lambda a: fold_divmod(BinaryOp.intptr(a.reg(2), "-", a.reg(1))),
+         "subfc": lambda a: fold_divmod(BinaryOp.intptr(a.reg(2), "-", a.reg(1))),
+-        "subfe": lambda a: carry_sub_from(
+-            fold_divmod(BinaryOp.intptr(a.reg(2), "-", a.reg(1)))
++        "subfe": lambda a: BinaryOp.intptr(
++            BinaryOp.intptr(BinaryOp.intptr(a.reg(2), "-", a.reg(1)), "-", Literal(1)),
++            "+",
++            noma_carry_in(a),
+         ),
+         "subfic": lambda a: fold_divmod(BinaryOp.intptr(a.s16_imm(2), "-", a.reg(1))),
+-        "subfze": lambda a: carry_sub_from(
+-            fold_mul_chains(UnaryOp.sint("-", a.reg(1))),
++        "subfze": lambda a: BinaryOp.intptr(
++            BinaryOp.intptr(UnaryOp("~", a.reg(1), type=Type.intish()), "+", noma_carry_in(a)),
++            "+",
++            Literal(0),
++        ),
++        "subfme": lambda a: BinaryOp.intptr(
++            BinaryOp.intptr(UnaryOp("~", a.reg(1), type=Type.intish()), "+", noma_carry_in(a)),
++            "-",
++            Literal(1),
+         ),
+         "neg": lambda a: fold_mul_chains(UnaryOp.sint("-", a.reg(1))),
+         "divw": lambda a: BinaryOp.sint(a.reg(1), "/", a.reg(2)),
+@@ -1718,11 +2205,13 @@ class PpcArch(Arch):
+         "rlwnm": lambda a: handle_rlwnm(
+             a.reg(1), a.reg(2), a.imm_value(3), a.imm_value(4)
+         ),
+-        "slw": lambda a: fold_mul_chains(
++        "slw": lambda a: noma_var_shift(a, "slw") or fold_mul_chains(
+             BinaryOp.int(a.reg(1), "<<", as_intish(a.reg(2)))
+         ),
+-        "srw": lambda a: fold_divmod(BinaryOp.ushift(a.reg(1), ">>", a.reg(2))),
+-        "sraw": lambda a: fold_divmod(BinaryOp.sshift(a.reg(1), ">>", a.reg(2))),
++        "srw": lambda a: noma_var_shift(a, "srw")
++        or fold_divmod(BinaryOp.ushift(a.reg(1), ">>", a.reg(2))),
++        "sraw": lambda a: noma_var_shift(a, "sraw")
++        or fold_divmod(BinaryOp.sshift(a.reg(1), ">>", a.reg(2))),
+         "srawi": lambda a: handle_shift_right(a, signed=True),
+         "extsb": lambda a: as_type(a.reg(1), Type.s8(), silent=False),
+         "extsh": lambda a: as_type(a.reg(1), Type.s16(), silent=False),
+@@ -1821,7 +2310,8 @@ class PpcArch(Arch):
+         "cmpw": lambda a, op: BinaryOp.sintptr_cmp(a.reg(1), op, a.reg(2)),
+         "cmpwi": lambda a, op: BinaryOp.sintptr_cmp(a.reg(1), op, a.s16_imm(2)),
+         "cmplw": lambda a, op: BinaryOp.uintptr_cmp(a.reg(1), op, a.reg(2)),
+-        "cmplwi": lambda a, op: BinaryOp.uintptr_cmp(a.reg(1), op, a.s16_imm(2)),
++        # noma: cmplwi takes an unsigned immediate (upstream sign-extended it)
++        "cmplwi": lambda a, op: BinaryOp.uintptr_cmp(a.reg(1), op, a.u16_imm(2)),
+         # Floating point
+         # TODO: There is a difference in how these two instructions handle NaN
+         "fcmpo": lambda a, op: BinaryOp.fcmp(a.reg(1), op, a.reg(2)),
+@@ -1948,7 +2438,16 @@ class PpcArch(Arch):
+ 
+     @staticmethod
+     def function_return(expr: Expression) -> Dict[Register, Expression]:
+-        return {
++        if NOMA_GUEST and expr.type.get_size_bits() == 64 and not expr.type.is_likely_float():
++            # noma: a 64-bit result comes back in r3 (high word) and r4 (low word)
++            return {
++                Register("f1"): Cast(
++                    expr, reinterpret=True, silent=True, type=Type.floatish()
++                ),
++                Register("r3"): fn_op("NOMA_HI32", [expr], Type.u32()),
++                Register("r4"): fn_op("NOMA_LO32", [expr], Type.u32()),
++            }
++        regs: Dict[Register, Expression] = {
+             Register("f1"): Cast(
+                 expr, reinterpret=True, silent=True, type=Type.floatish()
+             ),
+@@ -1959,3 +2458,14 @@ class PpcArch(Arch):
+                 Cast(expr, reinterpret=True, silent=False, type=Type.u64())
+             ),
+         }
++        if NOMA_GUEST and not expr.type.is_likely_float():
++            # noma: the host packs r3 into the LOW half of a 64-bit result (NOMA_U64), so r4 is
++            # always taken apart with NOMA_LO32. A call through a pointer is typed 64-bit
++            # (gcall<u64>) only once r4 is used (the cast unifies then), and a (u32) cast of
++            # it reads r3 again.
++            regs[Register("r4")] = fn_op(
++                "NOMA_LO32",
++                [Cast(expr, reinterpret=True, silent=True, type=Type.u64())],
++                Type.u32(),
++            )
++        return regs
+diff --git a/m2c/evaluate.py b/m2c/evaluate.py
+index 4705d28..6124efd 100644
+--- a/m2c/evaluate.py
++++ b/m2c/evaluate.py
+@@ -59,6 +59,7 @@ from .translate import (
+     var_for_expr,
+ )
+ from .types import (
++    NOMA_GUEST,
+     FunctionParam,
+     FunctionSignature,
+     StructDeclaration,
+@@ -84,7 +85,21 @@ def deref(
+     elif isinstance(arg, AddressMode):
+         offset = arg.offset
+         if stack_info.is_stack_reg(arg.base):
+-            return stack_info.get_stack_var(offset, store=store)
++            stack_var = stack_info.get_stack_var(offset, store=store)
++            if NOMA_GUEST and isinstance(stack_var, LocalVar):
++                # noma: a stack slot read or written with another width than its type
++                # (bytes of a word, ...) gets an access of its own width
++                slot_size = stack_var.type.get_size_bytes()
++                if slot_size is not None and slot_size != size:
++                    return StructAccess(
++                        struct_var=AddressOf(stack_var, type=stack_var.type.reference()),
++                        offset=0,
++                        target_size=size,
++                        field_path=None,
++                        stack_info=stack_info,
++                        type=Type.any(),
++                    )
++            return stack_var
+         var = regs[arg.base]
+     else:
+         offset = arg.offset
+@@ -126,6 +141,12 @@ def deref(
+     var.type.unify(Type.ptr())
+     stack_info.record_struct_access(var, offset)
+     type: Type = stack_info.unique_type_for("struct", (uw_var, offset), Type.any())
++    if NOMA_GUEST and size is not None:
++        # noma: m2c gives every access to (base, offset) one type; one of another width
++        # (a byte store to the GPU FIFO, then word stores) needs its own
++        shared_size = type.get_size_bytes()
++        if shared_size is not None and shared_size != size:
++            type = Type.any()
+ 
+     if offset >= 0x200000:
+         # Structs realistically aren't larger than 2 MB. The offset is more likely
+@@ -140,6 +161,13 @@ def deref(
+     if array_expr is not None:
+         return array_expr
+     field_path, field_type, _ = var.type.get_deref_field(offset, target_size=size)
++    if (
++        NOMA_GUEST
++        and field_path is not None
++        and size is not None
++        and field_type.get_size_bytes() not in (None, size)
++    ):
++        field_path = None  # noma: the field found has another width than the access
+     if field_path is not None:
+         field_type.unify(type)
+         type = field_type
+@@ -208,7 +236,13 @@ def handle_convert(expr: Expression, dest_type: Type, source_type: Type) -> Cast
+     # int <-> float casts should be explicit
+     silent = dest_type.data().kind != source_type.data().kind
+     expr.type.unify(source_type)
+-    return Cast(expr=expr, type=dest_type, silent=silent, reinterpret=False)
++    int_side = source_type if source_type.is_int() else dest_type if dest_type.is_int() else None
++    signed = None
++    if int_side is not None and int_side.is_signed() != int_side.is_unsigned():
++        signed = int_side.is_signed()
++    return Cast(
++        expr=expr, type=dest_type, silent=silent, reinterpret=False, noma_int_signed=signed
++    )
+ 
+ 
+ def handle_la(args: InstrArgs) -> Expression:
+@@ -609,6 +643,33 @@ def handle_lwr(args: InstrArgs) -> Expression:
+     return ErrorExpr("Unable to handle lwr; missing a corresponding lwl")
+ 
+ 
++def noma_store_source(source: Expression, type: Type, *, silent: bool) -> Expression:
++    """noma: a byte/halfword store truncates the register, it says nothing about the value's
++    type -- unifying would declare a 32-bit value (`x = y | 0xFC00` stored with stb, then
++    shifted) as s8. Cast instead."""
++    if (
++        NOMA_GUEST
++        and type.is_int()
++        and (type.get_size_bits() or 32) < 32
++        and not isinstance(early_unwrap(source), Literal)
++        and source.type.get_size_bits() != type.get_size_bits()
++    ):
++        return Cast(expr=source, reinterpret=True, silent=False, type=type)
++    return as_type(source, type, silent)
++
++
++def noma_store_stmt(dest: Expression, source: Expression, type: Type, *, silent: bool) -> StoreStmt:
++    """A store of `source` with an instruction of `type` to `dest`."""
++    unified = dest.type.unify(type)
++    src = noma_store_source(source, type, silent=silent)
++    if NOMA_GUEST and not unified:
++        # noma: the destination's type comes from other accesses to it (scanf's argument
++        # pointer gets ints and floats stored through it); the instruction stores the
++        # register's bits, so an stfs through a "u32 *" must not convert 325.0 to 325
++        src = Cast(expr=src, reinterpret=True, silent=False, type=dest.type)
++    return StoreStmt(source=src, dest=dest)
++
++
+ def make_store(args: InstrArgs, type: Type) -> Optional[StoreStmt]:
+     size = type.get_size_bytes()
+     assert size is not None
+@@ -642,8 +703,7 @@ def make_store_real(
+         # Elide register preserval.
+         return None
+     dest = deref(target, regs, stack_info, size=size, store=True)
+-    dest.type.unify(type)
+-    return StoreStmt(source=as_type(source_val, type, silent=is_stack), dest=dest)
++    return noma_store_stmt(dest, source_val, type, silent=is_stack)
+ 
+ 
+ def make_storex(args: InstrArgs, type: Type) -> Optional[StoreStmt]:
+@@ -656,8 +716,7 @@ def make_storex(args: InstrArgs, type: Type) -> Optional[StoreStmt]:
+ 
+     # TODO: Can we assume storex's are never used to save registers to the stack?
+     dest = deref(ptr, args.regs, args.stack_info, size=size, store=True)
+-    dest.type.unify(type)
+-    return StoreStmt(source=as_type(source, type, silent=False), dest=dest)
++    return noma_store_stmt(dest, source, type, silent=False)
+ 
+ 
+ def handle_swl(args: InstrArgs) -> Optional[StoreStmt]:
+@@ -794,10 +853,13 @@ def fold_divmod(original_expr: BinaryOp) -> BinaryOp:
+     ):
+         new_denom = left_expr.right.value << right_expr.value
+         if new_denom < (1 << 32):
+-            return BinaryOp.int(
+-                left=left_expr.left,
+-                op="/",
+-                right=Literal(new_denom),
++            return replace(
++                BinaryOp.int(
++                    left=left_expr.left,
++                    op="/",
++                    right=Literal(new_denom),
++                ),
++                noma_sign=left_expr.noma_sign,
+             )
+ 
+     # Detect `%`: (x - ((x / y) * y)) --> x % y
+@@ -816,7 +878,10 @@ def fold_divmod(original_expr: BinaryOp) -> BinaryOp:
+                 and isinstance(mod_base, Literal)
+                 and (1 << divisor.value) == mod_base.value
+             ):
+-                return BinaryOp.int(left=left_expr, op="%", right=right_expr.right)
++                return replace(
++                    BinaryOp.int(left=left_expr, op="%", right=right_expr.right),
++                    noma_sign=div_expr.noma_sign,
++                )
+ 
+     # Detect dividing by a negative: ((x >> 31) - (x / N)) --> x / -N
+     if (
+@@ -867,11 +932,11 @@ def fold_divmod(original_expr: BinaryOp) -> BinaryOp:
+             if isinstance(div_expr.right, Literal) and div_expr.right.value >= (
+                 1 << 30
+             ):
+-                return BinaryOp.int(
++                return replace(BinaryOp.int(
+                     left=div_expr.left,
+                     op=div_expr.op,
+                     right=div_expr.right,
+-                )
++                ), noma_sign=div_expr.noma_sign)
+             return div_expr
+         # If the var is under 32 bits, the error term may look like `(x << K) >> 31` instead
+         if (
+@@ -938,10 +1003,13 @@ def fold_divmod(original_expr: BinaryOp) -> BinaryOp:
+     if expr.op in mult_high_ops and isinstance(right_expr, Literal):
+         denom = round_div(1 << (32 + divisor_shift), right_expr.value)
+         if denom is not None:
+-            return BinaryOp.int(
+-                left=left_expr,
+-                op="/",
+-                right=Literal(denom),
++            return replace(
++                BinaryOp.int(
++                    left=left_expr,
++                    op="/",
++                    right=Literal(denom),
++                ),
++                noma_sign="u32" if expr.op == "MULTU_HI" else "s32",
+             )
+ 
+     return original_expr
+@@ -1431,6 +1499,10 @@ def handle_rlwnm(
+     # Since this is dynamic, we can't really simplify or calculate things, but we use the
+     # same formula.
+     mask = rlwi_mask(mask_begin, mask_end)
++    if NOMA_GUEST:
++        # noma: (x << n) | (x >> (32 - n)) shifts by 32 when n is 0
++        rot = fn_op("NOMA_ROTL", [source, shift_source], Type.u32())
++        return BinaryOp.int(rot, "&", Literal(mask))
+ 
+     # Take the lower 5 bits
+     shift = BinaryOp.int(shift_source, "&", Literal(0x1F))
+diff --git a/m2c/flow_graph.py b/m2c/flow_graph.py
+index a094393..0de6d39 100644
+--- a/m2c/flow_graph.py
++++ b/m2c/flow_graph.py
+@@ -656,9 +656,13 @@ def build_blocks(
+                 cond_return_target = internal_label("conditionalreturn")
+             # Strip the "lr" off of the instruction
+             assert item.mnemonic[-2:] == "lr"
++            cr_args = [
++                x for x in item.args
++                if isinstance(x, Register) and x.register_name.startswith("cr")
++            ]
+             branch_instr = arch.parse(
+                 item.mnemonic[:-2],
+-                [AsmGlobalSymbol(cond_return_target)],
++                cr_args + [AsmGlobalSymbol(cond_return_target)],
+                 item.meta.derived(),
+             )
+             block_builder.add_instruction(branch_instr)
+diff --git a/m2c/if_statements.py b/m2c/if_statements.py
+index 07eace1..8143d75 100644
+--- a/m2c/if_statements.py
++++ b/m2c/if_statements.py
+@@ -40,6 +40,7 @@ from .translate import (
+     get_block_info,
+     simplify_condition,
+ )
++from .types import NOMA_GUEST
+ from .types import Type
+ 
+ 
+@@ -141,7 +142,15 @@ class SwitchStatement:
+         elif self.jump.jump_table is not None and body_is_empty:
+             comments.append(f"jump table: {self.jump.jump_table.c_symbol_name}")
+         head = f"switch ({format_expr(self.jump.control_expr, fmt)})"
+-        if body_is_empty:
++        if body_is_empty and NOMA_GUEST:
++            # noma: valid C++ for gotos-only output: jump to the case targets' labels
++            lines.append(fmt.with_comments(f"{head} {{", comments))
++            for node, entries in self.index.context.case_nodes.items():
++                for sw_index, case_label in entries:
++                    if sw_index.node is self.index.node:
++                        lines.append(fmt.indent(f"{case_label}: goto {label_for_node(self.index.context, node)};"))
++            lines.append(fmt.indent("}"))
++        elif body_is_empty:
+             lines.append(fmt.with_comments(f"{head};", comments))
+         else:
+             if fmt.coding_style.newline_after_if:
+@@ -203,6 +212,9 @@ class LabelStatement:
+ 
+     def format(self, fmt: Formatter) -> str:
+         lines = []
++        if NOMA_GUEST and getattr(self.context, "noma_naive", False):
++            # noma: the switch dispatches with gotos (see SwitchStatement.format)
++            return f"{label_for_node(self.context, self.node)}:;"
+         if self.node in self.context.case_nodes:
+             for index, case_label in self.context.case_nodes[self.node]:
+                 comment = index.to_comment(fmt)
+@@ -1323,6 +1335,7 @@ def build_naive(context: Context, nodes: List[Node]) -> Body:
+     Used for --gotos-only, when the regular if_statements code fails."""
+ 
+     body = Body(print_node_comment=context.options.debug)
++    setattr(context, "noma_naive", True)
+ 
+     def emit_goto_or_early_return(node: Node, body: Body) -> None:
+         if isinstance(node, ReturnNode) and not node.is_real():
+@@ -1450,6 +1463,9 @@ def get_function_text(function_info: FunctionInfo, options: Options) -> str:
+     fn_name = function_info.symbol.c_symbol_name
+     arg_strs = []
+     for i, arg in enumerate(function_info.stack_info.arguments):
++        if NOMA_GUEST and arg.loc.reg is None:
++            # noma: stack-passed arguments are read from the guest stack (GSARG), not C params
++            continue
+         if i == 0 and function_info.stack_info.replace_first_arg is not None:
+             original_name, original_type = function_info.stack_info.replace_first_arg
+             arg_strs.append(original_type.to_decl(original_name, fmt))
+@@ -1520,6 +1536,12 @@ def get_function_text(function_info: FunctionInfo, options: Options) -> str:
+         if any_decl:
+             function_lines.append("")
+ 
++        if NOMA_GUEST and ("GS(" in formatted_body or "GSARG(" in formatted_body or "GSP" in formatted_body):
++            # noma: this function keeps variables in its guest stack frame
++            function_lines.append(
++                SimpleStatement(f"GFRAME({fmt.format_int(function_info.stack_info.allocated_stack_size)});").format(fmt)
++            )
++
+         function_lines.append(formatted_body)
+         function_lines.append("}")
+     full_function_text: str = "\n".join(function_lines)
+diff --git a/m2c/ir_pattern.py b/m2c/ir_pattern.py
+index a591aea..a08d679 100644
+--- a/m2c/ir_pattern.py
++++ b/m2c/ir_pattern.py
+@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
+ from typing import ClassVar, Dict, List, Optional, TypeVar
+ 
+ from .error import assert_never
++from .types import NOMA_GUEST
+ from .flow_graph import (
+     ArchFlowGraph,
+     BaseNode,
+@@ -348,7 +349,15 @@ def simplify_ir_patterns(
+         # This simplifies the replacement step because we can replace the final
+         # instruction and know that all the pattern inputs have been assigned
+         # by there, and the output has not yet been used.
+-        assert pattern.replacement_instr.outputs == tail_ref.instruction.outputs, (
++        # noma: the extended add/subtract instructions also write the carry, which the
++        # comparison idioms these patterns replace leave unused
++        tail_outputs = [r for r in tail_ref.instruction.outputs if r != Register("carry")]
++        repl_outputs = pattern.replacement_instr.outputs
++        if NOMA_GUEST:
++            # ...and single-precision results also land in ps1 (fN_1), on both sides
++            tail_outputs = [r for r in tail_outputs if not r.register_name.endswith("_1")]
++            repl_outputs = [r for r in repl_outputs if not r.register_name.endswith("_1")]
++        assert repl_outputs == tail_outputs, (
+             pattern.replacement_instr.outputs,
+             tail_ref.instruction.outputs,
+         )
+diff --git a/m2c/translate.py b/m2c/translate.py
+index 0bbddbb..eb3eda2 100644
+--- a/m2c/translate.py
++++ b/m2c/translate.py
+@@ -64,11 +64,13 @@ from .instruction import (
+     set_current_instr,
+ )
+ from .types import (
++    NOMA_GUEST,
+     AccessPath,
+     FunctionParam,
+     FunctionSignature,
+     StructDeclaration,
+     Type,
++    TypeData,
+     TypePool,
+ )
+ 
+@@ -970,6 +972,10 @@ class Statement(abc.ABC):
+         return '"' + self.format(fmt) + '"'
+ 
+ 
++def noma_hex(v: int) -> str:
++    return f"-0x{-v:X}" if v < 0 else f"0x{v:X}"
++
++
+ @dataclass(frozen=True, eq=False)
+ class ErrorExpr(Condition):
+     desc: Optional[str] = None
+@@ -982,6 +988,9 @@ class ErrorExpr(Condition):
+         return self
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST and self.desc is not None and self.desc.startswith("Read from unset register"):
++            # noma: an argument register the caller never set; its value is never used
++            return f"M2C_UNSET(/* {self.desc} */)"
+         if self.desc is not None:
+             return f"M2C_ERROR(/* {self.desc} */)"
+         return "M2C_ERROR()"
+@@ -1047,6 +1056,10 @@ class BinaryOp(Condition):
+     op: str
+     right: Expression
+     type: Type
++    # noma: the signedness the instruction requires ("s32", "u32", "s64", "u64") for the
++    # sign-sensitive operators; printed as explicit casts, since unification may give an
++    # operand's variable the other signedness later
++    noma_sign: str = ""
+ 
+     @staticmethod
+     def int(left: Expression, op: str, right: Expression) -> BinaryOp:
+@@ -1079,6 +1092,7 @@ class BinaryOp(Condition):
+             op=op,
+             right=as_sintish(right, silent=True),
+             type=Type.boolean(),
++            noma_sign="s32",
+         )
+ 
+     @staticmethod
+@@ -1088,12 +1102,14 @@ class BinaryOp(Condition):
+             op=op,
+             right=as_type(right, Type.sintptr(), False),
+             type=Type.boolean(),
++            noma_sign="s32",
+         )
+ 
+     @staticmethod
+     def ucmp(left: Expression, op: str, right: Expression) -> BinaryOp:
+         return BinaryOp(
+-            left=as_uintish(left), op=op, right=as_uintish(right), type=Type.boolean()
++            left=as_uintish(left), op=op, right=as_uintish(right), type=Type.boolean(),
++            noma_sign="u32",
+         )
+ 
+     @staticmethod
+@@ -1103,10 +1119,15 @@ class BinaryOp(Condition):
+             op=op,
+             right=as_type(right, Type.uintptr(), False),
+             type=Type.boolean(),
++            noma_sign="u32",
+         )
+ 
+     @staticmethod
+     def fcmp(left: Expression, op: str, right: Expression) -> BinaryOp:
++        if NOMA_GUEST:
++            # noma: fcmpu/fcmpo compare the double-precision register values; as floats,
++            # doubles that differ beyond float precision would compare equal
++            return BinaryOp.dcmp(left, op, right)
+         return BinaryOp(
+             left=as_f32(left),
+             op=op,
+@@ -1132,33 +1153,37 @@ class BinaryOp(Condition):
+             op=op,
+             right=as_sintish(right, silent=silent),
+             type=Type.s32(),
++            noma_sign="s32",
+         )
+ 
+     @staticmethod
+     def uint(left: Expression, op: str, right: Expression) -> BinaryOp:
+         return BinaryOp(
+-            left=as_uintish(left), op=op, right=as_uintish(right), type=Type.u32()
++            left=as_uintish(left), op=op, right=as_uintish(right), type=Type.u32(),
++            noma_sign="u32",
+         )
+ 
+     @staticmethod
+     def sshift(left: Expression, op: str, right: Expression) -> BinaryOp:
+         return BinaryOp(
+-            left=as_sintish(left), op=op, right=as_intish(right), type=Type.s32()
++            left=as_sintish(left), op=op, right=as_intish(right), type=Type.s32(),
++            noma_sign="s32",
+         )
+ 
+     @staticmethod
+     def ushift(left: Expression, op: str, right: Expression) -> BinaryOp:
+         return BinaryOp(
+-            left=as_uintish(left), op=op, right=as_intish(right), type=Type.u32()
++            left=as_uintish(left), op=op, right=as_intish(right), type=Type.u32(),
++            noma_sign="u32",
+         )
+ 
+     @staticmethod
+     def s64(left: Expression, op: str, right: Expression) -> BinaryOp:
+-        return BinaryOp(left=as_s64(left), op=op, right=as_s64(right), type=Type.s64())
++        return BinaryOp(left=as_s64(left), op=op, right=as_s64(right), type=Type.s64(), noma_sign="s64")
+ 
+     @staticmethod
+     def u64(left: Expression, op: str, right: Expression) -> BinaryOp:
+-        return BinaryOp(left=as_u64(left), op=op, right=as_u64(right), type=Type.u64())
++        return BinaryOp(left=as_u64(left), op=op, right=as_u64(right), type=Type.u64(), noma_sign="u64")
+ 
+     @staticmethod
+     def f32(left: Expression, op: str, right: Expression) -> BinaryOp:
+@@ -1210,6 +1235,7 @@ class BinaryOp(Condition):
+             ],
+             right=self.right,
+             type=Type.boolean(),
++            noma_sign=self.noma_sign,
+         )
+ 
+     def dependencies(self) -> List[Expression]:
+@@ -1251,6 +1277,7 @@ class BinaryOp(Condition):
+                 op=self.op.translate(str.maketrans("<>", "><")),
+                 right=left_expr,
+                 type=self.type,
++                noma_sign=self.noma_sign,
+             ).format(fmt)
+ 
+         # For comparisons to a Literal, cast the Literal to the type of the lhs
+@@ -1278,6 +1305,31 @@ class BinaryOp(Condition):
+         if self.op in PSEUDO_FUNCTION_OPS:
+             return f"{self.op}({lhs}, {rhs})"
+ 
++        if (
++            NOMA_GUEST
++            and self.op in ("/", "%")
++            and self.type.is_int()
++            and not (
++                isinstance(right_expr, Literal)
++                and (right_expr.value & 0xFFFFFFFF) not in (0, 0xFFFFFFFF)
++            )
++        ):
++            # noma: divw/divwu never trap; by 0 (and INT_MIN / -1) the C operators would
++            # (SIGFPE on x86, __aeabi_idiv0 on ARM). Helpers give the values Dolphin does.
++            t = self.noma_sign or ("u32" if self.type.is_unsigned() else "s32")
++            helper = {"/": "NOMA_DIVW", "%": "NOMA_MODW"}[self.op] + ("U" if t == "u32" else "")
++            return f"{helper}({lhs}, {rhs})"
++
++        if NOMA_GUEST and self.noma_sign and self.op in ("<", "<=", ">", ">=", ">>", "/", "%"):
++            # noma: the operation's signedness, whatever the operands' types became
++            t = self.noma_sign
++            if lhs.startswith("(") and balanced_parentheses(lhs[1:-1]):
++                lhs = f"({t}){lhs}"
++            else:
++                lhs = f"({t})({lhs})"
++            if self.op != ">>":
++                rhs = f"({t})({rhs})"
++
+         return f"({lhs} {self.op} {rhs})"
+ 
+ 
+@@ -1372,19 +1424,39 @@ class Cast(Expression):
+     type: Type = field(compare=False)
+     reinterpret: bool = False
+     silent: bool = True
++    # noma: for an int <-> float conversion, whether the integer side is signed (fctiwz,
++    # the xoris 0x8000 / 0x43300000_80000000 idiom) or unsigned, as the machine code has it.
++    # The C type the integer side unified to may say otherwise (an int also compared
++    # unsigned), and a C conversion follows the type: u32 -> double would turn -5 into
++    # 4294967291, and double -> u32 of a negative value is undefined.
++    noma_int_signed: Optional[bool] = field(default=None, compare=False)
+ 
+     def dependencies(self) -> List[Expression]:
+         return [self.expr]
+ 
++    def noma_narrowing(self) -> bool:
++        # noma: a cast to a byte/halfword truncates a 32-bit register value; unifying would
++        # instead declare the value's variable as that small type
++        t = self.type
++        return (
++            NOMA_GUEST
++            and t.is_int()
++            and (t.get_size_bits() or 32) < 32
++            and self.expr.type.get_size_bits() != t.get_size_bits()
++        )
++
+     def use(self) -> None:
+         # Try to unify, to make stringification output better.
+-        self.expr.type.unify(self.type)
++        if not self.noma_narrowing():
++            self.expr.type.unify(self.type)
+         super().use()
+ 
+     def needed_for_store(self) -> bool:
+         if not self.reinterpret:
+             # int <-> float casts should be emitted even for stores.
+             return True
++        if self.noma_narrowing():
++            return True
+         if not self.expr.type.unify(self.type):
+             # Emit casts when types fail to unify.
+             return True
+@@ -1403,7 +1475,7 @@ class Cast(Expression):
+             if fmt.valid_syntax:
+                 return f"M2C_BITWISE({self.type.format(fmt)}, {self.expr.format(fmt)})"
+             return f"(bitwise {self.type.format(fmt)}) {self.expr.format(fmt)}"
+-        if self.reinterpret and (
++        if self.reinterpret and not self.noma_narrowing() and (
+             self.silent
+             or (is_type_obvious(self.expr) and self.expr.type.unify(self.type))
+         ):
+@@ -1417,6 +1489,21 @@ class Cast(Expression):
+         if fn_sig:
+             return f"(({self.type.format(fmt)}) {self.expr.format(fmt)})"
+ 
++        if NOMA_GUEST and not self.reinterpret and self.noma_int_signed is not None:
++            int_c = "s32" if self.noma_int_signed else "u32"
++            if self.type.is_float() and not self.expr.type.is_float():
++                # int -> float: convert from the integer as the machine code reads it
++                return f"({self.type.format(fmt)}) ({int_c}) {self.expr.format(fmt)}"
++            if self.expr.type.is_float() and not self.type.is_float():
++                # float -> int, as the PowerPC converts: fctiwz (toward zero, saturating, NaN to
++                # INT_MIN) or CodeWarrior's __cvt_fp2unsigned. A C cast of a value out of range
++                # is undefined, and hosts disagree (x86 and ARM give different results).
++                conv = "NOMA_FCTIWZ" if self.noma_int_signed else "NOMA_FP2U"
++                text = f"{conv}({self.expr.format(fmt)})"
++                if self.type.format(fmt) == int_c:
++                    return text
++                return f"({self.type.format(fmt)}) {text}"
++
+         return f"({self.type.format(fmt)}) {self.expr.format(fmt)}"
+ 
+ 
+@@ -1448,6 +1535,27 @@ class FuncCall(Expression):
+         # when the FuncCall was created. Should we warn that there may be the wrong
+         # number of arguments at this callsite?
+         args = ", ".join(format_expr(arg, fmt) for arg in self.args)
++        if NOMA_GUEST:
++            direct = target
++            while isinstance(direct, Cast):
++                direct = late_unwrap(direct.expr)
++            if isinstance(direct, AddressOf):
++                direct = late_unwrap(direct.expr)
++            if isinstance(direct, GlobalSymbol) and direct.type.is_function():
++                return f"{direct.c_symbol_name}({args})"
++            # noma: call through a guest code address (vtables, callbacks)
++            rt = self.type
++            if rt.is_float():
++                ret = "f64"
++            elif rt.get_size_bits() == 64:
++                ret = "u64"
++            else:
++                ret = "u32"
++            argl = []
++            for arg in self.args:
++                cast = "f64" if arg.type.is_float() else "u32"
++                argl.append(f"({cast})({format_expr(arg, fmt)})")
++            return f"gcall<{ret}>((u32)({target.format(fmt)}){''.join(', ' + x for x in argl)})"
+         return f"{target.format(fmt)}({args})"
+ 
+ 
+@@ -1461,6 +1569,9 @@ class LocalVar(Expression):
+         return []
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST:
++            # noma: stack variables live in the function's guest stack frame
++            return f"GS({self.type.format(fmt)}, {noma_hex(self.value)})"
+         fallback_name = f"unksp{format_hex(self.value)}"
+         if self.path is None:
+             return fallback_name
+@@ -1472,6 +1583,8 @@ class LocalVar(Expression):
+ 
+     def toplevel_decl(self, fmt: Formatter) -> Optional[str]:
+         """Return a declaration for this LocalVar, if required."""
++        if NOMA_GUEST:
++            return None
+         # If len(self.path) > 2, then this local is an inner field of another
+         # local, so it doesn't need to be declared.
+         if (
+@@ -1506,6 +1619,11 @@ class PassedInArg(Expression):
+         return []
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST and self.loc.offset is not None and self.loc.reg is None:
++            # a stack argument fills a 4-byte slot: a smaller one is its low-order (last) bytes
++            size = self.type.get_size_bytes()
++            adj = 4 - size if size is not None and size < 4 else 0
++            return f"GSARG({self.type.format(fmt)}, {noma_hex(self.loc.offset + adj)})"
+         name = self.stack_info.get_param_name(self.loc)
+         if name:
+             return name
+@@ -1521,6 +1639,8 @@ class SubroutineArg(Expression):
+         return []
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST:
++            return f"GS({self.type.format(fmt)}, {noma_hex(self.value)})"
+         return f"subroutine_arg{format_hex(self.value // 4)}"
+ 
+ 
+@@ -1631,6 +1751,25 @@ class StructAccess(Expression):
+ 
+     def format(self, fmt: Formatter) -> str:
+         var = late_unwrap(self.struct_var)
++        if NOMA_GUEST:
++            ts = self.target_size
++            if isinstance(var, AddressOf) and isinstance(var.expr, (LocalVar, GlobalSymbol)) and self.offset == 0:
++                if ts is None or var.expr.type.get_size_bytes() == ts:
++                    return var.expr.format(fmt)
++            # the access must have the instruction's width, whatever type was unified
++            t = self.type
++            if ts is not None and t.get_size_bytes() != ts:
++                if t.is_float() and ts in (4, 8):
++                    t = Type.f32() if ts == 4 else Type.f64()
++                elif ts in (1, 2, 4, 8):
++                    signed = t.is_signed()
++                    t = {
++                        1: Type.s8() if signed else Type.u8(),
++                        2: Type.s16() if signed else Type.u16(),
++                        4: Type.s32() if signed else Type.u32(),
++                        8: Type.s64() if signed else Type.u64(),
++                    }[ts]
++            return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(t).format(fmt)}, {noma_hex(self.offset)})"
+         has_nonzero_access = False
+         if self.stack_info is not None:
+             has_nonzero_access = self.stack_info.has_nonzero_access(var)
+@@ -1679,6 +1818,8 @@ class ArrayAccess(Expression):
+         return [self.ptr, self.index]
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST:
++            return f"GIDX({self.type.format(fmt)}, {format_expr(self.ptr, fmt)}, {format_expr(self.index, fmt)})"
+         base = parenthesize_for_struct_access(self.ptr, fmt)
+         index = format_expr(self.index, fmt)
+         return f"{base}[{index}]"
+@@ -1725,6 +1866,18 @@ class GlobalSymbol(Expression):
+         return ret
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST and self.c_symbol_name == "sp":
++            # the incoming stack pointer: the caller's frame, just above ours
++            return "GSP"
++        if NOMA_GUEST and self.c_symbol_name.startswith("saved_reg_"):
++            return f"GSAVEDREG({self.c_symbol_name[10:]})"
++        if NOMA_GUEST and not self.type.is_function() and not self.c_symbol_name.startswith("M2C_"):
++            # noma: data symbols are proxies for big-endian guest memory at the symbol's address
++            if self.type.is_array():
++                elem = self.type.get_array()[0]
++                etype = elem.format(fmt) if elem is not None else "u8"
++                return f"GARR({etype}, GA_{self.c_symbol_name})"
++            return f"GV({self.type.format(fmt)}, GA_{self.c_symbol_name})"
+         return self.c_symbol_name
+ 
+     def potential_array_dim(self, element_size: int) -> Tuple[int, int]:
+@@ -1779,9 +1932,20 @@ class Literal(Expression):
+ 
+         if self.type.is_likely_float():
+             if self.type.get_size_bits() == 64:
+-                return format_f64_imm(self.value)
++                text = format_f64_imm(self.value)
++                if NOMA_GUEST and not math.isfinite(
++                    struct.unpack(">d", struct.pack(">Q", self.value & (2**64 - 1)))[0]
++                ):
++                    # noma: no C literal for these; the exact bits
++                    return "M2C_BITWISE(f64, 0x%XULL)" % (self.value & (2**64 - 1))
++                return text
+             else:
+-                return format_f32_imm(self.value) + "f"
++                text = format_f32_imm(self.value)
++                if NOMA_GUEST and not math.isfinite(
++                    struct.unpack(">f", struct.pack(">I", self.value & (2**32 - 1)))[0]
++                ):
++                    return "M2C_BITWISE(f32, 0x%XU)" % (self.value & (2**32 - 1))
++                return text + "f"
+         if self.type.is_pointer() and self.value == 0:
+             return "NULL"
+ 
+@@ -1823,12 +1987,23 @@ class AddressOf(Expression):
+         return [self.expr]
+ 
+     def format(self, fmt: Formatter) -> str:
++        if NOMA_GUEST and isinstance(self.expr, GlobalSymbol) and not self.expr.type.is_function() \
++                and not self.expr.c_symbol_name.startswith("M2C_"):
++            if self.expr.type.is_array():
++                return self.expr.format(fmt)
++            t = self.expr.type.format(fmt)
++            if t.startswith("M2C_UNK") or t == "?":
++                t = "void"
++            return f"gp<{t}>(GA_{self.expr.c_symbol_name})"
+         if isinstance(self.expr, GlobalSymbol):
+             if self.expr.is_string_constant():
+                 return self.expr.format_string_constant(fmt)
+         if self.expr.type.is_array():
+             return f"{self.expr.format(fmt)}"
+         if self.expr.type.is_function():
++            if NOMA_GUEST and isinstance(self.expr, GlobalSymbol):
++                # noma: a function used as a value is its guest code address
++                return f"GFN({self.expr.c_symbol_name})"
+             # Functions are automatically converted to function pointers
+             # without an explicit `&` by the compiler
+             return f"{self.expr.format(fmt)}"
+@@ -2855,9 +3030,10 @@ def simplify_condition(expr: Expression) -> Expression:
+                 op=expr.op.translate(str.maketrans("<>", "><")),
+                 right=left,
+                 type=expr.type,
++                noma_sign=expr.noma_sign,
+             )
+ 
+-        return BinaryOp(left=left, op=expr.op, right=right, type=expr.type)
++        return BinaryOp(left=left, op=expr.op, right=right, type=expr.type, noma_sign=expr.noma_sign)
+     return expr
+ 
+ 
+@@ -3241,6 +3417,11 @@ class Abi:
+     possible_slots: List[AbiArgSlot]
+ 
+ 
++# noma: call return kinds by asm line number, set by the driver for each file (see
++# tools/decomp/decompile.py): "int" or "float"
++NOMA_CALL_HINTS: Dict[int, str] = {}
++
++
+ def find_clobbers_until_dominator(
+     stack_info: StackInfo, node: Node
+ ) -> Tuple[Set[Var], bool]:
+@@ -3293,6 +3474,26 @@ def reg_sources(node: Node, reg: Register) -> Tuple[List[Reference], bool]:
+     return sources, uses_dominator
+ 
+ 
++def noma_reads_memory(expr: Expression) -> bool:
++    """noma: whether evaluating expr reads memory, so that evaluating it later than the machine
++    code does (after a store to that memory) gives another value. A value held in a temp
++    (a forced EvalOnceExpr) was read where it was computed."""
++    if isinstance(expr, EvalOnceExpr):
++        if expr.forced_emit or expr.emit_exactly_once:
++            return False
++        return noma_reads_memory(expr.wrapped_expr)
++    if isinstance(expr, AddressOf):
++        inner = expr.expr
++        if isinstance(inner, (GlobalSymbol, LocalVar)):
++            return False
++        if isinstance(inner, (StructAccess, ArrayAccess)):
++            return any(noma_reads_memory(e) for e in inner.dependencies())
++        return any(noma_reads_memory(e) for e in expr.dependencies())
++    if isinstance(expr, (StructAccess, ArrayAccess, LocalVar, GlobalSymbol, FuncCall)):
++        return True
++    return any(noma_reads_memory(e) for e in expr.dependencies())
++
++
+ def assign_naive_phis(
+     used_naive_phis: List[NaivePhiExpr], stack_info: StackInfo
+ ) -> None:
+@@ -3321,7 +3522,13 @@ def assign_naive_phis(
+ 
+         exprs = list(equivalent_blocks.keys())
+         first_uw = early_unwrap(exprs[0])
+-        if all(early_unwrap(e) == first_uw for e in exprs[1:]):
++        if all(early_unwrap(e) == first_uw for e in exprs[1:]) and not (
++            # noma: the replacement is evaluated where the phi is used, possibly after a store
++            # to what it reads (fdlibm's log re-read the high word of x after rewriting it):
++            # a read stays a phi variable, assigned at the end of each parent as the asm does
++            NOMA_GUEST
++            and noma_reads_memory(exprs[0] if len(exprs) == 1 else first_uw)
++        ):
+             # All the phis have the same value (e.g. because we recomputed an
+             # expression after a store, or restored a register after a function
+             # call). Just use that value instead of introducing a phi node.
+@@ -3631,6 +3838,14 @@ class NodeState:
+ 
+     def prevent_later_reads(self) -> None:
+         """Prevent later uses of registers that recursively contain a read."""
++        if NOMA_GUEST:
++            # noma: stack variables live in guest memory too, and calls change them through
++            # pointers (ARCReadDir(&dir) advancing dir.next); arguments in registers don't
++            self._prevent_later_uses(
++                lambda e: isinstance(e, (StructAccess, ArrayAccess, LocalVar))
++                or (isinstance(e, PassedInArg) and e.loc.reg is None)
++            )
++            return
+         self._prevent_later_uses(lambda e: isinstance(e, (StructAccess, ArrayAccess)))
+ 
+     def set_initial_reg(self, reg: Register, expr: Expression, meta: RegMeta) -> None:
+@@ -3717,9 +3932,9 @@ class NodeState:
+             )
+         return expr
+ 
+-    def clear_caller_save_regs(self) -> None:
++    def clear_caller_save_regs(self, keep: Set[Register] = set()) -> None:
+         for reg in self.stack_info.global_info.arch.temp_regs:
+-            if reg in self.regs:
++            if reg in self.regs and reg not in keep:
+                 del self.regs[reg]
+ 
+     def maybe_clear_local_var_writes(self, func_args: List[Expression]) -> None:
+@@ -3773,11 +3988,15 @@ class NodeState:
+             self.local_var_writes[dest] = (reg, raw_value, False)
+ 
+         if (
+-            isinstance(dest, (LocalVar, PassedInArg))
++            not NOMA_GUEST
++            and isinstance(dest, (LocalVar, PassedInArg))
+             and early_unwrap(raw_value) == dest
+         ):
+             # Elide self assignments for stack locations. This commonly happens
+             # for variables preserved across multiple function calls.
++            # (noma: not when the slot may have changed through a pointer meanwhile -- the
++            # value stored back is the one read before, which can matter: saving and
++            # restoring an ARCDir's position around a counting loop)
+             return
+ 
+         # Emit a write. This includes four steps:
+@@ -3877,12 +4096,44 @@ class NodeState:
+             else:
+                 likely_regs[reg] = True
+ 
++        if NOMA_GUEST and not fn_sig.params_known and arch.arch == Target.ArchEnum.PPC:
++            # noma: a call through a pointer passes every argument register that holds a
++            # value here, up to the highest one (gaps read as M2C_UNSET). Our prototypes are
++            # positional (r3..rN, then f1..fM), so extra arguments are harmless to the callee,
++            # while a missing one (say a callback's r3, passed through from our own r3) is a
++            # wrong value. m2c's heuristic dropped registers that weren't set just for the call.
++            # A register that only holds an earlier call's return value is not an argument
++            # (except r3, which often is: gcall(fp, f())); floats only when m2c's own
++            # heuristic says they were set up for this call -- passing a stale f1 makes it
++            # look used, and m2c then types the call's result as a float.
++            new_likely: Dict[Register, bool] = {}
++            for regs, is_float in (
++                ([Register(f"r{n}") for n in range(3, 11)], False),
++                ([Register(f"f{n}") for n in range(1, 9)], True),
++            ):
++                top = -1
++                for i, r in enumerate(regs):
++                    data = self.regs.contents.get(r)
++                    if data is None:
++                        continue
++                    if likely_regs.get(r) or (r == Register("r3")):
++                        top = i
++                    elif not is_float and not data.meta.function_return:
++                        top = i
++                for r in regs[: top + 1]:
++                    new_likely[r] = True
++            likely_regs = new_likely
++
+         abi = arch.function_abi(fn_sig, likely_regs, for_call=True)
+ 
+         func_args: List[Expression] = []
++        kept_regs: List[Tuple[Register, Expression]] = []
+         for slot in abi.arg_slots:
+             if slot.loc.reg:
+                 expr = self.regs[slot.loc.reg]
++                if NOMA_GUEST and slot.name and slot.name.endswith("_kept"):
++                    # noma: the callee leaves this register as it was (a constructor's this)
++                    kept_regs.append((slot.loc.reg, expr))
+             else:
+                 offset = slot.loc.offset
+                 assert offset is not None
+@@ -3921,9 +4172,17 @@ class NodeState:
+         self.subroutine_args.clear()
+ 
+         source = self.regs.current_instr_ref()
+-        call: Expression = FuncCall(
+-            fn_target, func_args, fn_sig.return_type.weaken_void_ptr()
+-        )
++        ret_type = fn_sig.return_type.weaken_void_ptr()
++        if NOMA_GUEST and source is not None and source.instruction.mnemonic in ("bctrl", "blrl"):
++            # noma: what the machine code does with r3/f1 after this call through a pointer
++            # (tools/ppc/callhints.py) decides between an int and a float result; m2c's own
++            # inference also counts a stale f1 passed along to a varargs function
++            hint = NOMA_CALL_HINTS.get(source.instruction.meta.lineno)
++            if hint == "int":
++                ret_type = Type.intptr()
++            elif hint == "float":
++                ret_type = Type.f64()
++        call: Expression = FuncCall(fn_target, func_args, ret_type)
+         call = self._eval_once(
+             call,
+             emit_exactly_once=True,
+@@ -3934,7 +4193,8 @@ class NodeState:
+ 
+         # Clear out caller-save registers, for clarity and to ensure that
+         # argument regs don't get passed into the next function.
+-        self.clear_caller_save_regs()
++        # (noma: except those the callee leaves unchanged, which callers may read)
++        self.clear_caller_save_regs({reg for reg, _ in kept_regs})
+ 
+         # Clear out local var write tracking if any argument contains a stack
+         # reference. That dict is used to track register saves/restores, which
+@@ -3954,6 +4214,9 @@ class NodeState:
+                 continue
+             val = return_reg_vals[out]
+             self.set_reg_real(out, val, transparent=False, function_return=True)
++        for reg, expr in kept_regs:
++            if reg in outputs:  # overwritten by the result just above: put the argument back
++                self.set_reg(reg, expr)
+ 
+         self.has_function_call = True
+ 
+@@ -3966,6 +4229,12 @@ def evaluate_instruction(instr_ref: InstrRef, state: NodeState) -> None:
+     if instr.is_conditional:
+         assert state.branch_condition is None and state.switch_control is None
+ 
++    if NOMA_GUEST and (instr.is_store or instr.mnemonic in ("dcbz", "dcbz_l")):
++        # noma: a store may write memory that a pending load reads through another pointer
++        # (m2c otherwise only orders a load against stores to the very same expression):
++        # loads still to be used are evaluated before it, as the machine code does
++        state.prevent_later_reads()
++        state.prevent_later_function_calls()
+     if instr.eval_fn is not None:
+         args = InstrArgs(instr_ref, instr.args, state.regs, state.stack_info)
+         eval_fn = typing.cast(Callable[[NodeState, InstrArgs], object], instr.eval_fn)
+@@ -4136,7 +4405,13 @@ def create_dominated_node_state(
+ 
+         if uses_dominator:
+             dom_expr = parent_state.regs.get_raw(reg)
+-            if dom_expr is None:
++            if dom_expr is None and NOMA_GUEST and sources:
++                # noma: the register is undefined on the path from the dominator (the
++                # source left it uninitialized there, like `base` in MSL's long2str for an
++                # unknown conversion). Keep the phi for the paths that set it instead of
++                # making the register unset everywhere; that path sees the entry value.
++                sources.append(PrologueRef(reg))
++            elif dom_expr is None:
+                 sources = []
+             elif isinstance(dom_expr, (EvalOnceExpr, PlannedPhiExpr, NaivePhiExpr)):
+                 sources.extend(dom_expr.sources)
+@@ -4165,7 +4440,7 @@ def create_dominated_node_state(
+                 expr = NaivePhiExpr(
+                     reg=reg,
+                     node=child,
+-                    type=Type.any_reg(),
++                    type=noma_phi_type(reg),
+                     sources=sources,
+                     uses_dominator=uses_dominator,
+                     used_naive_phis=used_naive_phis,
+@@ -4196,6 +4471,10 @@ def create_dominated_node_state(
+     # translation.
+     if has_fn_call:
+         child_state.prevent_later_reads()
++    elif NOMA_GUEST and len(child.parents) > 1:
++        # noma: the paths from the dominator may store to memory (or poll interrupts, in
++        # loops): reads made before a join are evaluated where the machine code makes them
++        child_state.prevent_later_reads()
+ 
+     return child_state
+ 
+@@ -4734,6 +5013,38 @@ def narrow_func_call_outputs(
+             and global_info.is_function_known_void(instr.function_target.symbol_name)
+         ):
+             instr.outputs.clear()
++        if (
++            NOMA_GUEST
++            and isinstance(instr, Instruction)
++            and isinstance(instr.function_target, AsmGlobalSymbol)
++        ):
++            # noma: registers the callee leaves unchanged (parameters named rN_kept/fN_kept)
++            # are neither written nor clobbered by the call
++            fn = global_info.typemap.functions.get(instr.function_target.symbol_name)
++            if fn is not None and fn.params:
++                kept = {
++                    Register(p.name[: -len("_kept")])
++                    for p in fn.params
++                    if p.name and p.name.endswith("_kept")
++                }
++                if kept:  # (Instruction is frozen: change the lists in place)
++                    instr.clobbers[:] = [c for c in instr.clobbers if c not in kept]
++                    instr.outputs[:] = [o for o in instr.outputs if o not in kept]
++
++
++def noma_phi_type(reg: Register) -> Type:
++    """noma: a variable that merges a register's values from several paths holds whole 32-bit
++    registers; a u16 type (from one path's lhz) would truncate another path's pointer. The
++    values convert from their own types (keeping their sign or zero extension) on the way in.
++    Never a float: one path's float bits (lwz of a float field) would turn another path's pointer
++    into a bit cast that is then dereferenced; float values move in as bits."""
++    if NOMA_GUEST and not reg.is_float() and reg.register_name.startswith("r"):
++        return Type(TypeData(kind=TypeData.K_INTPTR, likely_kind=TypeData.K_INTPTR, size_bits=32))
++    if NOMA_GUEST and reg.is_float():
++        # an FPR holds a double: one path's lfs (single) must not round another path's
++        # double (sscanf's %lf result merged with an lfs'd constant)
++        return Type.f64()
++    return Type.any_reg()
+ 
+ 
+ def setup_planned_vars(
+@@ -4762,7 +5073,7 @@ def setup_planned_vars(
+             stack_info,
+             prefix=prefix,
+             is_planned=True,
+-            type=Type.any_reg(),
++            type=noma_phi_type(reg),
+         )
+         stack_info.temp_vars.append(var)
+         for key in keys:
+@@ -4882,9 +5193,17 @@ def translate_to_ast(
+     return_reg: Optional[Tuple[Register, bool]] = None
+ 
+     if not options.void and not return_type.is_void():
+-        return_reg = determine_return_register(
+-            return_blocks, fn_sym.type_provided, arch
+-        )
++        if NOMA_GUEST and fn_sym.type_provided and arch.arch == Target.ArchEnum.PPC:
++            # noma: the prototype says where the result is (m2c's guess by how the registers
++            # were last set picked r3:r4 for a function declared to return a double)
++            if return_type.is_float():
++                return_reg = (Register("f1"), True)
++            else:
++                return_reg = (Register("r3"), False)
++        else:
++            return_reg = determine_return_register(
++                return_blocks, fn_sym.type_provided, arch
++            )
+ 
+     if return_reg is not None:
+         reg, is_floating = return_reg
+@@ -4893,12 +5212,33 @@ def translate_to_ast(
+         else:
+             return_type.unify(Type.intptr())
+ 
++        wide = (
++            NOMA_GUEST
++            and arch.arch == Target.ArchEnum.PPC
++            and not is_floating
++            and return_type.get_size_bits() == 64
++        )
+         for b in return_blocks:
+-            if reg in b.final_register_states:
++            if wide:
++                # noma: a 64-bit result is r3 (high word) : r4 (low word)
++                from .evaluate import fn_op
++
++                hi = b.final_register_states[Register("r3")]
++                lo = b.final_register_states[Register("r4")]
++                ret_val = fn_op("NOMA_U64", [hi, lo], Type.u64())
++                ret_val.use()
++                b.return_value = ret_val
++            elif reg in b.final_register_states:
+                 ret_val = b.final_register_states[reg]
+                 ret_val = as_type(ret_val, return_type, True)
+                 ret_val.use()
+                 b.return_value = ret_val
++            elif NOMA_GUEST and fn_sym.type_provided:
++                # noma: the register holds nothing defined here (a void call clobbered it);
++                # the prototype still wants a value
++                ret_val = as_type(Literal(0), return_type, True)
++                ret_val.use()
++                b.return_value = ret_val
+     else:
+         return_type.unify(Type.void())
+ 
+diff --git a/m2c/types.py b/m2c/types.py
+index a2a1a37..d351cc0 100644
+--- a/m2c/types.py
++++ b/m2c/types.py
+@@ -134,6 +134,27 @@ class TypePool:
+             struct.rename_inferred_vtables()
+ 
+ 
++# noma: emit C++ for the guest memory model (gp<T> pointers, GV/GS proxies)
++NOMA_GUEST = True
++
++
++def _noma_ctype_str(ctype: "CType") -> str:
++    decl = ca.Decl(
++        name="",
++        type=ctype,
++        quals=[],
++        align=[],
++        storage=[],
++        funcspec=[],
++        gcc_attributes=[],
++        init=None,
++        bitsize=None,
++        asmlabel=None,
++    )
++    set_decl_name(decl)
++    return to_c(decl).strip()
++
++
+ @dataclass(eq=False)
+ class TypeData:
+     K_INT = 1 << 0
+@@ -720,6 +741,15 @@ class Type:
+                 align=[],
+             )
+ 
++        if (
++            NOMA_GUEST
++            and data.size_bits not in (None, 8, 16, 32, 64)
++            and not data.kind & (TypeData.K_STRUCT | TypeData.K_ARRAY | TypeData.K_FN)
++        ):
++            # noma: a stack area sized by the gap to the next one (3 bytes -> "s24"); only its
++            # address is used (no instruction moves 3 bytes)
++            return simple_ctype("u8")
++
+         if (data.kind & TypeData.K_ANYREG) == TypeData.K_ANYREG and (
+             data.likely_kind & (TypeData.K_INT | TypeData.K_FLOAT)
+         ) not in (TypeData.K_INT, TypeData.K_FLOAT):
+@@ -734,6 +764,18 @@ class Type:
+         ):
+             return simple_ctype(f"f{size_bits}")
+ 
++        if data.kind == TypeData.K_PTR and NOMA_GUEST:
++            # noma: guest pointers are 32-bit Wii addresses (see runtime/guest.h)
++            if data.ptr_to is not None and data.ptr_to.data().kind == TypeData.K_FN:
++                return simple_ctype("gp<void>")
++            inner = "void" if data.ptr_to is None else _noma_ctype_str(data.ptr_to._to_ctype(seen.copy(), fmt))
++            return simple_ctype(f"gp<{inner}>")
++
++        if data.kind == TypeData.K_ARRAY and NOMA_GUEST:
++            assert data.ptr_to is not None
++            inner = _noma_ctype_str(data.ptr_to._to_ctype(seen.copy(), fmt))
++            return simple_ctype(f"gp<{inner}>")
++
+         if data.kind == TypeData.K_PTR:
+             target_ctype: CType
+             if data.ptr_to is None:

@@ -1,0 +1,45 @@
+// The software renderer (raster.cpp): the GPU's back end on the host.
+#pragma once
+#include "gx.h"
+
+namespace guest {
+
+class SoftRenderer : public GxRenderer {
+public:
+    void draw(u32 prim, u32 vat, u32 count, const u8* data) override;
+    void bp_write(u32 reg, u32 value) override;
+    void efb_copy(u32 value) override;
+};
+
+// an EFB copy as the BP registers describe it when the copy command (BP 0x52) is written
+struct EfbCopy {
+    u32 sx = 0, sy = 0, w = 0, h = 0;  // source rectangle in the EFB
+    u32 dst = 0, stride = 0;            // destination and its stride (bytes per row of blocks)
+    u32 fmt = 0;                        // texture format of a copy to a texture
+    bool to_xfb = false, half = false, intensity = false, clear = false, depth = false;
+};
+EfbCopy gx_efb_copy_params(u32 command);
+// an EFB pixel (x, y) as R, G, B, A (0-255)
+using EfbFetch = void (*)(u32 x, u32 y, s32* rgba);
+// write a copy of the EFB rectangle to the texture at c.dst, or to `out` (laid out the same way)
+void gx_copy_to_texture(const EfbCopy& c, EfbFetch fetch, u8* out = nullptr);
+// NOMA_EFB_COPY_TEST=N (3DS): at frame N the whole frame goes through the EFB-to-texture path
+// (RGBA8, and RGB565 at half size) and is saved decoded as <prefix>_rgba8.bmp / _rgb565.bmp,
+// to compare with the host's frame dumps
+int gx_efb_copy_test_frame();
+void gx_efb_copy_test(EfbFetch fetch, const char* prefix);
+
+// the last EFB copy to an external frame buffer
+struct XfbCopy {
+    u32 addr = 0, width = 0, height = 0, stride = 0;
+};
+const XfbCopy& gx_last_xfb_copy();
+// the frame buffer starting at addr, as far as copies have filled it (null if none)
+const XfbCopy* gx_xfb_region(u32 addr);
+
+}  // namespace guest
+
+namespace guest {
+// an external frame buffer (YUYV) as RGBA (R in bits 0-7)
+void gx_xfb_to_rgba(u32 addr, u32 width, u32 height, u32 stride, u32* out);
+}  // namespace guest

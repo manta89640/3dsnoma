@@ -1,0 +1,14 @@
+# decomp-toolkit (dtk) configuration for Wii no Ma (HCIJ, WiiLink build, title version 1025).
+# orig/ holds files from your own WAD (tools/wad_extract.py + tools/unpack_all.py); never committed.
+object: orig/HCIJ/sys/main.dol
+hash: ea48f13f978ab44d8e39d95930f0284aa8410304
+symbols: config/HCIJ/symbols.txt
+splits: config/HCIJ/splits.txt
+selfile: orig/HCIJ/files/rso/douga.sel
+selfile_hash: 6b6b7823b5e0b3eaa6679f955681ef96ad32ad40
+mw_comment_version: 15
+quick_analysis: false
+detect_objects: true
+detect_strings: true
+write_asm: true
+export_all: true
