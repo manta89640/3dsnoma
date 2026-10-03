@@ -29,6 +29,7 @@ Rules:
 | VF volume files made in 16 KB writes: `/tmp/skua.vf` took 27,067 NAND writes of 512 zero bytes (each an IOS request) at every start | `runtime/patches/vf.cpp` | 1,060 writes; the format 0.84 → 0.03 s on the host, 12.2 → 0.55 s on a host throttled to the 3DS's speed (est. 16 s of the opening on the 3DS). Same file bytes. |
 | Interrupts at every loop poll, and poll points in the LZ/Huffman natives (charged like the loops they replace): a font's glyph sheet decoded for 28 ms (host; ~10× on the 3DS) with no retrace or IOS reply taken | `runtime/irq.cpp`, `engine/cx/uncompress.cpp` | Longest stretch without a poll at startup 28.2 → 0.6 ms (host); the title's icons no longer stall behind loading. |
 | Guest memory in 1 MB pages with a biased table (`g_page[a >> 20] + a`, no mask); a constant address in MEM1 (every global) needs no MMIO check, a constant 0xCC/0xCD address goes straight to the device emulation | `runtime/guest.h`, `runtime/memory.cpp` | 3DS code 22.55 → 20.09 MB (−10.9%); a global's load is 5 instructions with no branch. MEM1 backed at its real 24 MB (was 32). |
+| CX decompression's fast paths: LZ in whole flag groups (literal runs found with CLZ, matches copied a word at a time), Huffman through a table of each tree's first 10 bits (kept while the context holds the same tree); same output and context state at every return as the streaming code, same poll points | `engine/cx/uncompress.cpp` (reference: `cx_reference.h`) | ARM11 instructions per output byte (`tools/armbench/armbench.py --cx`): room model (LZ11) 13.8 → 10.4, layouts 8.3 → 5.2, font glyph sheets (Huffman, ~9 MB at start) 55–72 → 34–40. Exact (`NOMA_SELFTEST=cx`: 3,000 LZ and 3,000 Huffman random streams in random pieces). |
 | Guest memory as large as the game needs: MEM2 48 MB, not 64 (the room and its menus run in 44, 42 can't make the room; Flash and MobiClip are left out). The 3DS heaps split by need: the normal heap (at most 128 MB of addresses, 0x08000000 on) gets all but 48 MB, the linear heap keeps 16 MB for the GPU and sound plus MEM1; MEM2 goes in the normal heap (nothing reads guest memory by DMA) | `runtime/runtime.h` (`MEM2_SIZE`), `platform/3ds/main.cpp` (`__system_allocateHeaps`, `platform_alloc_guest`) | Guest memory 96 → 72 MB; what's saved goes to the program's own heap. |
 
 ## In progress
@@ -110,8 +111,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 
 | What | Where | Expected | Effort | Exact? |
 |---|---|---|---|---|
-| LZ10/LZ11: a fast loop (a flag byte per iteration, 4-byte match copies when distance ≥ 4) while ≥ 33 input bytes and room remain, with the exact streaming code for the tail. Must never write past the output size (it's guest memory). | `engine/cx/uncompress.cpp` | est. 2–4× on 44 MB of LZ data | 1–2 days | Yes |
-| Huffman: a 2^10 lookup table built from the tree, refilled a word at a time | same | est. 4–6× | 1–2 days | Yes |
+| Huffman: several short codes per table entry (glyph sheets average about 2 bits a symbol, so the per-symbol work dominates) | `engine/cx/uncompress.cpp` | ≈ 34 → 15 instructions a byte on glyph sheets | 1 day | Yes, with the word-boundary state kept |
 | Asynchronous file reads on a worker thread, replying through `ios_complete`, straight into guest RAM (no temporary vector) | `runtime/hw/ios/fs.cpp` | Loads overlap decompression and animation; a read no longer blocks every guest thread | 2–3 days | Reply ordering |
 
 ### Memory and the Old 3DS

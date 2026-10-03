@@ -2,6 +2,11 @@
 // as it reads files, and a context in guest memory carries the decoder's state from one piece to
 // the next. CXReadUncompLZ: Nintendo's LZ77 ("LZ10", and the extended "LZ11" lengths);
 // CXReadUncompHuffman: 4- or 8-bit symbols, a tree of 2-byte nodes, 32-bit little-endian words.
+// Each has a fast path where its input allows (LZ: whole flag groups, runs of literals at once,
+// matches a word at a time; Huffman: a table for a code's first 10 bits) that leaves the output
+// and the context exactly as the streaming code, kept in engine/cx/cx_reference.h, would:
+// NOMA_SELFTEST=cx compares them on random streams fed in random pieces, and tools/armbench
+// (--cx) on the 3DS's code and the game's own files.
 #include "noma_decomp.h"
 #include "runtime.h"
 
@@ -64,6 +69,36 @@ inline void poll_point(s32 units) {
         guest::loop_poll();
 }
 
+// the input a flag group can take at most: its flag byte and 8 matches of 4 bytes (LZ11's longest)
+const u32 FAST_LZ_INPUT = 1 + 8 * 4;
+
+// n bytes from dist back: a word at a time when the word read was all written before
+inline void copy_match(u8* d, u32 dist, u32 n) {
+    const u8* s = d - dist;
+    if (dist == 1) {
+        ::memset(d, *s, n);
+        return;
+    }
+    if (dist < 4) {
+        for (; n; n--)
+            *d++ = *s++;
+        return;
+    }
+    for (; n >= 4; n -= 4, d += 4, s += 4) {
+        u32 w;
+        ::memcpy(&w, s, 4);
+        ::memcpy(d, &w, 4);
+    }
+    if (n & 2) {
+        u16 h;
+        ::memcpy(&h, s, 2);
+        ::memcpy(d, &h, 2);
+        d += 2, s += 2;
+    }
+    if (n & 1)
+        *d = *s;
+}
+
 s32 read_lz(LzState& s, const u8* src, u32 len) {
     if (s.header_size) {
         if (s.header_size == 8) {
@@ -103,6 +138,70 @@ s32 read_lz(LzState& s, const u8* src, u32 len) {
         return r;
     };
     while (s.dest_count > 0) {
+        if (!s.flag_index && len >= FAST_LZ_INPUT && s.length_flg == 3) {
+            // whole flag groups while all their input is here, decoded as the streaming code
+            // below would, with the state in registers; a match longer than the output left
+            // goes to that code (an error, or the forced size's end)
+            const u8* const src0 = src;
+            const u8* const last = src + len - FAST_LZ_INPUT;  // the last group that can start
+            const bool ex = s.ex_format;
+            s32 count = s.dest_count;
+            u32 flags = 0, n = 0;  // the flags at bits 7 down, n of them unused
+            while (n == 0 && count > 0 && src <= last) {
+                poll_point(8 + (s32)((dst - polled) >> 4));
+                polled = dst;
+                flags = *src++;
+                n = 8;
+                for (;;) {
+                    // the literals before the next match, all at once (a 1 after the n flags stops the count)
+                    u32 k = (u32)__builtin_clz(flags << 24 | 0x80000000u >> n);
+                    if (k) {
+                        if ((s32)k >= count) {  // the output ends among them, its last flag kept
+                            k = (u32)count;
+                            for (u32 i = 0; i < k; i++)
+                                dst[i] = src[i];
+                            dst += k, src += k, count = 0;
+                            flags = (flags << (k - 1)) & 0xFF, n -= k - 1;
+                            break;
+                        }
+                        for (u32 i = 0; i < k; i++)
+                            dst[i] = src[i];
+                        dst += k, src += k, count -= (s32)k;
+                        flags = (flags << k) & 0xFF, n -= k;
+                        if (n == 0)
+                            break;
+                    }
+                    u32 b0 = src[0], length, disp, used;
+                    if (!ex) {
+                        length = (b0 >> 4) + 3, disp = (b0 & 0xF) << 8 | src[1], used = 2;
+                    } else if ((b0 >> 4) == 1) {
+                        length = ((b0 & 0xF) << 12 | src[1] << 4 | src[2] >> 4) + 0x111;
+                        disp = (src[2] & 0xF) << 8 | src[3], used = 4;
+                    } else if ((b0 >> 4) == 0) {
+                        length = ((b0 & 0xF) << 4 | src[1] >> 4) + 0x11;
+                        disp = (src[1] & 0xF) << 8 | src[2], used = 3;
+                    } else {
+                        length = (b0 >> 4) + 1, disp = (b0 & 0xF) << 8 | src[1], used = 2;
+                    }
+                    if ((s32)length > count)
+                        break;
+                    src += used;
+                    count -= (s32)length;
+                    copy_match(dst, disp + 1, length);
+                    dst += length;
+                    if (count == 0)
+                        break;  // (the streaming code leaves the flags as they are then too)
+                    flags = (flags << 1) & 0xFF;
+                    if (--n == 0)
+                        break;
+                }
+            }
+            s.flags = (u8)flags;
+            s.flag_index = (u8)n;
+            s.dest_count = count;
+            len -= (u32)(src - src0);
+            continue;
+        }
         if (!s.flag_index) {
             if (!len)
                 break;
@@ -193,6 +292,55 @@ enum : u32 {
 
 u32 CXiVerifyHuffmanTable(u32 table, u32 bit_size);  // CXiVerifyHuffmanTable
 
+namespace {
+
+// The first HUFF_LUT_BITS bits of a symbol, looked up instead of walked a bit at a time: from the
+// root, the leaf they reach (its symbol and length) or the node after all of them. Built for the
+// tree a context holds (once it has passed CXiVerifyHuffmanTable), and kept while the context
+// holds the same tree: the glyph sheets of a font come in pieces, each sheet with its own tree.
+const u32 HUFF_LUT_BITS = 10;
+enum : u32 { HUFF_LEAF = 0x100 };  // an entry: symbol or node (offset in the context) << 16, leaf, bits
+struct HuffLut {
+    u32 ctx;
+    u8 tree[0x200];  // the tree it was made from: the size byte, then the nodes
+    u32 entry[1u << HUFF_LUT_BITS];
+};
+HuffLut s_lut;
+
+void lut_fill(const u8* tree, u32 ctx, u32 p, u32 depth, u32 code) {
+    u8 node = tree[p - ctx];
+    for (u32 bit = 0; bit < 2; bit++) {
+        u32 child = (p & ~1u) + ((node & 0x3F) + 1) * 2 + bit, c = code << 1 | bit, d = depth + 1;
+        if ((node << bit) & 0x80) {
+            u32 e = (u32)tree[child - ctx] << 16 | HUFF_LEAF | d;
+            for (u32 i = c << (HUFF_LUT_BITS - d), n = 1u << (HUFF_LUT_BITS - d); n; n--, i++)
+                s_lut.entry[i] = e;
+        } else if (d == HUFF_LUT_BITS) {
+            s_lut.entry[c] = (child - ctx) << 16 | d;
+        } else {
+            lut_fill(tree, ctx, child, d, c);
+        }
+    }
+}
+
+// the table for the tree at ctx (tree: the context in host memory), or none for a tree that
+// doesn't verify (it is then walked as it is)
+const HuffLut* huff_lut(u32 ctx, const u8* tree, u8 bit_size) {
+    const u8* t = tree + HF_TREE;
+    u32 size = (t[0] + 1u) * 2;
+    if (s_lut.ctx == ctx && !::memcmp(s_lut.tree, t, size))
+        return &s_lut;
+    s_lut.ctx = 0;
+    if (!CXiVerifyHuffmanTable(ctx + HF_TREE, bit_size))
+        return nullptr;
+    ::memcpy(s_lut.tree, t, size);
+    lut_fill(tree, ctx, ctx + HF_TREE + 1, 0, 0);
+    s_lut.ctx = ctx;
+    return &s_lut;
+}
+
+}  // namespace
+
 // r3: the context, r4: the compressed bytes, r5: how many. The context tells how far it got.
 void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
     NOMA_PROF_SCOPE("(cx huffman)");
@@ -260,7 +408,7 @@ void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
         }
     }
 
-    // the symbols: each input bit picks a child, until a leaf
+    // the symbols: each input bit picks a child, until a leaf (the first bits from the table)
     u32 src_tmp = guest::load32(ctx + HF_SRC_TMP), dest_tmp = guest::load32(ctx + HF_DEST_TMP);
     u8 src_cnt = guest::load8(ctx + HF_SRC_TMP_CNT), dest_cnt = guest::load8(ctx + HF_DEST_TMP_CNT);
     u32 dest = guest::load32(ctx + HF_DEST);
@@ -269,40 +417,77 @@ void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
     if (!tree)
         return;
     auto node_at = [&](u32 a) { return tree[a - ctx]; };
+    const HuffLut* lut = dest_count > 0 && len ? huff_lut(ctx, tree, bit_size) : nullptr;
+    // (working copies in registers; the u8 counters wrap as the context's bytes would)
+    u32 sbits = src_cnt, dbits = dest_cnt, tp = tree_p;
+    const u32 bs = bit_size, sym_shift = 32 - bit_size;
     while (dest_count > 0) {
-        if (src_cnt < 32) {  // fill the input word (little-endian)
+        if (sbits < 32) {  // fill the input word (little-endian)
             if (!len)
                 break;
-            poll_point(8);  // a byte's 8 bits
-            src_tmp |= (u32)*src++ << src_cnt;
-            src_cnt += 8;
-            len--;
-            continue;
-        }
-        while (src_cnt && dest_count > 0) {
-            u32 bit = src_tmp >> 31;
-            src_tmp <<= 1;
-            src_cnt--;
-            u8 node = node_at(tree_p);
-            bool leaf = ((node << bit) & 0x80) != 0;
-            tree_p = (tree_p & ~1u) + ((node & 0x3F) + 1) * 2 + bit;
-            if (!leaf)
+            if (sbits == 0 && len >= 4) {  // all of it, as four bytes would
+                poll_point(32);
+                src_tmp = src[0] | src[1] << 8 | src[2] << 16 | (u32)src[3] << 24;
+                src += 4, len -= 4, sbits = 32;
+            } else {
+                poll_point(8);  // a byte's 8 bits
+                src_tmp |= (u32)*src++ << sbits;
+                sbits = (sbits + 8) & 0xFF;
+                len--;
                 continue;
-            dest_tmp = (dest_tmp >> bit_size) | ((u32)node_at(tree_p) << (32 - bit_size));
-            tree_p = root;
-            dest_cnt += bit_size;
-            if (dest_count <= (s32)((dest_cnt >> 3) & 0x1F)) {  // the last word: align it
-                dest_tmp >>= 32 - dest_cnt;
-                dest_cnt = 32;
             }
-            if (dest_cnt == 32) {
+        }
+        // a symbol into the output word; a whole word stored (and dest_count lowered: false when it
+        // reaches 0)
+        auto emit = [&](u32 sym) {
+            dest_tmp = (dest_tmp >> bs) | (sym << sym_shift);
+            dbits = (dbits + bs) & 0xFF;
+            if (dest_count <= (s32)((dbits >> 3) & 0x1F)) {  // the last word: align it
+                dest_tmp >>= 32 - dbits;
+                dbits = 32;
+            }
+            if (dbits == 32) {
                 guest::store32(dest, __builtin_bswap32(dest_tmp));
                 dest += 4;
                 dest_count -= 4;
-                dest_cnt = 0;
+                dbits = 0;
             }
+            return dest_count > 0;
+        };
+        while (sbits && dest_count > 0) {
+            if (lut && tp == root) {
+                // whole symbols from the table, until it needs more bits than are left or the
+                // output ends; a code longer than the table goes on from its node, a bit at a time
+                for (;;) {
+                    u32 e = lut->entry[src_tmp >> (32 - HUFF_LUT_BITS)], n = e & 0xFF;
+                    if (n > sbits)
+                        break;
+                    src_tmp <<= n;
+                    sbits -= n;
+                    if (!(e & HUFF_LEAF)) {
+                        tp = ctx + (e >> 16);
+                        break;
+                    }
+                    if (!emit(e >> 16))
+                        break;
+                }
+                if (!sbits || dest_count <= 0)
+                    break;
+            }
+            u32 bit = src_tmp >> 31;
+            src_tmp <<= 1;
+            sbits--;
+            u8 node = node_at(tp);
+            bool leaf = ((node << bit) & 0x80) != 0;
+            tp = (tp & ~1u) + ((node & 0x3F) + 1) * 2 + bit;
+            if (!leaf)
+                continue;
+            u32 sym = node_at(tp);
+            tp = root;
+            emit(sym);
         }
     }
+    src_cnt = (u8)sbits, dest_cnt = (u8)dbits, tree_p = tp;
     guest::store32(ctx + HF_DEST, dest);
     guest::store32(ctx + HF_DEST_COUNT, (u32)dest_count);
     guest::store32(ctx + HF_TREE_P, tree_p);
