@@ -121,7 +121,7 @@ Useful environment variables:
 | variable | effect |
 | --- | --- |
 | `NOMA_DUMP_FRAMES=N` | write every Nth displayed frame to `frames/NNNNN.png` |
-| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `OFF` presses the Wii's power button (as closing from the HOME Menu does) |
+| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does) |
 | `NOMA_DEBUG_MSG=1` | log each text (BMG message) the game asks for, the first time, with its id and the game time: the screens a run went through, without frames |
 | `NOMA_OFFLINE=0` | go online (the default is offline: no network, online steps skipped) |
 | `NOMA_PROFILE=seconds` | profiling builds (`-DNOMA_PROFILE_CALLS=ON`): where the time goes |
@@ -148,6 +148,8 @@ Nth frame as a BMP in `sdmc:/3ds/noma/shots`.
 
 The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom screen (or use the
 circle pad) to point, A/B as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad as the D-pad.
+Left alone for 3 seconds, the pointer leaves the screen as a remote put down would, so the room's
+menus (その他, the bottom bar) close; the next touch brings it back.
 The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.

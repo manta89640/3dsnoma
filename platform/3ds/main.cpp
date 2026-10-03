@@ -3,8 +3,9 @@
 // in sdmc:/3ds/noma.
 //
 // Controls (a Wii Remote held pointing at the screen): touch the bottom screen to point,
-// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote. The remote's HOME button
-// has no counterpart: the Wii's HOME Button Menu isn't part of the port (engine/system).
+// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote. Left alone for 3 s, the
+// pointer leaves the screen, as a remote put down does. The remote's HOME button has no
+// counterpart: the Wii's HOME Button Menu isn't part of the port (engine/system).
 #include <3ds.h>
 #include <sys/stat.h>
 
@@ -445,13 +446,24 @@ static void poll_input() {
     // the circle pad nudges the pointer too
     circlePosition c;
     hidCircleRead(&c);
-    if (c.dx * c.dx + c.dy * c.dy > 20 * 20) {
+    bool nudged = c.dx * c.dx + c.dy * c.dy > 20 * 20;
+    if (nudged) {
         s_in.x += (float)c.dx / 156.0f * 0.03f;
         s_in.y -= (float)c.dy / 156.0f * 0.03f;
         s_in.x = s_in.x < -1 ? -1 : s_in.x > 1 ? 1 : s_in.x;
         s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
     }
-    s_in.pointing = true;
+    // The pointer stays where the stylus left it, so a menu that opens while the pointer is over
+    // it (the room's その他 panel) never closed, and buttons stayed highlighted. A Wii Remote put
+    // down or pointed away has no pointer, and the room hides its menus: here the pointer leaves
+    // the screen 3 s after the last touch or circle pad move (time to tap, then press A), and the
+    // next one brings it back. A doesn't: what was under the pointer, coming back, isn't ready
+    // for a press yet (the room bar slides in first). Scripted runs keep it on the screen.
+    static u64 s_used;
+    u64 now = host_time_us();
+    if ((held & KEY_TOUCH) || nudged)
+        s_used = now;
+    s_in.pointing = now - s_used < 3000000 || input_script_active();
     // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator); a scripted
     // P(x;y) moves the pointer once, and touching or the circle pad moves it on from there
     if (input_script_active())

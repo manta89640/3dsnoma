@@ -158,8 +158,8 @@ static void scripted_input() {
         return;
     static WiimoteInput in;
     in.buttons = 0;
-    input_script_apply(in);
     in.pointing = true;
+    input_script_apply(in);
     wiimote_set_input(in);
 }
 
