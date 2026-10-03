@@ -28,6 +28,8 @@ Rules:
 | The content players left out: Adobe Flash (4,216 functions) and MobiClip (693) are stubs; Flash's init makes nothing (the manager stays "not ready"), the movie manager starts with no work area and no movie; the shop, which was Flash content, is hidden | `runtime/patches/players.cpp`, `runtime/patches/menus.cpp`, `tools/decomp/regions.py` | 3DS code 22.55 → 15.38 MB with the guest-memory change. Nothing builds Flash's 5.6 MB MEM1 + 24 MB MEM2 heaps, its sound thread or MobiClip's 4.2 MB. |
 | VF volume files made in 16 KB writes: `/tmp/skua.vf` took 27,067 NAND writes of 512 zero bytes (each an IOS request) at every start | `runtime/patches/vf.cpp` | 1,060 writes; the format 0.84 → 0.03 s on the host, 12.2 → 0.55 s on a host throttled to the 3DS's speed (est. 16 s of the opening on the 3DS). Same file bytes. |
 | Interrupts at every loop poll, and poll points in the LZ/Huffman natives (charged like the loops they replace): a font's glyph sheet decoded for 28 ms (host; ~10× on the 3DS) with no retrace or IOS reply taken | `runtime/irq.cpp`, `engine/cx/uncompress.cpp` | Longest stretch without a poll at startup 28.2 → 0.6 ms (host); the title's icons no longer stall behind loading. |
+| Guest memory in 1 MB pages with a biased table (`g_page[a >> 20] + a`, no mask); a constant address in MEM1 (every global) needs no MMIO check, a constant 0xCC/0xCD address goes straight to the device emulation | `runtime/guest.h`, `runtime/memory.cpp` | 3DS code 22.55 → 20.09 MB (−10.9%); a global's load is 5 instructions with no branch. MEM1 backed at its real 24 MB (was 32). |
+| Guest memory as large as the game needs: MEM2 48 MB, not 64 (the room and its menus run in 44, 42 can't make the room; Flash and MobiClip are left out). The 3DS heaps split by need: the normal heap (at most 128 MB of addresses, 0x08000000 on) gets all but 48 MB, the linear heap keeps 16 MB for the GPU and sound plus MEM1; MEM2 goes in the normal heap (nothing reads guest memory by DMA) | `runtime/runtime.h` (`MEM2_SIZE`), `platform/3ds/main.cpp` (`__system_allocateHeaps`, `platform_alloc_guest`) | Guest memory 96 → 72 MB; what's saved goes to the program's own heap. |
 
 ## In progress
 
@@ -62,6 +64,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 |---|---|
 | Wii Remote (Bluetooth, WPAD, KPAD, speaker, rumble) | Done: native (`engine/input/remote.cpp`). |
 | HOME Button Menu | Done: never loads (`engine/system/home_button.cpp`). |
+| Software keyboard (the SDK's sofkeybd with ATOK and KPR: a 4.49 MB heap, three dictionaries and a sound archive in every scene that takes text) | Done: the 3DS's system keyboard; the scenes' keyboard object is native (`engine/system/keyboard.cpp`, `platform_text_input`). |
 | The Wii Remote strap screen at the start ("use the strap", until a button or 20 s) | Done: the title and pre-title scenes are made without it (`runtime/patches/wii_parts.cpp`). |
 | The first-run setup's video quality step (high or normal quality for streaming), and the line announcing it | Done: the setup goes from the family's Miis to its end; the message loses that line (`wii_parts.cpp`). |
 | The same setting in the room's options (OptionScene::StateVideo, the top menu's video page) | Done: its button is hidden, the family and the terms of use take the middle places (`runtime/patches/menus.cpp`). |
@@ -87,7 +90,6 @@ What the program does only because it runs on a Wii, and what replaces it.
 |---|---|---|---|---|
 | Compile `noma_decomp` at `-O2` (or `-Os` for cold objects). `-O1` has no instruction scheduling, which hurts on the in-order ARM11, and no small-function inlining. | `CMakeLists.txt` | est. 10–30% on all guest code | Hours plus compile time | Undefined behaviour in generated code may surface: run every self-test |
 | Gather-pipe fast path: about 2,100 decomp stores go to the constant address 0xCC008000 through store → mmio_write → gx_fifo_write's byte loop. Append inline when `__builtin_constant_p(addr)` (Dolphin's FastWrite). | `runtime/guest.h`, `runtime/hw/gx/fifo.cpp` | est. 5–10× cheaper per GX write | Hours | None |
-| Fold other constant-address MMIO at compile time. A biased page table (`table[a >> 24] + a`) saves the mask in every load and store. | `runtime/guest.h` | Smaller, faster accessors | Medium | Low |
 | Cheaper polls: the function-entry and loop polls (`NOMA_LOOP`) read a flag a timer sets, instead of decrementing a global | runtime | Small, everywhere | 1 day | Low |
 | Profile-guided code layout: order `.text.<fn>` sections from the sampling profiler (22.6 MB of code against a 16 KB instruction cache), then GCC PGO with `.gcda` files written to the SD card | linker script | est. 5–15% | 2–4 days | None |
 | `f32` instead of `f64` for values that are single precision on the Wii (`fadds`/`fmuls` results): identical bits, fewer conversions | m2c type inference | Broad, modest | 2–4 days | Only where provably single precision |
@@ -116,7 +118,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 
 | What | Expected | Effort | Risk |
 |---|---|---|---|
-| Old 3DS memory diet: guest memory alone takes 96 MB (MEM1 as 32 MB for the 16 MB pages, plus MEM2), which is the whole Old 3DS application region. Use 1 MB pages so only MEM1's 24 MB is backed, measure the game's MEM2 high-water mark, and build cold code with `-Os` and `-fipa-icf`. | Needed to run on the Old 3DS at all | ~1 week | Out of memory in untested scenes |
+| Old 3DS memory diet: guest memory is 72 MB (MEM1 24 MB, MEM2 48 MB). Next: build cold code with `-Os` and `-fipa-icf`. The SDK's software keyboard, ATOK and KPR (about 0.6 MB of PowerPC code) are unreachable since the 3DS keyboard took over, but share their address ranges with library code the channel calls, so stubbing them needs a reachability pass over calls and vtables. | Needed to run on the Old 3DS at all | Days | Out of memory in untested scenes |
 
 ### Determinism
 

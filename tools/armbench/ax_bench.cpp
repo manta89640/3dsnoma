@@ -8,7 +8,7 @@
 #include "engine/audio/ax_render.h"
 
 namespace guest {
-u8* g_page[256];
+uintptr_t g_page[1u << (32 - PAGE_BITS)];
 u32 g_sp;
 FnSlot g_fn_cache[4096];
 u32 mmio_read(u32, int) { return 0; }
@@ -33,9 +33,9 @@ engine::audio::AxBuses s_bus;
 s32 s_ref_bus[12][ref::SPF];
 
 void map() {
-    guest::g_page[0x80] = s_pbs;
-    guest::g_page[0x90] = (u8*)((uintptr_t)s_lo - 0xFF8000);
-    guest::g_page[0x91] = s_hi;
+    guest::g_page[0x80000000u >> guest::PAGE_BITS] = (uintptr_t)s_pbs - 0x80000000u;
+    guest::g_page[DATA >> guest::PAGE_BITS] = (uintptr_t)s_lo - DATA;
+    guest::g_page[(DATA + sizeof(s_lo)) >> guest::PAGE_BITS] = (uintptr_t)s_hi - (DATA + sizeof(s_lo));
 }
 
 void st16(u32 a, u16 v) { guest::store16(a, v); }

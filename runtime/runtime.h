@@ -10,7 +10,11 @@ namespace guest {
 
 // ---- memory (memory.cpp)
 void memory_init(u32 mem2_size);
-void* platform_alloc_guest(u32 size);  // zeroed memory for MEM1/MEM2 (the 3DS: its linear heap)
+// MEM2 as large as the game needs, not the Wii's 64 MB: with the Flash player and MobiClip left out
+// (runtime/patches/players.cpp) the room and its menus run in 44 MB (host, NOMA_MEM2_MB); 42 is too
+// little to make the room. The IPC buffers stay at its top (boot.cpp).
+static const u32 MEM2_SIZE = 48u << 20;
+void* platform_alloc_guest(u32 size);  // zeroed memory for MEM1/MEM2, one block each
 u32 mem2_size();
 void read_g(void* out, u32 src, u32 n);
 void write_g(u32 dst, const void* in, u32 n);
@@ -29,6 +33,17 @@ void platform_quit(const char* why);
 // only see when it starts again: true if one was picked and the next quit starts the app again;
 // false where there's no Mii Selector (the host) or none was picked
 bool platform_choose_mii();
+// text from the player (engine/system/keyboard.cpp; the 3DS: its system keyboard), in UTF-8: true
+// with the text entered, false if cancelled
+struct TextInput {
+    enum Kind { ANY, LATIN, NUMBERS } kind = ANY;
+    bool secret = false;     // shown as dots (PINs, passwords)
+    bool multiline = false;
+    u32 max_length = 0;      // in UTF-16 units
+    std::string text;        // to start from
+    std::string title;       // what it is for (may be empty)
+};
+bool platform_text_input(const TextInput& in, std::string& out);
 
 // Miis (runtime/mii.cpp): a 3DS MiiData (0x5C bytes) as the Wii's RFLCharData (0x4A bytes), and a
 // fresh /shared2/menu/FaceLib/RFL_DB.dat holding up to 100 of those

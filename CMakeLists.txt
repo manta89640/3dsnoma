@@ -74,6 +74,7 @@ set(ENGINE_SOURCES
   engine/snd/tables.cpp
   engine/snd/voice.cpp
   engine/system/home_button.cpp
+  engine/system/keyboard.cpp
   engine/system/thread.cpp
   engine/ut/font.cpp
 )

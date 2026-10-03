@@ -96,7 +96,7 @@ struct Pb {
 // sample memory: the accelerator's addresses are physical (nibbles for ADPCM, 16-bit samples for
 // PCM16, bytes for PCM8); RAM is read in place, a page at a time
 inline u32 sample_addr(u32 phys) { return 0x80000000u | (phys & 0x1FFFFFFF); }
-inline u32 page_room(u32 phys) { return 0x1000000 - (phys & 0xFFFFFF); }  // bytes to its page's end
+inline u32 page_room(u32 phys) { return guest::PAGE_SIZE - (phys & (guest::PAGE_SIZE - 1)); }  // bytes to its page's end
 inline const u8* ram(u32 phys) { return guest::host_ptr(sample_addr(phys)); }
 // n bytes from phys on, not on a RAM page (hardware registers, say): through the guest's loads
 const u8* fetch(u32 phys, u32 n, u8* tmp) {

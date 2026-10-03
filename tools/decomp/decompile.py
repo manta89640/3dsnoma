@@ -124,6 +124,12 @@ NATIVE_NAMES = {
     # engine/system: the Wii's HOME Button Menu is not part of the 3DS port (home_button.cpp)
     "homebutton_Manager_LoadIcon", "homebutton_Manager_Load", "homebutton_Manager_Open",
     "homebutton_Manager_Update", "homebutton_Manager_Draw",
+    # engine/system: the channel's software keyboard is the 3DS's own keyboard (keyboard.cpp)
+    "keyboard_Keyboard_ctor", "keyboard_Keyboard_dtor", "keyboard_Keyboard_Update", "keyboard_Keyboard_Draw",
+    "keyboard_Keyboard_Open", "keyboard_Keyboard_SetOnDecide", "keyboard_Keyboard_SetOnClosed",
+    "keyboard_Keyboard_SetMode", "keyboard_Keyboard_SetText", "keyboard_Keyboard_GetText",
+    "keyboard_Keyboard_SetTitle", "keyboard_Keyboard_SetMaxLines", "keyboard_Keyboard_SetMaxLength",
+    "keyboard_Keyboard_GetDefaultMaxLength",
     # engine/os: mutexes (a free or own mutex without the scheduler)
     "OSLockMutex", "OSUnlockMutex", "OSTryLockMutex",
     # engine/snd: nw4r::snd's voice layer (VoiceManager::UpdateAllVoices and below), native

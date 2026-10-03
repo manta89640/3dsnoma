@@ -62,6 +62,16 @@ void platform_quit(const char* why) {
 
 bool platform_choose_mii() { return false; }  // (no Mii Selector: Miis come from NOMA_SELFTEST=rfl)
 
+// NOMA_KEYBOARD=text: what is typed whenever the game asks (UTF-8); unset, the keyboard is cancelled
+bool platform_text_input(const TextInput& in, std::string& out) {
+    const char* t = getenv("NOMA_KEYBOARD");
+    log("keyboard: \"%s\" (was \"%s\")", in.title.c_str(), in.text.c_str());
+    if (!t)
+        return false;
+    out = t;
+    return true;
+}
+
 void platform_fatal(const char* msg) {
     ::noma_trace_dump();
     fprintf(stderr, "fatal: %s\n", msg);
@@ -271,7 +281,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "no %s/main.dol (run tools/stage_data.py)\n", data.c_str());
         return 1;
     }
-    guest::memory_init(64u << 20);
+    // NOMA_MEM2_MB: another MEM2 size (sizing experiments)
+    guest::memory_init(getenv("NOMA_MEM2_MB") ? (u32)atoi(getenv("NOMA_MEM2_MB")) << 20 : guest::MEM2_SIZE);
     if (!guest::load_dol(dol)) {
         fprintf(stderr, "bad main.dol\n");
         return 1;

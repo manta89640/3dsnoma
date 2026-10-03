@@ -26,10 +26,38 @@
 
 void noma_start_guest();
 
-// The linear heap holds guest memory (96 MB, see platform_alloc_guest) and the GPU's and DSP's
-// buffers; the normal heap gets the rest (in the New 3DS's 178 MB mode, about 35 MB).
-extern "C" u32 __ctru_linear_heap_size = 116u << 20;
-extern "C" u32 __ctru_heap_size;
+// The normal heap's addresses (0x08000000 on) hold at most 128 MB, so it can't take all the memory:
+// it gets what's free but LINEAR_MIN, up to HEAP_MAX, and the linear heap the rest. The linear heap
+// holds what the GPU and the DSP read (textures, vertices, sound buffers: GPU_RESERVE) and as much
+// guest memory as fits beside it (see platform_alloc_guest), the normal heap the rest of it.
+extern "C" u32 __ctru_linear_heap_size, __ctru_heap_size, __ctru_heap, __ctru_linear_heap;
+extern "C" char *fake_heap_start, *fake_heap_end;
+// (GPU_RESERVE: the PICA's vertex and index buffers, the textures it keeps, read-backs and sound
+// take about 8 MB in the room; LINEAR_MIN also has room for the frame buffers and MEM1)
+static const u32 GPU_RESERVE = 16u << 20, LINEAR_MIN = GPU_RESERVE + (24u << 20) + (8u << 20), HEAP_MAX = 120u << 20;
+
+extern "C" void __system_allocateHeaps(void) {
+    Handle reslimit = 0;
+    if (R_FAILED(svcGetResourceLimit(&reslimit, CUR_PROCESS_HANDLE)))
+        svcBreak(USERBREAK_PANIC);
+    s64 max_commit = 0, commit = 0;
+    ResourceLimitType type = RESLIMIT_COMMIT;
+    svcGetResourceLimitLimitValues(&max_commit, reslimit, &type, 1);
+    svcGetResourceLimitCurrentValues(&commit, reslimit, &type, 1);
+    svcCloseHandle(reslimit);
+    u32 free = (u32)(max_commit - commit) & ~0xFFFu;
+    __ctru_heap_size = free > LINEAR_MIN ? std::min(free - LINEAR_MIN, HEAP_MAX) : free / 2;
+    __ctru_heap_size &= ~0xFFFu;
+    __ctru_linear_heap_size = free - __ctru_heap_size;
+    if (R_FAILED(svcControlMemory(&__ctru_heap, OS_HEAP_AREA_BEGIN, 0, __ctru_heap_size, MEMOP_ALLOC,
+                                  (MemPerm)(MEMPERM_READ | MEMPERM_WRITE))) ||
+        R_FAILED(svcControlMemory(&__ctru_linear_heap, 0, 0, __ctru_linear_heap_size, MEMOP_ALLOC_LINEAR,
+                                  (MemPerm)(MEMPERM_READ | MEMPERM_WRITE))))
+        svcBreak(USERBREAK_PANIC);
+    mappableInit(OS_MAP_AREA_BEGIN, OS_MAP_AREA_END);
+    fake_heap_start = (char*)__ctru_heap;
+    fake_heap_end = fake_heap_start + __ctru_heap_size;
+}
 
 namespace guest {
 bool load_dol(const std::vector<u8>& dol);
@@ -69,7 +97,6 @@ static ndspWaveBuf s_wbuf[AUDIO_BUFS];
 static int s_wcur;
 static u32 s_wfill;
 static bool s_audio;
-static bool s_guest_linear = true;  // guest memory is in the linear heap (platform_alloc_guest)
 
 static void audio_init() {
     if (R_FAILED(ndspInit())) {
@@ -205,6 +232,29 @@ bool platform_choose_mii() {
     return true;
 }
 
+// the system keyboard (a library applet: the game waits while it's up)
+bool platform_text_input(const TextInput& in, std::string& out) {
+    SwkbdState kb;
+    SwkbdType type = in.kind == TextInput::NUMBERS ? SWKBD_TYPE_NUMPAD
+                     : in.kind == TextInput::LATIN ? SWKBD_TYPE_QWERTY
+                                                   : SWKBD_TYPE_NORMAL;
+    int len = (int)std::min<u32>(std::max<u32>(in.max_length, 1), 0x3FF);
+    swkbdInit(&kb, type, 2, len);
+    swkbdSetInitialText(&kb, in.text.c_str());
+    if (!in.title.empty())
+        swkbdSetHintText(&kb, in.title.c_str());
+    if (in.secret)
+        swkbdSetPasswordMode(&kb, SWKBD_PASSWORD_HIDE_DELAY);
+    if (in.multiline)
+        swkbdSetFeatures(&kb, SWKBD_MULTILINE);
+    std::vector<char> buf(len * 4 + 1);  // (UTF-8: up to 4 bytes a unit... and its NUL)
+    SwkbdButton b = swkbdInputText(&kb, buf.data(), buf.size());
+    if (b != SWKBD_BUTTON_CONFIRM)
+        return false;
+    out = buf.data();
+    return true;
+}
+
 // back to the HOME Menu, as the Wii channel would go back to the Wii Menu
 void platform_quit(const char* why) {
     log("quit: %s", why);
@@ -234,18 +284,15 @@ void platform_fatal(const char* msg) {
 
 void platform_backtrace(const char* why) { log("%s", why); }
 
-// Guest memory (MEM1, MEM2: 96 MB) goes in the linear heap while it fits, else in the normal heap.
-
+// Guest memory (MEM1, MEM2; nothing reads it by DMA): in the linear heap while GPU_RESERVE stays
+// free there, else in the normal heap.
 void* platform_alloc_guest(u32 size) {
-    void* p = s_guest_linear ? linearAlloc(size) : nullptr;
-    if (!p) {
-        if (s_guest_linear)
-            log("memory: no %u MB in the linear heap (%u KB free): guest memory in the heap", size >> 20,
-                (u32)(linearSpaceFree() >> 10));
-        s_guest_linear = false;
-        return calloc(1, size);
-    }
-    memset(p, 0, size);
+    void* p = linearSpaceFree() >= size + GPU_RESERVE ? linearAlloc(size) : nullptr;
+    log("memory: %u MB of guest memory in the %s heap", size >> 20, p ? "linear" : "normal");
+    if (!p)
+        p = memalign(64, size);
+    if (p)
+        memset(p, 0, size);
     return p;
 }
 
@@ -484,7 +531,7 @@ int main(int argc, char** argv) {
             printf("socInit failed: no network\n");
     }
     guest::mii_setup(data + "/nand");
-    guest::memory_init(64u << 20);
+    guest::memory_init(guest::MEM2_SIZE);
     guest::log("memory: heap %u KB, linear heap %u KB (%u KB free after guest memory)", __ctru_heap_size >> 10,
                __ctru_linear_heap_size >> 10, (u32)(linearSpaceFree() >> 10));
     guest::audio_init();

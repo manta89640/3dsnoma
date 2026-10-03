@@ -1,6 +1,7 @@
-// Guest memory: MEM1 (24 MB at 0x80000000) and MEM2 (at 0x90000000), both also reachable
-// through their uncached mirrors (0xC0000000, 0xD0000000). Hardware registers (0xCC.., 0xCD..)
-// and everything unmapped go to mmio_read/mmio_write (hw/mmio.cpp).
+// Guest memory: MEM1 (24 MB at 0x80000000) and MEM2 (at 0x90000000, as large as the platform
+// gives it), both also reachable through their uncached mirrors (0xC0000000, 0xD0000000).
+// Hardware registers (0xCC.., 0xCD..) and everything unmapped go to mmio_read/mmio_write
+// (hw/mmio.cpp).
 #include "runtime.h"
 
 #include <algorithm>
@@ -11,7 +12,7 @@
 
 namespace guest {
 
-u8* g_page[256];
+uintptr_t g_page[1u << (32 - PAGE_BITS)];
 u32 g_sp;
 
 static u8* s_mem1;
@@ -19,27 +20,33 @@ static u8* s_mem2;
 static u32 s_mem2_size;
 // write generations, per 4 KB page (see mem_mark_written)
 static std::atomic<u32> s_gen{1};  // (the GPU's thread marks its EFB copies too)
-static u32 s_page_gen1[(32u << 20) >> 12];
+static u32 s_page_gen1[MEM1_SIZE >> 12];
 static u32* s_page_gen2;
 
+// a bank's cached and uncached views (its physical address | 0x80000000, | 0xC0000000)
+static void map_bank(u32 phys, u8* host, u32 size) {
+    for (u32 o = 0; o < size; o += PAGE_SIZE)
+        for (u32 view : {0x80000000u, 0xC0000000u}) {
+            u32 a = view | (phys + o);
+            g_page[a >> PAGE_BITS] = (uintptr_t)(host + o) - a;
+            if (!g_page[a >> PAGE_BITS])  // (0 means unmapped)
+                fatal("guest memory: page %08X maps to its own address", a);
+        }
+}
+
 void memory_init(u32 mem2_size) {
-    // MEM1 is 24 MB; the 16 MB pages cover 32 MB so that page 0x81 is fully backed.
-    s_mem1 = (u8*)platform_alloc_guest(32u << 20);
+    if (mem2_size % PAGE_SIZE)
+        fatal("guest memory: MEM2 size %X is not a whole number of pages", mem2_size);
+    s_mem1 = (u8*)platform_alloc_guest(MEM1_SIZE);
     s_mem2_size = mem2_size;
     s_mem2 = (u8*)platform_alloc_guest(mem2_size);
     s_page_gen2 = (u32*)calloc(mem2_size >> 12, sizeof(u32));
     if (!s_mem1 || !s_mem2)
-        fatal("guest memory: could not allocate %u MB", (32u << 20) / (1u << 20) + mem2_size / (1u << 20));
-    for (int i = 0; i < 256; i++)
-        g_page[i] = nullptr;
-    for (u32 p = 0; p < 2; p++) {
-        g_page[0x80 + p] = s_mem1 + (p << 24);
-        g_page[0xC0 + p] = s_mem1 + (p << 24);
-    }
-    for (u32 p = 0; p < (mem2_size >> 24); p++) {
-        g_page[0x90 + p] = s_mem2 + (p << 24);
-        g_page[0xD0 + p] = s_mem2 + (p << 24);
-    }
+        fatal("guest memory: could not allocate %u MB", (MEM1_SIZE + mem2_size) >> 20);
+    for (uintptr_t& b : g_page)
+        b = 0;
+    map_bank(0x00000000, s_mem1, MEM1_SIZE);
+    map_bank(0x10000000, s_mem2, mem2_size);
 }
 
 u32 mem2_size() { return s_mem2_size; }
@@ -49,8 +56,8 @@ u32 mem2_size() { return s_mem2_size; }
 // guest memory (decoded textures, sample data) only look again at what changed.
 
 static u32* page_gens(u32 phys, u32* first, u32* limit) {
-    if (phys < (32u << 20)) {
-        *first = phys >> 12, *limit = (32u << 20) >> 12;
+    if (phys < MEM1_SIZE) {
+        *first = phys >> 12, *limit = MEM1_SIZE >> 12;
         return s_page_gen1;
     }
     if (phys >= 0x10000000u && phys - 0x10000000u < s_mem2_size) {
@@ -102,7 +109,7 @@ void memory_report() {
         return used * 4;
     };
     u32 top1, top2;
-    u32 u1 = count(s_mem1, 24u << 20, &top1), u2 = count(s_mem2, s_mem2_size, &top2);
+    u32 u1 = count(s_mem1, MEM1_SIZE, &top1), u2 = count(s_mem2, s_mem2_size, &top2);
     log("memory: MEM1 %u KB in use (highest %08X), MEM2 %u KB in use (highest %08X)", u1, 0x80000000 + top1, u2,
         0x90000000 + top2);
 }
@@ -190,7 +197,7 @@ void fatal(const char* fmt, ...) {
 void memory_dump() {
     FILE* f = fopen("mem1.bin", "wb");
     if (f) {
-        fwrite(s_mem1, 1, 24u << 20, f);
+        fwrite(s_mem1, 1, MEM1_SIZE, f);
         fclose(f);
     }
     f = fopen("mem2.bin", "wb");

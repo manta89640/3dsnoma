@@ -3,7 +3,8 @@
 // The decompiled code keeps the Wii's view of memory: pointers are 32-bit Wii addresses
 // (gp<T>), memory is big-endian, and the hardware registers at 0xCC000000/0xCD000000 are
 // reached through the same accessors (they land in the device emulation, see hw/).
-// Every 16 MB page of the 4 GB address space maps to host memory or to MMIO (null).
+// Every 1 MB page of the 4 GB address space maps to host memory or to MMIO (0). MEM1 and MEM2
+// are each one block of host memory, so a run of bytes is contiguous up to the end of its bank.
 //
 //   gp<T>       pointer to a T in guest memory         (*p, p[i], p + n, p - q, casts)
 //   gref<T>     a T stored big-endian at an address    (reads, writes, compound ops, &x)
@@ -35,8 +36,13 @@ typedef double f64;
 
 namespace guest {
 
-// host base address of each 16 MB page of the guest address space; null = MMIO / unmapped
-extern u8* g_page[256];
+// Each 1 MB page of the guest address space: the host address of its first byte minus its guest
+// address, so that a guest address a is at g_page[a >> PAGE_BITS] + a (no mask); 0 = MMIO or
+// unmapped. MEM1's cached view (0x80000000, all the program's globals) is always mapped.
+static const u32 PAGE_BITS = 20;
+static const u32 PAGE_SIZE = 1u << PAGE_BITS;
+static const u32 MEM1_SIZE = 24u << 20;
+extern uintptr_t g_page[1u << (32 - PAGE_BITS)];
 // current guest stack pointer (r1) of the running guest thread
 extern u32 g_sp;
 
@@ -58,36 +64,44 @@ static inline void* lookup_fn(u32 a) {
 }
 [[noreturn]] void fatal(const char* fmt, ...);
 
-static inline u8* host_ptr(u32 a) {
-    u8* p = g_page[a >> 24];
-    return p ? p + (a & 0xFFFFFF) : nullptr;
+// A constant address (a global, a hardware register) is resolved at compile time as far as it
+// can be: in MEM1 no check for MMIO, at 0xCC/0xCD straight to the device emulation.
+#define NOMA_CONST_MEM1(a) (__builtin_constant_p(a) && (u32)(a) - 0x80000000u < MEM1_SIZE)
+#define NOMA_CONST_MMIO(a) (__builtin_constant_p(a) && ((u32)(a) >> 25) == (0xCC000000u >> 25))
+
+__attribute__((always_inline)) static inline u8* host_ptr(u32 a) {
+    u8* b = (u8*)g_page[a >> PAGE_BITS];
+    return b ? b + a : nullptr;
 }
 
-static inline u8 load8(u32 a) {
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1))
-        return p[a & 0xFFFFFF];
+// whether an access at a, whose page entry is b, goes to RAM (else to the device emulation)
+#define NOMA_IS_RAM(a, b) (NOMA_CONST_MEM1(a) || (!NOMA_CONST_MMIO(a) && __builtin_expect((b) != 0, 1)))
+
+__attribute__((always_inline)) static inline u8 load8(u32 a) {
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b))
+        return *(u8*)(b + a);
     return (u8)mmio_read(a, 1);
 }
-static inline u16 load16(u32 a) {
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1)) {
+__attribute__((always_inline)) static inline u16 load16(u32 a) {
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b)) {
         u16 v;
-        ::memcpy(&v, p + (a & 0xFFFFFF), 2);
+        ::memcpy(&v, (u8*)(b + a), 2);
         return __builtin_bswap16(v);
     }
     return (u16)mmio_read(a, 2);
 }
-static inline u32 load32(u32 a) {
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1)) {
+__attribute__((always_inline)) static inline u32 load32(u32 a) {
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b)) {
         u32 v;
-        ::memcpy(&v, p + (a & 0xFFFFFF), 4);
+        ::memcpy(&v, (u8*)(b + a), 4);
         return __builtin_bswap32(v);
     }
     return mmio_read(a, 4);
 }
-static inline u64 load64(u32 a) {
+__attribute__((always_inline)) static inline u64 load64(u32 a) {
     return ((u64)load32(a) << 32) | load32(a + 4);
 }
 #ifdef NOMA_TRACE_CALLS
@@ -103,35 +117,35 @@ void noma_watch_hit(u32 a, u32 v, int size);
 #define NOMA_WATCH(a, v, size) ((void)0)
 #endif
 
-static inline void store8(u32 a, u8 v) {
+__attribute__((always_inline)) static inline void store8(u32 a, u8 v) {
     NOMA_WATCH(a, v, 1);
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1))
-        p[a & 0xFFFFFF] = v;
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b))
+        *(u8*)(b + a) = v;
     else
         mmio_write(a, v, 1);
 }
-static inline void store16(u32 a, u16 v) {
+__attribute__((always_inline)) static inline void store16(u32 a, u16 v) {
     NOMA_WATCH(a, v, 2);
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1)) {
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap16(v);
-        ::memcpy(p + (a & 0xFFFFFF), &v, 2);
+        ::memcpy((u8*)(b + a), &v, 2);
     } else {
         mmio_write(a, v, 2);
     }
 }
-static inline void store32(u32 a, u32 v) {
+__attribute__((always_inline)) static inline void store32(u32 a, u32 v) {
     NOMA_WATCH(a, v, 4);
-    u8* p = g_page[a >> 24];
-    if (__builtin_expect(p != nullptr, 1)) {
+    uintptr_t b = g_page[a >> PAGE_BITS];
+    if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap32(v);
-        ::memcpy(p + (a & 0xFFFFFF), &v, 4);
+        ::memcpy((u8*)(b + a), &v, 4);
     } else {
         mmio_write(a, v, 4);
     }
 }
-static inline void store64(u32 a, u64 v) {
+__attribute__((always_inline)) static inline void store64(u32 a, u64 v) {
     store32(a, (u32)(v >> 32));
     store32(a + 4, (u32)v);
 }
