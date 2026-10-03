@@ -90,6 +90,7 @@ set(RUNTIME_SOURCES
   runtime/patches/debug.cpp
   runtime/patches/heap.cpp
   runtime/patches/offline.cpp
+  runtime/patches/profile.cpp
   runtime/patches/wiilink.cpp
   runtime/hle/report.cpp
   runtime/trace.cpp

@@ -170,6 +170,8 @@ PATCHED_NAMES = {
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
     # the AX's aux buses: no effects where the 3DS's DSP plays the voices (engine/audio/aux.cpp)
     "AXRegisterAuxACallback", "AXRegisterAuxBCallback", "AXRegisterAuxCCallback",
+    # the profile's birth year: selectable up to 2099, not just the current year (runtime/patches/profile.cpp)
+    "profile_BirthYear_Max",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes
