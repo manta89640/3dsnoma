@@ -28,13 +28,16 @@ endif()
 file(GLOB DECOMP_SOURCES CONFIGURE_DEPENDS ${DECOMP_DIR}/src/*.cpp)
 add_library(noma_decomp STATIC ${DECOMP_SOURCES})
 target_include_directories(noma_decomp PUBLIC ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
+# the decompiled code is built at -O1; -DNOMA_DECOMP_OPT=-O2 makes 4% less code on the 3DS, but
+# what its instruction scheduling gains on the ARM11 doesn't show in Azahar: it needs hardware
+set(NOMA_DECOMP_OPT -O1 CACHE STRING "optimisation level of the decompiled code (not in Debug builds)")
 # -ftrivial-auto-var-init=zero: m2c leaves a variable unset on paths where the PowerPC code
 # reads a register it never wrote (a paired single's unused half, say); clang treats such a read
 # as undefined and dropped the guard of nw4r::math::MTX34RotXYZFIdx's angle wrap on the host
 target_compile_options(noma_decomp PRIVATE -w -fno-strict-aliasing -fwrapv -fno-finite-loops
   -ftrivial-auto-var-init=zero
   $<IF:$<CXX_COMPILER_ID:GNU>,-Wno-narrowing,-Wno-c++11-narrowing>
-  $<$<NOT:$<CONFIG:Debug>>:-O1>)
+  $<$<NOT:$<CONFIG:Debug>>:${NOMA_DECOMP_OPT}>)
 # no debug information for the decompiled code on the 3DS: GCC spends four fifths of its time on
 # it (8.4 s instead of 1.8 s a file) and nothing uses it (the packages are stripped; crash reports
 # and the profiler name functions from the symbol table)

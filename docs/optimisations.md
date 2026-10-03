@@ -90,7 +90,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 
 | What | Where | Expected | Effort | Risk |
 |---|---|---|---|---|
-| Compile `noma_decomp` at `-O2` (or `-Os` for cold objects). `-O1` has no instruction scheduling, which hurts on the in-order ARM11, and no small-function inlining. | `CMakeLists.txt` | est. 10–30% on all guest code | Hours plus compile time | Undefined behaviour in generated code may surface: run every self-test |
+| Compile `noma_decomp` at `-O2` (or `-Os` for cold objects). `-O1` has no instruction scheduling, which hurts on the in-order ARM11, and no small-function inlining. `-DNOMA_DECOMP_OPT=-O2` builds it so. Measured: every host self-test passes and the host runs normally; 3DS code 15.05 → 14.44 MB; in Azahar (which charges per instruction, so scheduling can't show) the room runs at 16.9 fps against 17.2 at `-O1`, the same tree. | `CMakeLists.txt` | Only on hardware, from scheduling | Done but for a hardware A/B | None found |
 | Cheaper polls: the function-entry and loop polls (`NOMA_LOOP`) read a flag a timer sets, instead of decrementing a global | runtime | Small, everywhere | 1 day | Low |
 | Profile-guided code layout: order `.text.<fn>` sections from the sampling profiler (22.6 MB of code against a 16 KB instruction cache), then GCC PGO with `.gcda` files written to the SD card | linker script | est. 5–15% | 2–4 days | None |
 | `f32` instead of `f64` for values that are single precision on the Wii (`fadds`/`fmuls` results): identical bits, fewer conversions | m2c type inference | Broad, modest | 2–4 days | Only where provably single precision |
