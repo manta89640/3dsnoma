@@ -217,11 +217,17 @@ void loop_poll() {
         log("guest busy-waits with interrupts off for 2 s (pending %08X)", pi_cause() & pi_mask());
         noma_trace_snapshot_dump("calls before interrupts were turned off:");
     }
+    static bool s_debug = getenv("NOMA_DEBUG_POLL") != nullptr;
     static int s_n;
-    if (getenv("NOMA_DEBUG_POLL") && (s_n++ % 2000) == 0)
+    if (s_debug && (s_n++ % 2000) == 0)
         log("loop_poll: msr %08X dec %llu tb %llu pi %08X/%08X", g_msr,
             (unsigned long long)decrementer_deadline(), (unsigned long long)timebase(), pi_cause(),
             pi_mask());
+    // the devices at every loop poll: check_interrupts looks at them only every 16th time (it also
+    // runs at each MSR[EE] 0->1), so a loop that never touches EE -- a thread busy-waiting for
+    // another, a long computation -- took the retrace and the IOS replies only every 16 budgets
+    // (about 40 ms on the 3DS), and the threads they wake, the main thread among them, that late
+    poll_devices();
     check_interrupts();
 }
 

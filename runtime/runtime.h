@@ -54,9 +54,6 @@ HostSignal* platform_signal_new();
 void platform_signal(HostSignal* s);
 void platform_wait(HostSignal* s, u64 timeout_us);
 
-// (gone with the voices on the 3DS's DSP: platform/3ds/gx_pica.cpp still asks, until it doesn't)
-static inline u32 audio_dsp_linear_reserve() { return 0; }
-
 // ---- the sampling profiler (profile.cpp; NOMA_PROFILE=seconds in -DNOMA_PROFILE_CALLS builds)
 #ifdef NOMA_PROFILE_CALLS
 ProfStack* profile_new_stack(u32 thread);  // for a new guest thread

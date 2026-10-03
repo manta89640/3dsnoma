@@ -54,6 +54,16 @@ struct LzState {
 // the guest's bytes at a (inside one of MEM1/MEM2: a block of host memory)
 inline u8* bytes(u32 a) { return guest::host_ptr(a); }
 
+// A poll point, as decompiled loops have at every iteration (NOMA_LOOP), charged with the work
+// done since the last one. The SDK's loops had one at every bit or byte; without them a piece of
+// input (a font's glyph sheet is a single piece of ~100 KB) ran for tens of milliseconds on the
+// 3DS with no interrupt taken: the retrace and the IOS replies waited, and every thread they wake,
+// the game's main thread among them.
+inline void poll_point(s32 units) {
+    if ((guest::g_loop_budget -= units) < 0)
+        guest::loop_poll();
+}
+
 s32 read_lz(LzState& s, const u8* src, u32 len) {
     if (s.header_size) {
         if (s.header_size == 8) {
@@ -87,6 +97,7 @@ s32 read_lz(LzState& s, const u8* src, u32 len) {
     u8* dst = dst0;
     if (!dst)
         return -1;
+    u8* polled = dst;  // the output at the last poll point
     auto ret = [&](s32 r) {  // the context keeps where the output got to, as the SDK's does
         s.dest += (u32)(dst - dst0);
         return r;
@@ -95,6 +106,8 @@ s32 read_lz(LzState& s, const u8* src, u32 len) {
         if (!s.flag_index) {
             if (!len)
                 break;
+            poll_point(8 + (s32)((dst - polled) >> 4));  // 8 tokens, and long matches by their size
+            polled = dst;
             s.flags = *src++, len--;
             s.flag_index = 8;
             continue;
@@ -260,6 +273,7 @@ void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
         if (src_cnt < 32) {  // fill the input word (little-endian)
             if (!len)
                 break;
+            poll_point(8);  // a byte's 8 bits
             src_tmp |= (u32)*src++ << src_cnt;
             src_cnt += 8;
             len--;

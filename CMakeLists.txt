@@ -90,8 +90,11 @@ set(RUNTIME_SOURCES
   runtime/patches/debug.cpp
   runtime/patches/graphics.cpp
   runtime/patches/heap.cpp
+  runtime/patches/menus.cpp
   runtime/patches/offline.cpp
+  runtime/patches/players.cpp
   runtime/patches/profile.cpp
+  runtime/patches/vf.cpp
   runtime/patches/wii_parts.cpp
   runtime/patches/wiilink.cpp
   runtime/hle/report.cpp

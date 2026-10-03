@@ -1,6 +1,7 @@
 // NOMA_INPUT: scripted Wii Remote input, "TIME:BUTTONS[:SECONDS],..." -- e.g. "3:A,6.5:A+B:1"
 // presses A at 3 s and A+B for one second at 6.5 s (a press lasts 0.15 s by default).
-// Buttons: A B 1 2 + - H(ome) U D L R; "P(x;y)" points at x, y (-1..1). Times are on the game's
+// Buttons: A B 1 2 + - H(ome) U D L R; "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
+// would: the platform's own input (the touch screen, the circle pad) moves it on. Times are on the game's
 // clock: the frames it has finished, 60 to a second (so a script reaches the same screens
 // however fast the machine runs the game); both platforms merge the script into their input.
 #include <cstdio>
@@ -81,11 +82,17 @@ bool input_script_active() { return !script().empty(); }
 
 void input_script_apply(WiimoteInput& in) {
     double t = vi_game_frames() / 60.0;
-    for (const ScriptEvent& ev : script()) {
-        if (ev.point && t >= ev.t)
-            in.x = ev.x, in.y = ev.y;
-        else if (!ev.point && t >= ev.t && t < ev.t + ev.len)
+    const std::vector<ScriptEvent>& s = script();
+    static std::vector<bool> s_moved;  // the P events that have moved the pointer
+    s_moved.resize(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        const ScriptEvent& ev = s[i];
+        if (ev.point) {
+            if (t >= ev.t && !s_moved[i])
+                in.x = ev.x, in.y = ev.y, s_moved[i] = true;
+        } else if (t >= ev.t && t < ev.t + ev.len) {
             in.buttons |= ev.buttons;
+        }
     }
 }
 

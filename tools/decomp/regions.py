@@ -34,12 +34,13 @@ REGIONS = [
     (0x80390360, 0x80394ED0, "rso", "stub"),
     (0x80394ED0, 0x803A4910, "jpeg", "native"),
     (0x803A4910, 0x8040A000, "net", "decomp"),           # NCD MP NWC24 REX NHTTP SSL SO FCD EC DWCDL
-    (0x8040A000, 0x80491D24, "nw4r", "decomp"),        # EF G3D LYT SND (+ ut, math)
-    (0x80491D24, 0x804C4000, "mobiclip", "decomp"),
-    (0x804C4000, 0x804CF4DC, "rfl", "decomp"),
+    (0x8040A000, 0x804922E0, "nw4r", "decomp"),        # EF G3D LYT SND (+ ut, math, heap checks)
+    # the content players, left out (runtime/patches/players.cpp): nothing starts them
+    (0x804922E0, 0x804C4D90, "mobiclip", "stub"),       # Actimagine MobiClip (video)
+    (0x804C4D90, 0x804CF4DC, "rfl", "decomp"),          # from RFLGetWorkSize
     (0x804CF4DC, 0x80520000, "atok", "decomp"),
-    (0x80520000, 0x80550000, "swkbd", "decomp"),
-    (0x80550000, 0x806D50A0, "flash", "decomp"),
+    (0x80520000, 0x8055BB2C, "swkbd", "decomp"),        # (its last function: 0x8055BA10)
+    (0x8055BB2C, 0x806D50A0, "flash", "stub"),          # Adobe Flash
 ]
 
 

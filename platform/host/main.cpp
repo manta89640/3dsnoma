@@ -126,7 +126,7 @@ bool platform_gpu_thread_start(void (*fn)()) {
     std::thread(fn).detach();
     return true;
 }
-// NOMA_AX_THREAD=1: the AX frames on a thread of their own, as on the New 3DS (the host doesn't
+// NOMA_AX_THREAD=1: the AX frames on a thread of their own, as the New 3DS can (the host doesn't
 // need it; for testing that path)
 bool platform_audio_thread_start(void (*fn)()) {
     if (!getenv("NOMA_AX_THREAD"))

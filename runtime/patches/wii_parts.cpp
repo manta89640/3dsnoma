@@ -60,6 +60,9 @@ const MessageEdit MESSAGE_EDITS[] = {
     {126, u"部屋にWiiリモコンを向けてみましょう！", u"下の画面にタッチしてみましょう！"},
     {130, u"リモコンを向けると", u"ポインターを合わせると"},
     {134, u"\n足りない場合は「Wiiポイント」でWiiショッ\nピングチャンネルに移動して追加できます。", u""},
+    // "can't connect" (what the shop, content and online parts show offline): no Wii settings to check
+    {277, u"\nWii本体設定のインターネット設定を\nご確認ください。", u""},
+    {278, u"\nWii本体設定のインターネット設定を\nご確認ください。", u""},
 };
 
 std::vector<u8> be16(const char16_t* s) {

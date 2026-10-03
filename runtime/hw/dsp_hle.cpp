@@ -90,8 +90,11 @@ void dsp_ax_poll() {
 // the frame being mixed, finished (asleep meanwhile: on the 3DS a spinning wait would take the
 // time from the game's other threads)
 void dsp_ax_wait() {
-    while (s_ax_busy.load(std::memory_order_acquire))
-        platform_wait(s_ax_idle, 2000);
+    if (s_ax_busy.load(std::memory_order_acquire)) {
+        NOMA_PROF_SCOPE("(ax wait)");
+        while (s_ax_busy.load(std::memory_order_acquire))
+            platform_wait(s_ax_idle, 2000);
+    }
     dsp_ax_poll();
 }
 

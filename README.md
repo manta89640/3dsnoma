@@ -7,7 +7,9 @@ program, a runtime emulates the Wii hardware the program talks to (interrupts, v
 the IOS services, the GX GPU), so the program itself runs unmodified, with its own SDK and
 middleware. Where the Wii's own parts have no purpose on a 3DS, native code takes their place:
 the Wii Remote is the 3DS's controls (`engine/input/remote.cpp`), the HOME Button Menu is left
-out.
+out. The content players, Adobe Flash and MobiClip, are left out too (`runtime/patches/players.cpp`):
+the shop, whose catalogues were Flash, is hidden from the room (`runtime/patches/menus.cpp`), as are
+the menu buttons for the Wii's own settings and services.
 
 **No Nintendo data is in this repository.** You need your own copy of the channel: a WAD made
 from your own Wii (and your console's keys to decrypt it). Everything generated from it (the
@@ -15,15 +17,15 @@ decompiled sources, assembly, extracted files) stays out of git.
 
 ## Status
 
-- The whole program decompiles and compiles (35,666 functions, none failing; only the MetroTRK
-  debugger and the RSO linker are stubs). Library code is checked against reference vectors (`NOMA_SELFTEST=all`:
+- The whole program decompiles and compiles (30,562 functions, none failing; stubs: the MetroTRK
+  debugger, the RSO linker, and Flash and MobiClip's 4,909 functions). Library code is checked against reference vectors (`NOMA_SELFTEST=all`:
   libm, printf, strtol/strtod, 64-bit arithmetic, AES, calendar, the Mii database CRC, the
   paired-single matrix library).
-- Host and 3DS (tested in Azahar) both: boot through the SDK, show the strap safety screen and
-  the loading animation, play the channel's sound (the AX voices mixed natively,
+- Host and 3DS (tested in Azahar) both: boot through the SDK, show the
+  loading animation, play the channel's sound (the AX voices mixed natively,
   `engine/audio/ax_render.cpp`; streamed through ndsp on the 3DS), take the Wii Remote pointer
   (3DS: touch screen or circle pad), and talk to the network: RC24's
-  `/notify` and WiiLink's `conf/first.bin`. "Wii Menu" shuts the channel down and quits.
+  `/notify` and WiiLink's `conf/first.bin`. "おわる" (the Wii Menu button) shuts the channel down and quits.
 - Offline by default (`NOMA_OFFLINE`, `=0` to go online): there is no network, and the channel's
   online steps are skipped inside its own flow (`runtime/patches/offline.cpp`): its start-up
   downloads finish as empty documents, the license agreement is left out, and what only a server

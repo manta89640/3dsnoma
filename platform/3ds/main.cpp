@@ -323,6 +323,31 @@ bool platform_gpu_thread_start(void (*fn)()) {
     return true;
 }
 
+// ---- the audio thread (NOMA_AX_THREAD=1, New 3DS only): on the system core (the GPU's thread has
+// core 2; the app may take up to 80% of the system core), just above the main thread's priority.
+// Not by default: in Azahar, which runs the cores one after another on one host thread, every
+// frame's handoff became a wait (boot screens at 1-2.5 fps instead of 50-59, the room ~10%
+// slower); whether it pays off on hardware is still to measure. The frames are mixed inline.
+static void (*s_audio_fn)();
+bool platform_audio_thread_start(void (*fn)()) {
+    bool n3ds = false;
+    APT_CheckNew3DS(&n3ds);
+    const char* e = getenv("NOMA_AX_THREAD");
+    if (!n3ds || !e || !atoi(e))
+        return false;
+    APT_SetAppCpuTimeLimit(80);
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    s_audio_fn = fn;
+    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 1, 1, true);
+    if (!t) {
+        log("ax: no thread on core 1: the frames are mixed inline");
+        return false;
+    }
+    log("ax: the frames are mixed on core 1");
+    return true;
+}
+
 // ---- input: the 3DS controls as a Wii Remote
 static WiimoteInput s_in;
 
@@ -350,28 +375,6 @@ static void poll_input() {
     // the circle pad nudges the pointer too
     circlePosition c;
     hidCircleRead(&c);
-// ---- the audio thread: on the New 3DS's system core (the GPU's thread has core 2; the app may
-// take up to 80% of the system core), just above the main thread's priority. The Old 3DS mixes
-// inline: its system core is the GPU thread's. NOMA_AX_INLINE mixes inline on the New 3DS too.
-static void (*s_audio_fn)();
-bool platform_audio_thread_start(void (*fn)()) {
-    bool n3ds = false;
-    APT_CheckNew3DS(&n3ds);
-    if (!n3ds || getenv("NOMA_AX_INLINE"))
-        return false;
-    APT_SetAppCpuTimeLimit(80);
-    s32 prio = 0x30;
-    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-    s_audio_fn = fn;
-    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 1, 1, true);
-    if (!t) {
-        log("ax: no thread on core 1: the frames are mixed inline");
-        return false;
-    }
-    log("ax: the frames are mixed on core 1");
-    return true;
-}
-
     if (c.dx * c.dx + c.dy * c.dy > 20 * 20) {
         s_in.x += (float)c.dx / 156.0f * 0.03f;
         s_in.y -= (float)c.dy / 156.0f * 0.03f;
@@ -379,11 +382,11 @@ bool platform_audio_thread_start(void (*fn)()) {
         s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
     }
     s_in.pointing = true;
-    // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator)
-    WiimoteInput in = s_in;
+    // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator); a scripted
+    // P(x;y) moves the pointer once, and touching or the circle pad moves it on from there
     if (input_script_active())
-        input_script_apply(in);
-    wiimote_set_input(in);
+        input_script_apply(s_in);
+    wiimote_set_input(s_in);
 }
 
 // ---- video: the GPU renderer draws the top screen itself; with the software renderer
@@ -438,20 +441,21 @@ static std::vector<u8> read_file(const std::string& path) {
     return v;
 }
 
-// debugging switches (NOMA_DEBUG_NET=1, ...) as KEY=VALUE lines in env.txt next to the data.
-// Read before the other static constructors: many switches are file-scope statics.
+// debugging switches (NOMA_DEBUG_NET=1, ...) as KEY=VALUE lines in env.txt next to the data, as
+// long as they come (a NOMA_INPUT script for the whole setup is most of a KB). Read before the
+// other static constructors: many switches are file-scope statics.
 __attribute__((constructor(101))) static void read_env_txt() {
-    if (FILE* env = fopen((std::string(guest::DATA_DIR) + "/env.txt").c_str(), "r")) {
-        char line[256];
-        while (fgets(line, sizeof(line), env)) {
-            line[strcspn(line, "\r\n")] = 0;
-            char* eq = strchr(line, '=');
-            if (line[0] != '#' && eq) {
-                *eq = 0;
-                setenv(line, eq + 1, 1);
-            }
-        }
-        fclose(env);
+    std::vector<u8> text = read_file(std::string(guest::DATA_DIR) + "/env.txt");
+    std::string all(text.begin(), text.end());
+    for (size_t p = 0; p < all.size();) {
+        size_t end = std::min(all.find('\n', p), all.size());
+        std::string line = all.substr(p, end - p);
+        p = end + 1;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        size_t eq = line.find('=');
+        if (!line.empty() && line[0] != '#' && eq != std::string::npos)
+            setenv(line.substr(0, eq).c_str(), line.c_str() + eq + 1, 1);
     }
 }
 

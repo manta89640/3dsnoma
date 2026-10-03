@@ -182,6 +182,16 @@ PATCHED_NAMES = {
     "profile_BirthYear_Max",
     # the frame renderer draws in one pass, not as two anti-aliased bands (runtime/patches/graphics.cpp)
     "app_Renderer_ctor", "app_Renderer_SetAntiAlias",
+    # the content players left out (runtime/patches/players.cpp): Flash never starts, the movie
+    # manager starts MobiClip and its work area no more
+    "flash_Manager_Init", "movie_Manager_ctor", "movie_Manager_dtor",
+    # VF volume files: their zeros in 16 KB writes, not 512 bytes (runtime/patches/vf.cpp)
+    "VFi_CreateNandFile",
+    # menu buttons for the Wii's own settings and services, and the shop (Flash), hidden
+    # (runtime/patches/menus.cpp): the options' video quality and region/address entries, the
+    # theater's Wii Points button, the room bar's shop button
+    "layout_option_Option_ctor", "layout_option_Option_SetActive", "controller_theater_LayoutController_ctor",
+    "layout_living_MoveBtn_ctor",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes
