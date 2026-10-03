@@ -117,8 +117,40 @@ void noma_watch_hit(u32 a, u32 v, int size);
 #define NOMA_WATCH(a, v, size) ((void)0)
 #endif
 
+// The write-gather pipe (0xCC008000), where every GX command and vertex goes: a store to it at a
+// constant address appends to its 32-byte buffer inline when the value fits before the buffer's
+// end, where the burst goes to the FIFO (hw/gx/fifo.cpp); a value across the end takes mmio_write.
+extern u8 g_gather[32];
+extern u32 g_gather_n;
+void gx_gather_burst();
+#define NOMA_CONST_WGPIPE(a) (NOMA_CONST_MMIO(a) && ((u32)(a) & 0x0FFFF000u) == 0x0C008000u)
+template <u32 N>
+__attribute__((always_inline)) static inline void gather_put(u32 v) {
+    u32 n = g_gather_n;
+    if (__builtin_expect(n <= 32 - N, 1)) {
+        if (N == 4) {
+            u32 w = __builtin_bswap32(v);
+            ::memcpy(g_gather + n, &w, 4);
+        } else if (N == 2) {
+            u16 h = __builtin_bswap16((u16)v);
+            ::memcpy(g_gather + n, &h, 2);
+        } else {
+            g_gather[n] = (u8)v;
+        }
+        g_gather_n = n += N;
+        if (n == 32)
+            gx_gather_burst();
+    } else {
+        mmio_write(0xCC008000u, v, (int)N);
+    }
+}
+
 __attribute__((always_inline)) static inline void store8(u32 a, u8 v) {
     NOMA_WATCH(a, v, 1);
+    if (NOMA_CONST_WGPIPE(a)) {
+        gather_put<1>(v);
+        return;
+    }
     uintptr_t b = g_page[a >> PAGE_BITS];
     if (NOMA_IS_RAM(a, b))
         *(u8*)(b + a) = v;
@@ -127,6 +159,10 @@ __attribute__((always_inline)) static inline void store8(u32 a, u8 v) {
 }
 __attribute__((always_inline)) static inline void store16(u32 a, u16 v) {
     NOMA_WATCH(a, v, 2);
+    if (NOMA_CONST_WGPIPE(a)) {
+        gather_put<2>(v);
+        return;
+    }
     uintptr_t b = g_page[a >> PAGE_BITS];
     if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap16(v);
@@ -137,6 +173,10 @@ __attribute__((always_inline)) static inline void store16(u32 a, u16 v) {
 }
 __attribute__((always_inline)) static inline void store32(u32 a, u32 v) {
     NOMA_WATCH(a, v, 4);
+    if (NOMA_CONST_WGPIPE(a)) {
+        gather_put<4>(v);
+        return;
+    }
     uintptr_t b = g_page[a >> PAGE_BITS];
     if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap32(v);

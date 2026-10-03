@@ -32,8 +32,8 @@ namespace guest {
 GxState g_gx;
 
 // ---- CPU side
-static u8 s_gather[32];
-static u32 s_gather_n;
+alignas(4) u8 g_gather[32];  // (stores at a constant address fill it inline: guest.h)
+u32 g_gather_n;
 static u32 s_pi_base, s_pi_end, s_pi_wptr;  // physical; wptr bit 29 = wrapped
 
 // ---- GPU side
@@ -69,7 +69,7 @@ static bool linked() { return s_cp_cr & 0x10; }
 
 void gx_fifo_init() {
     memset(&g_gx, 0, sizeof(g_gx));
-    s_gather_n = 0;
+    g_gather_n = 0;
 }
 
 static void store_burst() {
@@ -78,9 +78,9 @@ static void store_burst() {
     // its thread (nothing reads it back from memory)
     bool direct = s_gpu_thread && linked() && (s_cp_cr & 1) && s_cp_rptr == s_cp_wptr;
     if (direct)
-        ring_put(s_gather, 32);
+        ring_put(g_gather, 32);
     else
-        write_g(0x80000000 | a, s_gather, 32);
+        write_g(0x80000000 | a, g_gather, 32);
     u32 wrap = s_pi_wptr & 0x20000000;
     if (a >= s_pi_end) {
         a = s_pi_base;
@@ -89,7 +89,7 @@ static void store_burst() {
         a += 32;
     }
     s_pi_wptr = a | wrap;
-    s_gather_n = 0;
+    g_gather_n = 0;
     if (linked()) {
         s_cp_wptr = a;
         if (direct)
@@ -99,15 +99,17 @@ static void store_burst() {
     }
 }
 
+void gx_gather_burst() { store_burst(); }
+
 // GXResetWriteGatherPipe (after GXSetCPUFifo, as in GXBeginDisplayList): what the pipe held for
 // the old FIFO is not written to the new one. A display list that fills its buffer exactly would
 // otherwise wrap, and GXEndDisplayList returns 0 (RFL's Mii face mask, 864 of 896 bytes)
-void gx_gather_reset() { s_gather_n = 0; }
+void gx_gather_reset() { g_gather_n = 0; }
 
 void gx_fifo_write(u32 off, u32 value, int size) {
     for (int i = size - 1; i >= 0; i--) {
-        s_gather[s_gather_n++] = (u8)(value >> (i * 8));
-        if (s_gather_n == 32)
+        g_gather[g_gather_n++] = (u8)(value >> (i * 8));
+        if (g_gather_n == 32)
             store_burst();
     }
 }
