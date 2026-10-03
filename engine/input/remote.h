@@ -32,5 +32,8 @@ void wiimote_set_input(const WiimoteInput& in);
 // game's clock)
 bool input_script_active();
 void input_script_apply(WiimoteInput& in);
+// the game asked for message `id` (its text at `text`): scripts can count from the first time,
+// and NOMA_DEBUG_MSG=1 logs each message the first time
+void input_script_message(u32 id, u32 text);
 
 }  // namespace guest

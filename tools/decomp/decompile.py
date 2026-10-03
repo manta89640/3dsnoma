@@ -198,6 +198,12 @@ PATCHED_NAMES = {
     # theater's Wii Points button, the room bar's shop button
     "layout_option_Option_ctor", "layout_option_Option_SetActive", "controller_theater_LayoutController_ctor",
     "layout_living_MoveBtn_ctor",
+    # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
+    # (runtime/patches/debug.cpp)
+    "lib_Message_Get",
+    # the way out timed by the clock, not in frames: its fade and wait took 4x as long at 15 fps
+    # (runtime/patches/wii_parts.cpp)
+    "app_Exit_Update",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes

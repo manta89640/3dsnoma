@@ -14,6 +14,8 @@ u32 scene_PreTitleScene_ctor_orig(u32 r3, u32 r4);
 void wii_MessageData_Load_orig(u32 r3);
 void VIWaitForRetrace_orig();
 void app_Exit_Dispatch_orig(u32 r3);
+u32 app_Exit_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+                         f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 
 // The Wii Remote strap screen ("use the strap"), shown at the start until a button is pressed or
 // 20 seconds have passed (wii_Strap_*): there's no strap on a 3DS. The scenes that show it are
@@ -134,12 +136,50 @@ void wii_MessageData_Load(u32 r3) {
 // still waits for the next one, so every frame takes whole retraces (60, 30, 20, 15 fps); on the
 // 3DS, where the room's frames take several, that loses half a retrace a frame on average. A
 // frame quicker than a retrace still waits for it: 60 fps at most.
+// That wait was also when the threads below the main thread's priority ran (loading, the EC
+// manager that the way out waits for): if any is ready, they get the time up to the retrace, in
+// slices they give back as soon as none is ready.
 void VIWaitForRetrace() {
     static u32 s_last;
     u32 now = GV(u32, GA___VIRetraceCount);
-    if (now == s_last)
+    if (now == s_last) {
         VIWaitForRetrace_orig();
+    } else {
+        // the running thread (OS globals 0x800000E4), its priority (+0x2D0); the ready queues by
+        // priority (RunQueueBits: bit 31 - priority)
+        u32 thread = guest::load32(0x800000E4);
+        u32 prio = thread ? guest::load32(thread + 0x2D0) : 31;
+        u32 below = prio < 31 ? (1u << (31 - prio)) - 1 : 0;
+        while ((GV(u32, GA_RunQueueBits_80883228) & below) && GV(u32, GA___VIRetraceCount) == now)
+            OSSleepTicks(0, (u32)(guest::TB_HZ / 4000));  // 0.25 ms
+    }
     s_last = GV(u32, GA___VIRetraceCount);
+}
+
+// The way out (app::Exit: app_Exit_Request, then app_Exit_Update every frame until it goes on to
+// app_Exit_Dispatch) counts frames: the fade to black takes 60 (+0xC up to +0xA, while +0x8 is
+// set), and the sound stops and the program may go on after 120 (+0x4): 1 and 2 s at the Wii's
+// 60 fps, but 4 and 8 s at the room's 15 fps on the 3DS. Here they count 60ths of a second: before
+// each update both are brought up to the time since the first update, one short of the count the
+// update itself then reaches (so the sound still stops at exactly the 120th).
+u32 app_Exit_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3, f64 f4,
+                    f64 f5, f64 f6, f64 f7, f64 f8) {
+    static u64 s_start;  // the time of the first update
+    if (M2C_FIELD(r3, gp<s32>, 0x0) != 0) {
+        u64 now = guest::timebase();
+        u32 frames = M2C_FIELD(r3, gp<u32>, 0x4);
+        if (frames == 0)
+            s_start = now;
+        u32 n = (u32)((now - s_start) * 60 / guest::TB_HZ);
+        if (n > 0) {
+            if (frames < 0x78)
+                M2C_FIELD(r3, gp<u32>, 0x4) = std::max<u32>(frames, std::min<u32>(n, 0x78) - 1);
+            u32 fade = M2C_FIELD(r3, gp<u16>, 0xC), len = M2C_FIELD(r3, gp<u16>, 0xA);
+            if (M2C_FIELD(r3, gp<u8>, 0x8) && fade < len)
+                M2C_FIELD(r3, gp<u16>, 0xC) = (u16)std::max<u32>(fade, std::min<u32>(n, len) - 1);
+        }
+    }
+    return app_Exit_Update_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
 }
 
 // Leaving for another Wii program (the Wii Menu, the Mii Channel, the Wii Shop, ...: the exit

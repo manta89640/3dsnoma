@@ -1,8 +1,9 @@
-// Debugging aids on SDK functions; off unless their switch is set.
+// Debugging aids on SDK and library functions; off unless their switch is set.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+#include "engine/input/remote.h"
 #include "noma_decomp.h"
 #include "runtime.h"
 
@@ -14,6 +15,7 @@ namespace g {
 
 u64 GXLoadPosMtxImm_orig(u32 r3, u32 r4);
 u32 nw4r_g3d_ScnMdlSimple_GetScnMtxPos_orig(u32 r3, u32 r4, u32 r5, u32 r6);
+u32 lib_Message_Get_orig(u32 r3, u32 r4);
 
 static bool has_nan(u32 m, u32 words) {
     for (u32 i = 0; i < words; i++) {
@@ -58,6 +60,16 @@ u32 nw4r_g3d_ScnMdlSimple_GetScnMtxPos(u32 r3, u32 r4, u32 r5, u32 r6) {
                    "matrices)", r3, r5, r6, guest::load32(r3 + 0xEC), guest::load32(r3 + 0xF4),
                    guest::load8(r3 + 0x101), guest::load16(r3 + 0x102));
     }
+    return r;
+}
+
+// lib::Message: the text of message r4 (group << 16 | index), out of the loaded BMG files. The
+// first time each is asked for is noted: scripted input can count from it (NOMA_INPUT's
+// M<id>+<seconds>), and NOMA_DEBUG_MSG=1 logs every text as it first comes up, which shows the
+// screens a run went through without its frames.
+u32 lib_Message_Get(u32 r3, u32 r4) {
+    u32 r = lib_Message_Get_orig(r3, r4);
+    guest::input_script_message(r4, r);
     return r;
 }
 

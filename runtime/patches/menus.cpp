@@ -1,13 +1,16 @@
 // Menu buttons that lead only to the Wii's own settings and services, left out on the 3DS: in the
 // options' top menu the video quality and the region/address settings, in the theater the Wii
-// Points button; and the room's shop button, whose shop was Flash (left out: players.cpp). Each is still built as the channel builds it (its layout loaded, its callbacks
-// wired), then hidden and kept inactive, the way the channel hides a layout::Button of its own:
-// the root pane of the button's layout invisible (nw4r_lyt_Pane_SetVisible), and the button
-// inactive (layout_Button_SetActive, +0x5B8), which its hit test and its focus check ask first.
+// Points button; and the room's shop button, whose shop was Flash (left out: players.cpp), and
+// offline its TV programmes button. Each is still built as the channel builds it (its layout
+// loaded, its callbacks wired), then hidden and kept inactive, the way the channel hides a
+// layout::Button of its own: the root pane of the button's layout invisible
+// (nw4r_lyt_Pane_SetVisible), and the button inactive (layout_Button_SetActive, +0x5B8), which its
+// hit test and its focus check ask first.
 // Buttons are reached with the pointer only (layout::Cursor asks every listener's hit test; there
 // is no D-pad focus and no default focus), so nothing else has to skip them.
 #include <cstring>
 
+#include "hw/ios/net.h"
 #include "noma_decomp.h"
 
 namespace g {
@@ -24,6 +27,20 @@ namespace {
 // a child of the locator). A pane's translation: +0x2C, three floats.
 u32 locator(u32 button) { return guest::load32(button + 0x14 + 0x8); }
 u32 root_pane(u32 button) { return guest::load32(guest::load32(button + 0x14 + 0xC) + 0x10); }
+
+// a pane of the button's layout by its name, or 0 (nw4r::lyt::Pane::FindPaneByName on the root
+// pane, recursive: the pane's virtual at +0x3C; the name goes on the guest stack)
+u32 find_pane(u32 button, const char* name) {
+    GFRAME(0x20);
+    u32 s = (u32)&GS(u8, 0x8);
+    for (u32 i = 0; i < 0x17; i++) {
+        guest::store8(s + i, (u8)name[i]);
+        if (!name[i])
+            break;
+    }
+    u32 root = root_pane(button);
+    return gcall<u32>(guest::load32(guest::load32(root) + 0x3C), root, s, 1u);
+}
 
 void hide(u32 button) {
     nw4r_lyt_Pane_SetVisible(root_pane(button), 0);
@@ -97,21 +114,32 @@ u32 controller_theater_LayoutController_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
 // layout_living_MoveBtn_CreateButtons makes them (+0xD04, a vector of layout::Button*), are the
 // theater, the shop, いろんな間, the TV programmes and the way back. The shop is left out: its
 // catalogues and menus were Flash files from the server, and Flash is left out of the port (it
-// only showed "can't connect"). いろんな間 and the TV move left into its place, keeping their
-// spacing (the bar's animations move its buttons only up and down).
+// only showed "can't connect"). Offline the TV programmes are too: the programme guide and the
+// programmes are the server's, and the TV scene (only reached from here) has nothing to show
+// (its top page says "今のおすすめはこちらです" over an empty screen, over and over). いろんな間 and
+// the TV move left into the shop's place, keeping their spacing (the bar's animations move its
+// buttons only up and down). The way back (Common/Wii_Btn.lex) went to the Wii Menu, and ends the
+// app here: its back arrow stays, the "Wii" logo under it goes (Pic_Wii and its shadow
+// Pic_Shadow; the button's animations change their colours, not whether they're shown).
 void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     layout_living_MoveBtn_ctor_orig(r3, r4, r5, r6, r7);
-    enum : u32 { SHOP = 1, IRONNA = 2, TV = 3 };
-    if (guest::load32(r3 + 0xD08) <= TV)
+    enum : u32 { SHOP = 1, IRONNA = 2, TV = 3, BACK = 4 };
+    u32 count = guest::load32(r3 + 0xD08);
+    if (count <= TV)
         return;
     u32 buttons = guest::load32(r3 + 0xD04);
-    u32 shop = guest::load32(buttons + 4 * SHOP);
-    hide(shop);
-    float dx = locator_x(shop) - locator_x(guest::load32(buttons + 4 * IRONNA));
-    for (u32 i : {IRONNA, TV}) {
-        u32 b = guest::load32(buttons + 4 * i);
-        set_locator_x(b, locator_x(b) + dx);
-    }
+    auto button = [buttons](u32 i) { return guest::load32(buttons + 4 * i); };
+    hide(button(SHOP));
+    if (guest::net_offline())
+        hide(button(TV));
+    float dx = locator_x(button(SHOP)) - locator_x(button(IRONNA));
+    for (u32 i : {IRONNA, TV})
+        set_locator_x(button(i), locator_x(button(i)) + dx);
+    if (count <= BACK)
+        return;
+    for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
+        if (u32 pane = find_pane(button(BACK), logo))
+            nw4r_lyt_Pane_SetVisible(pane, 0);
 }
 
 }  // namespace g
