@@ -22,6 +22,11 @@ namespace guest {
 static GxRenderer s_null_renderer;
 static GxRenderer* s_renderer = &s_null_renderer;
 void gx_set_renderer(GxRenderer* r) { s_renderer = r ? r : &s_null_renderer; }
+void gx_sync();
+void gx_end_frame_for_applet() {
+    gx_sync();  // (the GPU's thread then leaves the renderer alone: nothing new reaches it)
+    s_renderer->suspend();
+}
 
 static u32 s_bp_mask = 0xFFFFFF;
 

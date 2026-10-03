@@ -83,6 +83,7 @@ struct State {
     u32 vmax = 0, imax = 0;    // ... at most, since the last report
     u32 draws = 0, batches = 0, setups = 0;  // this frame
     bool in_frame = false;
+    bool resume = false;  // the frame goes on (its first part went to the GPU before an applet)
     u32 frame = 0;
     std::unordered_map<u32, TexEntry> textures;  // by GxTexture id
     std::vector<C3D_Tex> dead;                   // freed after the GPU finished the frame
@@ -934,7 +935,9 @@ void begin_frame() {
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB];
     u32 color = (ar & 255) << 24 | ((gb >> 8) & 255) << 16 | (gb & 255) << 8 | 0xFF;
-    C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
+    if (!P.resume)
+        C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
+    P.resume = false;
     C3D_FrameDrawOn(P.top);
     P.vmax = std::max(P.vmax, P.vused);
     P.imax = std::max(P.imax, P.iused);
@@ -1244,6 +1247,8 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
         P.bp_shadow[reg] = value;
         P.state_serial++;
     }
+    if (reg == 0x45 && (value & 0xFF) == 2 && P.resume)
+        begin_frame();  // (a frame an applet interrupted, with no draw since: it is shown too)
     if (reg == 0x45 && (value & 0xFF) == 2 && P.in_frame) {  // draw done: the frame is complete
         if (gx_efb_copy_test_frame() == (int)P.frame && read_back()) {
             efb_off_x = efb_off_y = 0;  // the whole frame
@@ -1279,6 +1284,19 @@ void PicaRenderer::xf_write(u32 addr, u32 value) {
         P.state_serial++;
 }
 
+// An applet (the keyboard) takes the GPU: citro3d's own APT hook waits for what was submitted
+// and sets all state again afterwards, so only the open frame matters. Its draws so far go to the
+// render target without being shown, and the next draw goes on with it, uncleared.
+void PicaRenderer::suspend() {
+    if (!P.ready || !P.in_frame)
+        return;
+    C3D_RenderTargetDetachOutput(P.top);
+    end_frame();
+    C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    P.in_frame = false;
+    P.resume = true;
+}
+
 void PicaRenderer::efb_copy(u32 value) {
     if (!P.ready)
         return;
@@ -1292,6 +1310,8 @@ void PicaRenderer::efb_copy(u32 value) {
     } else if (read_back()) {
         gx_copy_to_texture(c, readback_rgba);
     }
+    if (c.clear && P.resume)
+        begin_frame();
     if (c.clear && P.in_frame)
         clear_rect(c.sx, c.sy, c.w, c.h);
 }

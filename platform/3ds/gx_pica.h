@@ -11,6 +11,7 @@ public:
     void bp_write(u32 reg, u32 value) override;
     void xf_write(u32 addr, u32 value) override;
     void efb_copy(u32 value) override;
+    void suspend() override;
 };
 
 }  // namespace guest

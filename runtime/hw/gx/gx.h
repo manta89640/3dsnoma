@@ -58,8 +58,16 @@ struct GxRenderer {
     // BP 0x52: copy the EFB to texture memory or to the external frame buffer
     virtual void efb_copy(u32 value) {}
     virtual void frame_done() {}
+    // the platform hands its GPU to the system for a while (an applet such as the keyboard):
+    // what was drawn so far goes to the GPU, and nothing is left open
+    virtual void suspend() {}
 };
 void gx_set_renderer(GxRenderer* r);
+// Before the platform runs an applet that takes over the GPU and the screens (the 3DS keyboard):
+// the GPU's thread finishes what it was given and the renderer closes the frame it is drawing
+// (not shown; the frame goes on after the applet). Called from the CPU's thread; nothing else
+// for the renderer to do on the host.
+void gx_end_frame_for_applet();
 
 // fifo.cpp
 void gx_fifo_init();
