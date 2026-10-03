@@ -120,6 +120,7 @@ NATIVE_NAMES = {
     # engine/input: the Wii Remote is the 3DS's controls; WPAD's Bluetooth stack never starts (remote.cpp)
     "KPADInitEx", "KPADReadEx", "KPADSetPosParam", "KPADSetConnectCallback", "WPADRegisterAllocator",
     "WPADProbe", "WPADDisconnect", "WPADControlMotor", "WPADIsSpeakerEnabled", "WPADSendStreamData",
+    "nw4r_snd_detail_RemoteSpeakerManager_Setup",
     # engine/system: the Wii's HOME Button Menu is not part of the 3DS port (home_button.cpp)
     "homebutton_Manager_LoadIcon", "homebutton_Manager_Load", "homebutton_Manager_Open",
     "homebutton_Manager_Update", "homebutton_Manager_Draw",
@@ -174,9 +175,9 @@ PATCHED_NAMES = {
     # the AX's aux buses: no effects where the 3DS's DSP plays the voices (engine/audio/aux.cpp)
     "AXRegisterAuxACallback", "AXRegisterAuxBCallback", "AXRegisterAuxCCallback",
     # parts about the Wii itself, left out on the 3DS (runtime/patches/wii_parts.cpp): the Wii Remote
-    # strap screen at the start, the setup's video quality step
+    # strap screen at the start, the setup's video quality step, frames rounded up to TV retraces
     "scene_TitleScene_ctor", "scene_PreTitleScene_ctor", "scene_FirstSetupScene_StateConfirmAddMii_OnEnd",
-    "wii_MessageData_Load",
+    "wii_MessageData_Load", "VIWaitForRetrace", "app_Exit_Dispatch",
     # the profile's birth year: selectable up to 2099, not just the current year (runtime/patches/profile.cpp)
     "profile_BirthYear_Max",
 }

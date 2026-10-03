@@ -114,6 +114,14 @@ void mii_3ds_to_wii(const u8* m, u8* w) {
                         clampv(bitsof(mole, 10, 5), 30) << 6 | clampv(bitsof(mole, 5, 5), 16) << 1);
 }
 
+// the CRC at the end, over everything before it and two zero bytes: the whole file CRCs to 0
+static void rfl_seal(std::vector<u8>& db) {
+    u16 crc = rfl_crc(db.data(), 0x1F1DE);
+    static const u8 zero[2] = {0, 0};
+    crc = rfl_crc(zero, 2, crc);
+    put16(&db[0x1F1DE], crc);
+}
+
 // a fresh database (formatted as RFL formats one) with `count` Miis in the first slots
 std::vector<u8> rfl_make_database(const u8* const* miis, int count) {
     std::vector<u8> db(0x1F1E0, 0);
@@ -128,12 +136,30 @@ std::vector<u8> rfl_make_database(const u8* const* miis, int count) {
         put16(&db[0x1D08 + 12 * i + 8], 0x7FFF);
         put16(&db[0x1D08 + 12 * i + 10], 0x7FFF);
     }
-    // the stored CRC is that of the data followed by two zero bytes, so the whole file CRCs to 0
-    u16 crc = rfl_crc(db.data(), 0x1F1DE);
-    static const u8 zero[2] = {0, 0};
-    crc = rfl_crc(zero, 2, crc);
-    put16(&db[0x1F1DE], crc);
+    rfl_seal(db);
     return db;
+}
+
+// `db` with `mii` in it: in the slot of the same Mii (Mii and console ID) if it's there, else in
+// the first empty one (the last if all are taken); the other Miis stay where they are. A database
+// this converter doesn't vouch for (or none) is started afresh.
+std::vector<u8> rfl_add_mii(const std::vector<u8>& db, const u8* mii) {
+    if (!rfl_database_valid(db))
+        return rfl_make_database(&mii, 1);
+    std::vector<u8> out = db;
+    int slot = -1, empty = -1;
+    for (int i = 0; i < 100 && slot < 0; i++) {
+        const u8* m = &out[4 + i * 0x4A];
+        if (!m[2] && !m[3])  // no name: an empty slot
+            empty = empty < 0 ? i : empty;
+        else if (memcmp(m + 0x18, mii + 0x18, 8) == 0)
+            slot = i;
+    }
+    if (slot < 0)
+        slot = empty >= 0 ? empty : 99;
+    memcpy(&out[4 + slot * 0x4A], mii, 0x4A);
+    rfl_seal(out);
+    return out;
 }
 
 // a database as this converter writes them: intact, and every Mii in it with its face parts (an

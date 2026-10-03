@@ -134,22 +134,13 @@ void platform_audio_push(const s16* lr, u32 frames) {
     }
 }
 
-// ---- Miis: the channel's face library reads the Wii Mii database; it gets the Mii the player
-// picks in the 3DS Mii Selector (on the first start, or when SELECT is held while starting)
-static void mii_setup(const std::string& nand) {
-    std::string dir = nand + "/shared2/menu/FaceLib", path = dir + "/RFL_DB.dat";
-    hidScanInput();
-    bool exists = false, valid = false;
-    if (FILE* f = fopen(path.c_str(), "rb")) {
-        exists = true;
-        std::vector<u8> db(0x1F1E0);
-        valid = fread(db.data(), 1, db.size(), f) == db.size() && rfl_database_valid(db);
-        fclose(f);
-    }
-    if (exists && !valid)
-        log("mii: %s is not one this version writes: choose the Mii again", path.c_str());
-    if (valid && !(hidKeysHeld() & KEY_SELECT))
-        return;
+// ---- Miis: the channel's face library reads the Wii Mii database; the Mii the player picks in
+// the 3DS Mii Selector (on the first start, when SELECT is held while starting, or when the
+// channel would send the player to the Mii Channel) goes into it, with the Miis already there
+static std::string s_nand;
+
+// the Mii Selector, and its Mii into the database: true if one was picked
+static bool pick_mii(const std::string& path, bool exists, bool valid, std::vector<u8>& db) {
     MiiSelectorConf conf;
     miiSelectorInit(&conf);
     miiSelectorSetTitle(&conf, "Wii no Ma: choose your Mii");
@@ -158,20 +149,59 @@ static void mii_setup(const std::string& nand) {
     miiSelectorLaunch(&conf, &ret);
     if (ret.no_mii_selected) {
         log("mii: none chosen%s", exists ? " (keeping the database)" : "");
-        return;
+        return false;
     }
     u8 wii[0x4A];
     mii_3ds_to_wii((const u8*)&ret.mii, wii);
-    const u8* list[1] = {wii};
-    std::vector<u8> db = rfl_make_database(list, 1);
-    mkdir((nand + "/shared2").c_str(), 0777);
-    mkdir((nand + "/shared2/menu").c_str(), 0777);
-    mkdir(dir.c_str(), 0777);
-    if (FILE* f = fopen(path.c_str(), "wb")) {
-        fwrite(db.data(), 1, db.size(), f);
-        fclose(f);
-        log("mii: wrote the database with the chosen Mii");
-    }
+    db = rfl_add_mii(valid ? db : std::vector<u8>(), wii);
+    mkdir((s_nand + "/shared2").c_str(), 0777);
+    mkdir((s_nand + "/shared2/menu").c_str(), 0777);
+    mkdir((s_nand + "/shared2/menu/FaceLib").c_str(), 0777);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    fwrite(db.data(), 1, db.size(), f);
+    fclose(f);
+    log("mii: the chosen Mii is in the database");
+    return true;
+}
+
+// the database, if it's one this version writes
+static bool read_mii_database(const std::string& path, bool& exists, std::vector<u8>& db) {
+    db.assign(0x1F1E0, 0);
+    exists = false;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    exists = true;
+    bool valid = fread(db.data(), 1, db.size(), f) == db.size() && rfl_database_valid(db);
+    fclose(f);
+    return valid;
+}
+
+static void mii_setup(const std::string& nand) {
+    s_nand = nand;
+    std::string path = nand + "/shared2/menu/FaceLib/RFL_DB.dat";
+    hidScanInput();
+    bool exists;
+    std::vector<u8> db;
+    bool valid = read_mii_database(path, exists, db);
+    if (exists && !valid)
+        log("mii: %s is not one this version writes: choose the Mii again", path.c_str());
+    if (valid && !(hidKeysHeld() & KEY_SELECT))
+        return;
+    pick_mii(path, exists, valid, db);
+}
+
+bool platform_choose_mii() {
+    std::string path = s_nand + "/shared2/menu/FaceLib/RFL_DB.dat";
+    bool exists;
+    std::vector<u8> db;
+    bool valid = read_mii_database(path, exists, db);
+    if (!pick_mii(path, exists, valid, db))
+        return false;
+    aptSetChainloaderToSelf();  // (the face library reads the database when the app starts)
+    return true;
 }
 
 // back to the HOME Menu, as the Wii channel would go back to the Wii Menu

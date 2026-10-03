@@ -60,6 +60,8 @@ void platform_quit(const char* why) {
     exit(0);
 }
 
+bool platform_choose_mii() { return false; }  // (no Mii Selector: Miis come from NOMA_SELFTEST=rfl)
+
 void platform_fatal(const char* msg) {
     ::noma_trace_dump();
     fprintf(stderr, "fatal: %s\n", msg);

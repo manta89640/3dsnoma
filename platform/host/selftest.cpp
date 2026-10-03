@@ -310,6 +310,19 @@ static void selftest_rfl() {
               load16(at + 4 + 2) == 'N' && usable;
     log("selftest RFL_DB.dat: %s (game's CRC over the file %04X, Mii word %04X, RFL %s the Mii)",
         ok ? "ok" : "MISMATCH", crc, load16(at + 4), usable ? "takes" : "REJECTS");
+    // a Mii picked in the Mii Selector goes in with the others: another one into the next slot,
+    // the same one again (Mii and console ID) into its own slot, and the file stays valid
+    u8 w2[0x4A];
+    memcpy(w2, w, sizeof(w2));
+    w2[0x1B] ^= 1, w2[0x02] = 0, w2[0x03] = 'M';  // another Mii ID, named "M"
+    std::vector<u8> two = rfl_add_mii(db, w2);
+    w2[0x16] = 99;  // ... and again, taller
+    std::vector<u8> again = rfl_add_mii(two, w2);
+    auto slot = [](const std::vector<u8>& d, int i) { return &d[4 + 0x4A * i]; };
+    bool add_ok = rfl_database_valid(two) && rfl_database_valid(again) && memcmp(slot(two, 0), w, 0x4A) == 0 &&
+                  memcmp(slot(two, 1), w2, 0x16) == 0 && memcmp(slot(again, 0), w, 0x4A) == 0 &&
+                  memcmp(slot(again, 1), w2, 0x4A) == 0 && slot(again, 2)[2] == 0 && slot(again, 2)[3] == 0;
+    log("selftest RFL_DB.dat adding a Mii: %s", add_ok ? "ok" : "MISMATCH");
     // NOMA_WRITE_RFLDB=path: keep it (a test database for runs without the 3DS Mii Selector)
     if (const char* out = getenv("NOMA_WRITE_RFLDB")) {
         if (FILE* f = fopen(out, "wb")) {

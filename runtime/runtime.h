@@ -25,11 +25,16 @@ void log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void platform_fatal(const char* msg);
 // the game is done (it reset or powered off the console, e.g. "return to the Wii Menu"): leave
 void platform_quit(const char* why);
+// the player picks a Mii for the Wii Mii database (the 3DS's Mii Selector), which the program can
+// only see when it starts again: true if one was picked and the next quit starts the app again;
+// false where there's no Mii Selector (the host) or none was picked
+bool platform_choose_mii();
 
 // Miis (runtime/mii.cpp): a 3DS MiiData (0x5C bytes) as the Wii's RFLCharData (0x4A bytes), and a
 // fresh /shared2/menu/FaceLib/RFL_DB.dat holding up to 100 of those
 void mii_3ds_to_wii(const u8* mii_3ds, u8* char_data);
 std::vector<u8> rfl_make_database(const u8* const* miis, int count);
+std::vector<u8> rfl_add_mii(const std::vector<u8>& db, const u8* mii);
 bool rfl_database_valid(const std::vector<u8>& db);
 u64 host_time_us();  // monotonic microseconds
 u64 host_timebase();  // the same clock in Wii timebase ticks (TB_HZ)

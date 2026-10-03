@@ -111,5 +111,7 @@ u64 WPADControlMotor(u32, u32) { return 0; }  // (no rumble on the 3DS)
 // no speaker: the sound library sends it nothing
 u32 WPADIsSpeakerEnabled(u32) { return 0; }
 u32 WPADSendStreamData(u32, u32, u32) { return (u32)WPAD_ERR_BUSY; }
+// ... and nw4r::snd's remote speakers don't run: their alarm (every 6.67 ms, for good) isn't set
+void nw4r_snd_detail_RemoteSpeakerManager_Setup(u32 mgr, u32) { guest::store8(mgr, 1); }
 
 }  // namespace g
