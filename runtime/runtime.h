@@ -45,6 +45,9 @@ void platform_present(u32 xfb);  // a vertical retrace: show the frame buffer at
 // The GPU's own thread (runtime/hw/gx/fifo.cpp), on a core of its own where the platform has a
 // spare one; false when it runs none (the command decoder then runs inline, on the CPU's thread).
 bool platform_gpu_thread_start(void (*fn)());
+// The audio thread, which mixes the AX frames (runtime/hw/dsp_hle.cpp) like the Wii's DSP beside
+// its CPU; false where there is no spare core for it (the frames are then mixed inline).
+bool platform_audio_thread_start(void (*fn)());
 // a wake-up between host threads: one waiting thread wakes per signal (or at the timeout)
 struct HostSignal;
 HostSignal* platform_signal_new();
@@ -70,10 +73,12 @@ static inline void audio_dsp_flushed(u32, u32) {}
 #ifdef NOMA_PROFILE_CALLS
 ProfStack* profile_new_stack(u32 thread);  // for a new guest thread
 void profile_gpu_thread();                 // the GPU's thread: its own stack
+void profile_audio_thread();               // the audio thread: its own stack
 void profile_start();
 void profile_report_due();  // the main thread logs a report when one is due
 #else
 static inline void profile_gpu_thread() {}
+static inline void profile_audio_thread() {}
 static inline void profile_start() {}
 static inline void profile_report_due() {}
 #endif

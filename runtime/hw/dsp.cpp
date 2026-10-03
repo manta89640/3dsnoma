@@ -77,14 +77,16 @@ struct LaterMail {
 static std::deque<LaterMail> s_later;
 void dsp_send_mail(u32 mail, bool interrupt);
 
-void dsp_send_mail_later(u32 mail) { s_later.push_back({mail, host_time_us() + 30}); }
+void dsp_send_mail_later(u32 mail, u64 delay_us) { s_later.push_back({mail, host_time_us() + delay_us}); }
 
-static void deliver_later_mail(u64 now) {
+// true if a mail went to the CPU
+static bool deliver_later_mail(u64 now) {
     if (s_later.empty() || (s_dsp_mbox & 0x80000000u) || now < s_later.front().ready_us)
-        return;
+        return false;
     u32 m = s_later.front().mail;
     s_later.pop_front();
     dsp_send_mail(m, true);
+    return true;
 }
 
 // the DSP sends a mail to the CPU (and optionally interrupts it)
@@ -233,11 +235,21 @@ static void write16(u32 off, u16 v) {
 // CPU took late are made up for, up to CATCH_UP_US behind, instead of being skipped (which slowed
 // the music down and left gaps in the 3DS's audio stream). While it catches up the guard waits.
 static const s64 CATCH_UP_US = 100000;
+void dsp_ax_poll();
+void dsp_ax_wait();
+
 void dsp_tick(u64 now) {
+    dsp_ax_poll();
     deliver_later_mail(now);
     if (s_dma_on && !(s_dspcr & CR_AIDINT)) {
         s64 dur = (s64)s_dma_blocks * 8 * 1000000 / 32000;  // 8 sample pairs a block
         if ((s64)(now - s_dma_t0) < dur)
+            return;
+        // The frame being mixed is in what plays next, and the CPU's next frame reads its PBs. AX
+        // makes no frame for a block whose interrupt comes while the DSP is busy: the frame's yield
+        // goes to the CPU first, and the block's interrupt follows at the next tick.
+        dsp_ax_wait();
+        if (deliver_later_mail(now) || !s_later.empty())
             return;
         extern u64 g_hiprio_us;
         static u64 s_prev_block, s_prev_hiprio;

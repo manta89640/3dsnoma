@@ -323,6 +323,28 @@ static void poll_input() {
     // the circle pad nudges the pointer too
     circlePosition c;
     hidCircleRead(&c);
+// ---- the audio thread: on the New 3DS's system core (the GPU's thread has core 2; the app may
+// take up to 80% of the system core), just above the main thread's priority. The Old 3DS mixes
+// inline: its system core is the GPU thread's. NOMA_AX_INLINE mixes inline on the New 3DS too.
+static void (*s_audio_fn)();
+bool platform_audio_thread_start(void (*fn)()) {
+    bool n3ds = false;
+    APT_CheckNew3DS(&n3ds);
+    if (!n3ds || getenv("NOMA_AX_INLINE"))
+        return false;
+    APT_SetAppCpuTimeLimit(80);
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    s_audio_fn = fn;
+    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 1, 1, true);
+    if (!t) {
+        log("ax: no thread on core 1: the frames are mixed inline");
+        return false;
+    }
+    log("ax: the frames are mixed on core 1");
+    return true;
+}
+
     if (c.dx * c.dx + c.dy * c.dy > 20 * 20) {
         s_in.x += (float)c.dx / 156.0f * 0.03f;
         s_in.y -= (float)c.dy / 156.0f * 0.03f;

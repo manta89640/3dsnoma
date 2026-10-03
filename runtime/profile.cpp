@@ -25,8 +25,9 @@ namespace guest {
 static ProfStack s_main_stack;
 ProfStack* volatile g_prof = &s_main_stack;
 thread_local ProfStack* t_prof;
-static ProfStack s_gpu_stack;  // the GPU's thread (runtime/hw/gx/fifo.cpp)
-static std::atomic<bool> s_gpu_on{false};
+static ProfStack s_gpu_stack;    // the GPU's thread (runtime/hw/gx/fifo.cpp)
+static ProfStack s_audio_stack;  // the audio thread (the AX frames, runtime/hw/dsp_hle.cpp)
+static std::atomic<bool> s_gpu_on{false}, s_audio_on{false};
 
 namespace {
 
@@ -37,15 +38,17 @@ struct Counts {
     std::map<std::pair<u32, const char*>, u32> thread_self;  // per guest thread
 };
 Counts s_counts;
-Counts s_gpu_counts;  // the GPU's thread: self only, "(gpu idle)" while it waits for commands
+Counts s_gpu_counts;    // the GPU's thread: self only, "(gpu idle)" while it waits for commands
+Counts s_audio_counts;  // the audio thread: self only, "(audio idle)" between frames
 std::atomic_flag s_lock = ATOMIC_FLAG_INIT;
 int s_every;  // seconds between reports
 
-void sample_gpu() {
-    u32 depth = s_gpu_stack.depth;
-    const char* name = depth == 0 ? "(gpu idle)" : s_gpu_stack.names[std::min(depth, PROF_DEPTH) - 1];
-    s_gpu_counts.samples++;
-    s_gpu_counts.self[name]++;
+// a host thread with a stack of its own: where it is now
+void sample_host(const ProfStack& st, Counts& c, const char* idle) {
+    u32 depth = st.depth;
+    const char* name = depth == 0 ? idle : st.names[std::min(depth, PROF_DEPTH) - 1];
+    c.samples++;
+    c.self[name]++;
 }
 
 void sample() {
@@ -61,7 +64,9 @@ void sample() {
     if (s_lock.test_and_set(std::memory_order_acquire))
         return;
     if (s_gpu_on.load(std::memory_order_relaxed))
-        sample_gpu();
+        sample_host(s_gpu_stack, s_gpu_counts, "(gpu idle)");
+    if (s_audio_on.load(std::memory_order_relaxed))
+        sample_host(s_audio_stack, s_audio_counts, "(audio idle)");
     s_counts.samples++;
     s_counts.threads[s->thread]++;
     if (depth == 0) {
@@ -107,10 +112,15 @@ void log_top(const char* what, const std::unordered_map<const char*, u32>& m, u3
 
 }  // namespace
 
-// the GPU's thread profiles itself on a stack of its own
+// the GPU's and the audio thread profile themselves on stacks of their own
 void profile_gpu_thread() {
     t_prof = &s_gpu_stack;
     s_gpu_on.store(true);
+}
+
+void profile_audio_thread() {
+    t_prof = &s_audio_stack;
+    s_audio_on.store(true);
 }
 
 ProfStack* profile_new_stack(u32 thread) {
@@ -154,6 +164,8 @@ void profile_report_due() {
     s_counts = Counts();
     Counts gpu = std::move(s_gpu_counts);
     s_gpu_counts = Counts();
+    Counts audio = std::move(s_audio_counts);
+    s_audio_counts = Counts();
     s_lock.clear(std::memory_order_release);
     if (!c.samples)
         return;
@@ -181,6 +193,8 @@ void profile_report_due() {
     }
     if (gpu.samples)
         log_top("gpu  ", gpu.self, gpu.samples, 12);
+    if (audio.samples)
+        log_top("audio", audio.self, audio.samples, 6);
 }
 
 }  // namespace guest
