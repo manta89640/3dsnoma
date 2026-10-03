@@ -899,6 +899,7 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     out.resize(count);
     gx_decode_vertices(vat, count, data, in.data());
     gx_transform(in.data(), count, out.data());
+    gx_check_transform_draw(vat, count, data, out.data());
     load_state();
     if (debug_draws()) {
         f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;

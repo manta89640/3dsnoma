@@ -27,4 +27,44 @@ void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out);
 // the transform unit
 void gx_transform(const GxVertex* in, u32 count, GxOutVertex* out);
 
+// ---- the draw path: decoding and the transform unit in one pass, for a renderer that
+// rasterizes with one color and up to three projected texture coordinates (the 3DS GPU)
+
+// one attribute in the stream: where its data (or index) is and how to read the components
+struct GxAttrFormat {
+    u8 mode = 0;    // 0 not present, 1 direct, 2 8-bit index, 3 16-bit index
+    u8 type = 0;    // component type (u8 s8 u16 s16 f32), or the color format
+    u8 n = 0;       // components
+    u8 offset = 0;  // byte offset in the stream vertex
+    f32 scale = 1;  // integer components: 1 / 2^shift
+};
+
+// a vertex format (CP VCD + VAT) compiled for decoding
+struct GxVertexFormat {
+    u32 size = 0;                 // stream bytes per vertex
+    s8 pos_mtx = -1;              // stream offsets of the matrix indices, -1: XF default
+    s8 tex_mtx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    GxAttrFormat pos, nrm, color[2], tex[8];
+    bool nbt = false;             // normal, binormal and tangent
+    bool nrm_index3 = false;      // ... with an index each
+};
+const GxVertexFormat& gx_vertex_format(u32 vat);
+
+// what the renderer draws: a clip-space position (as GxOutVertex), color 0 as bytes, and the
+// texture coordinates of up to three texgens with q divided out and a scale applied
+struct GxDrawVertex {
+    f32 pos[4];
+    u8 color[4];
+    f32 tc[3][2];
+};
+struct GxDrawSetup {
+    s8 texgen[3] = {-1, -1, -1};  // the texgen each output coordinate comes from; -1: none
+    f32 sx[3] = {1, 1, 1}, sy[3] = {1, 1, 1};
+};
+// Decode and transform `count` vertices of format `vat`: the same results as
+// gx_decode_vertices + gx_transform (to rounding), but only the outputs the setup asks for.
+void gx_transform_draw(u32 vat, u32 count, const u8* data, const GxDrawSetup& setup, GxDrawVertex* out);
+// NOMA_CHECK_GX_DRAW: compare gx_transform_draw with gx_transform's results for a draw
+void gx_check_transform_draw(u32 vat, u32 count, const u8* data, const GxOutVertex* ref);
+
 }  // namespace guest

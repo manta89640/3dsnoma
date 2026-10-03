@@ -6,8 +6,8 @@
 //
 // Formats come from the vertex attribute tables (CP 0x70/0x80/0x90 + vat): component type
 // (u8 s8 u16 s16 f32), element count and, for integers, a fixed-point shift.
-#include "regs.h"
 #include "vertex.h"
+#include "vertex_read.h"
 
 namespace guest {
 
@@ -23,81 +23,84 @@ struct Reader {
     }
 };
 
-// array element `index` of attribute `attr` in guest memory
-const u8* array_ptr(u32 attr, u32 index) {
-    u32 base = g_gx.cp[CP_ARRAY_BASE + attr], stride = g_gx.cp[CP_ARRAY_STRIDE + attr];
-    u32 a = 0x80000000 | ((base + index * stride) & 0x1FFFFFFF);
-    const u8* h = host_ptr(a);
-    static const u8 zero[64] = {};
-    return h ? h : zero;
-}
-
 const u32 k_comp_bytes[8] = {1, 1, 2, 2, 4, 1, 1, 1};
-
-f32 read_comp(const u8*& p, u32 type, f32 scale) {
-    switch (type) {
-    case 0: return (f32)*p++ * scale;
-    case 1: return (f32)(s8)*p++ * scale;
-    case 2: {
-        u16 v = (u16)(p[0] << 8 | p[1]);
-        p += 2;
-        return (f32)v * scale;
-    }
-    case 3: {
-        s16 v = (s16)(p[0] << 8 | p[1]);
-        p += 2;
-        return (f32)v * scale;
-    }
-    case 4: {
-        u32 b = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
-        p += 4;
-        f32 f;
-        memcpy(&f, &b, 4);
-        return f;
-    }
-    default:
-        p++;
-        return 0;
-    }
-}
-
-void read_color(const u8* p, u32 fmt, u8* out) {
-    switch (fmt) {
-    case 0: {  // RGB565
-        u16 v = (u16)(p[0] << 8 | p[1]);
-        out[0] = (u8)((v >> 11) * 255 / 31);
-        out[1] = (u8)(((v >> 5) & 63) * 255 / 63);
-        out[2] = (u8)((v & 31) * 255 / 31);
-        out[3] = 255;
-        break;
-    }
-    case 1:  // RGB888
-    case 2:  // RGB888x
-        out[0] = p[0], out[1] = p[1], out[2] = p[2], out[3] = 255;
-        break;
-    case 3: {  // RGBA4444
-        out[0] = (u8)((p[0] >> 4) * 17);
-        out[1] = (u8)((p[0] & 15) * 17);
-        out[2] = (u8)((p[1] >> 4) * 17);
-        out[3] = (u8)((p[1] & 15) * 17);
-        break;
-    }
-    case 4: {  // RGBA6666
-        u32 v = (u32)p[0] << 16 | (u32)p[1] << 8 | p[2];
-        u32 c[4] = {(v >> 18) & 63, (v >> 12) & 63, (v >> 6) & 63, v & 63};
-        for (int i = 0; i < 4; i++)
-            out[i] = (u8)((c[i] << 2) | (c[i] >> 4));
-        break;
-    }
-    default:  // RGBA8888
-        out[0] = p[0], out[1] = p[1], out[2] = p[2], out[3] = p[3];
-        break;
-    }
-}
 
 const u32 k_color_bytes[8] = {2, 3, 4, 2, 3, 4, 4, 4};
 
+// bytes a component or a direct color takes in the stream (as gx_vertex_size counts them)
+const u8 k_stream_comp[8] = {1, 1, 2, 2, 4, 0, 0, 0};
+const u8 k_stream_color[8] = {2, 3, 4, 2, 3, 4, 0, 0};
+
+GxVertexFormat compile_format(u32 lo, u32 hi, u32 a, u32 b, u32 c) {
+    GxVertexFormat f;
+    u32 off = 0;
+    if (lo & 1)
+        f.pos_mtx = (s8)off++;
+    for (int i = 0; i < 8; i++)
+        if (lo & (2u << i))
+            f.tex_mtx[i] = (s8)off++;
+    auto index_bytes = [](u32 mode) { return mode == 2 ? 1u : 2u; };
+
+    GxAttrFormat& p = f.pos;
+    p.mode = (u8)bits(lo, 9, 2), p.n = bits(a, 0, 1) ? 3 : 2, p.type = (u8)bits(a, 1, 3);
+    p.scale = p.type == 4 ? 1.0f : 1.0f / (f32)(1u << bits(a, 4, 5));
+    p.offset = (u8)off;
+    if (p.mode)
+        off += p.mode == 1 ? p.n * k_stream_comp[p.type] : index_bytes(p.mode);
+
+    GxAttrFormat& n = f.nrm;
+    f.nbt = bits(a, 9, 1), f.nrm_index3 = bits(a, 31, 1);
+    n.mode = (u8)bits(lo, 11, 2), n.n = f.nbt ? 9 : 3, n.type = (u8)bits(a, 10, 3);
+    n.scale = n.type == 1 ? 1.0f / 64 : n.type == 3 ? 1.0f / 16384 : 1.0f;
+    n.offset = (u8)off;
+    if (n.mode)
+        off += n.mode == 1 ? n.n * k_stream_comp[n.type] : index_bytes(n.mode) * ((f.nbt && f.nrm_index3) ? 3 : 1);
+
+    for (int ch = 0; ch < 2; ch++) {
+        GxAttrFormat& col = f.color[ch];
+        col.mode = (u8)bits(lo, 13 + 2 * ch, 2), col.type = (u8)bits(a, 14 + 4 * ch, 3);
+        col.offset = (u8)off;
+        if (col.mode)
+            off += col.mode == 1 ? k_stream_color[col.type] : index_bytes(col.mode);
+    }
+
+    const u32 tc_fields[8][3] = {
+        {bits(a, 21, 1), bits(a, 22, 3), bits(a, 25, 5)}, {bits(b, 0, 1), bits(b, 1, 3), bits(b, 4, 5)},
+        {bits(b, 9, 1), bits(b, 10, 3), bits(b, 13, 5)},  {bits(b, 18, 1), bits(b, 19, 3), bits(b, 22, 5)},
+        {bits(b, 27, 1), bits(b, 28, 3), bits(c, 0, 5)},  {bits(c, 5, 1), bits(c, 6, 3), bits(c, 9, 5)},
+        {bits(c, 14, 1), bits(c, 15, 3), bits(c, 18, 5)}, {bits(c, 23, 1), bits(c, 24, 3), bits(c, 27, 5)},
+    };
+    for (int i = 0; i < 8; i++) {
+        GxAttrFormat& t = f.tex[i];
+        t.mode = (u8)bits(hi, 2 * i, 2), t.n = tc_fields[i][0] ? 2 : 1, t.type = (u8)tc_fields[i][1];
+        t.scale = t.type == 4 ? 1.0f : 1.0f / (f32)(1u << tc_fields[i][2]);
+        t.offset = (u8)off;
+        if (t.mode)
+            off += t.mode == 1 ? t.n * k_stream_comp[t.type] : index_bytes(t.mode);
+    }
+    f.size = off;
+    return f;
+}
+
 }  // namespace
+
+const GxVertexFormat& gx_vertex_format(u32 vat) {
+    // the formats in use change rarely: one compiled format per vat, kept until its registers change
+    struct Slot {
+        u32 regs[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
+        GxVertexFormat f;
+    };
+    static Slot s_slots[8];
+    vat &= 7;
+    const u32 regs[5] = {g_gx.cp[CP_VCD_LO], g_gx.cp[CP_VCD_HI], g_gx.cp[CP_VAT_A + vat], g_gx.cp[CP_VAT_B + vat],
+                         g_gx.cp[CP_VAT_C + vat]};
+    Slot& s = s_slots[vat];
+    if (memcmp(s.regs, regs, sizeof(regs)) != 0) {
+        memcpy(s.regs, regs, sizeof(regs));
+        s.f = compile_format(regs[0], regs[1], regs[2], regs[3], regs[4]);
+    }
+    return s.f;
+}
 
 void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out) {
     const u32 lo = g_gx.cp[CP_VCD_LO], hi = g_gx.cp[CP_VCD_HI];
@@ -145,9 +148,8 @@ void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out) {
         if (pos_mode) {
             const u8* p = r.p;
             if (pos_mode != 1)
-                p = array_ptr(0, pos_mode == 2 ? r.u8_() : r.u16_());
-            for (u32 i = 0; i < pos_n; i++)
-                o.pos[i] = read_comp(p, pos_type, pos_scale);
+                p = gx_array_ptr(0, pos_mode == 2 ? r.u8_() : r.u16_());
+            p = gx_read_comps(p, pos_type, pos_n, pos_scale, o.pos);
             if (pos_mode == 1)
                 r.p = p;
         }
@@ -156,22 +158,16 @@ void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out) {
             u32 vectors = nbt ? 3 : 1;
             if (nrm_mode == 1) {
                 const u8* p = r.p;
-                for (u32 k = 0; k < vectors; k++)
-                    for (int i = 0; i < 3; i++)
-                        o.nrm[k][i] = read_comp(p, nrm_type, nrm_scale);
-                r.p = p;
+                r.p = gx_read_comps(p, nrm_type, 3 * vectors, nrm_scale, o.nrm[0]);
             } else if (nbt && nrm_index3) {
                 for (u32 k = 0; k < 3; k++) {
                     u32 idx = nrm_mode == 2 ? r.u8_() : r.u16_();
-                    const u8* p = array_ptr(1, idx) + k * 3 * k_comp_bytes[nrm_type];
-                    for (int i = 0; i < 3; i++)
-                        o.nrm[k][i] = read_comp(p, nrm_type, nrm_scale);
+                    const u8* p = gx_array_ptr(1, idx) + k * 3 * k_comp_bytes[nrm_type];
+                    gx_read_comps(p, nrm_type, 3, nrm_scale, o.nrm[k]);
                 }
             } else {
-                const u8* p = array_ptr(1, nrm_mode == 2 ? r.u8_() : r.u16_());
-                for (u32 k = 0; k < vectors; k++)
-                    for (int i = 0; i < 3; i++)
-                        o.nrm[k][i] = read_comp(p, nrm_type, nrm_scale);
+                const u8* p = gx_array_ptr(1, nrm_mode == 2 ? r.u8_() : r.u16_());
+                gx_read_comps(p, nrm_type, 3 * vectors, nrm_scale, o.nrm[0]);
             }
         }
         // colors
@@ -179,11 +175,11 @@ void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out) {
             if (!col_mode[ch])
                 continue;
             if (col_mode[ch] == 1) {
-                read_color(r.p, col_fmt[ch], o.color[ch]);
+                gx_read_color(r.p, col_fmt[ch], o.color[ch]);
                 r.p += k_color_bytes[col_fmt[ch]];
             } else {
                 u32 idx = col_mode[ch] == 2 ? r.u8_() : r.u16_();
-                read_color(array_ptr(2 + ch, idx), col_fmt[ch], o.color[ch]);
+                gx_read_color(gx_array_ptr(2 + ch, idx), col_fmt[ch], o.color[ch]);
             }
         }
         // texture coordinates
@@ -192,9 +188,8 @@ void gx_decode_vertices(u32 vat, u32 count, const u8* data, GxVertex* out) {
                 continue;
             const u8* p = r.p;
             if (tc_mode[t] != 1)
-                p = array_ptr(4 + t, tc_mode[t] == 2 ? r.u8_() : r.u16_());
-            for (u32 i = 0; i < tc_n[t]; i++)
-                o.tex[t][i] = read_comp(p, tc_type[t], tc_scale[t]);
+                p = gx_array_ptr(4 + t, tc_mode[t] == 2 ? r.u8_() : r.u16_());
+            p = gx_read_comps(p, tc_type[t], tc_n[t], tc_scale[t], o.tex[t]);
             if (tc_mode[t] == 1)
                 r.p = p;
         }

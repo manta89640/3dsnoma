@@ -122,6 +122,7 @@ static void load_xf(u32 addr, u32 v, const u8* from = nullptr) {
     check_nan(addr, v, from);
     if (addr < sizeof(g_gx.xf) / 4)
         g_gx.xf[addr] = v;
+    gx_xf_written(g_gx, addr, 1);
     s_renderer->xf_write(addr, v);
 }
 
@@ -197,6 +198,7 @@ static void load_indexed(u32 which, u32 v) {
         if (addr + i < sizeof(g_gx.xf) / 4)
             g_gx.xf[addr + i] = w;
     }
+    gx_xf_written(g_gx, addr, count);
     s_renderer->xf_indexed_load(which, index, src, count);
 }
 

@@ -19,7 +19,15 @@ struct GxState {
     // color registers PREV, C0-C2 or the constants K0-K3), RGBA, 11-bit signed
     s32 tev_reg[4][4];
     s32 tev_konst[4][4];
+    // moves on when the lighting setup may have changed (light memory 0x600-0x7FF, the color
+    // channel registers 0x1009-0x1011): the draw path keeps its light plans until then
+    u32 light_serial;
 };
+// the XF words [addr, addr + count) were written
+static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
+    if ((addr < 0x800 && addr + count > 0x600) || (addr < 0x1012 && addr + count > 0x1009))
+        s.light_serial++;
+}
 extern GxState g_gx;
 
 // CP register indices

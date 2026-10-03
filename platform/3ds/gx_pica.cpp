@@ -1,8 +1,10 @@
 // The GX renderer on the 3DS GPU (PICA200, through citro3d).
 //
-// The emulated transform unit (runtime/hw/gx/xform.cpp) turns each GX vertex into clip space,
-// lit colors and texture coordinates on the CPU; the PICA rasterizes them. Per draw, the GX
-// pixel pipeline state becomes PICA state:
+// The emulated transform unit (runtime/hw/gx/xform.cpp, gx_transform_draw) turns each GX vertex
+// into clip space, lit color 0 and the texture coordinates the combiners sample, written once
+// into the vertex buffer; triangles go to the PICA as 16-bit indices (quads, strips and fans
+// expanded, back faces culled on the CPU), and draws in a row with unchanged GX state as one.
+// When a GX register changes, the pixel pipeline state becomes PICA state:
 //   * the GX viewport (in the 640x456 frame) folded into one matrix with the scale to the
 //     400x240 top screen, the rotated render target and the GX depth range (the vertex shader
 //     applies it to the clip-space positions);
@@ -45,18 +47,19 @@ namespace guest {
 namespace {
 
 const float FRAME_W = 640.0f, FRAME_H = 456.0f;  // the game's frame buffer
-const u32 VBUF_BYTES = 6 << 20;
+// vertices are written once per draw and drawn through 16-bit indices, so the vertex buffer is
+// used in segments of 65536 vertices (the attribute buffer is moved to each segment's start)
+const u32 VBUF_VERTICES = 72 << 10;  // ~3 MB
+const u32 IBUF_INDICES = 384 << 10;  // 768 KB
+const u32 SEGMENT = 65536;
 
 #define DISPLAY_TRANSFER_FLAGS                                                                  \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-struct PVertex {
-    float pos[4];
-    u8 color[4];
-    float tc[3][2];
-};
+using PVertex = GxDrawVertex;  // the vertex shader's inputs: v0 position, v1 color, v2-v4 texcoords
+static_assert(sizeof(PVertex) == 44, "PVertex layout");
 
 struct TexEntry {
     C3D_Tex tex;
@@ -74,16 +77,58 @@ struct State {
     shaderProgram_s prog;
     int u_xform = -1;
     PVertex* vbuf = nullptr;
-    u32 vused = 0;  // vertices used this frame
-    u32 vmax = 0;   // ... at most, since the last report
+    u16* ibuf = nullptr;
+    u32 vused = 0, iused = 0;  // vertices and indices used this frame
+    u32 seg_base = 0;          // the vertex the attribute buffer starts at
+    u32 vmax = 0, imax = 0;    // ... at most, since the last report
+    u32 draws = 0, batches = 0, setups = 0;  // this frame
     bool in_frame = false;
     u32 frame = 0;
     std::unordered_map<u32, TexEntry> textures;  // by GxTexture id
     std::vector<C3D_Tex> dead;                   // freed after the GPU finished the frame
     u32 warned = 0;
     u32 evicted = 0, failed = 0;                 // textures dropped for memory; not made
+    // The PICA state a draw needs comes from GX registers: it is set up again only after one of
+    // them changed (state_serial moves on), and the draws in between go to the GPU as one draw.
+    u32 bp_shadow[256] = {};
+    u32 state_serial = 1;
+    u32 setup_serial = 0;                  // the serial the PICA state was set up for
+    u32 batch_first = 0, batch_count = 0;  // indices drawn with it, not submitted yet
+    GxDrawSetup setup;                     // its texture coordinates
 };
 State P;
+
+// the draws with the current state so far, as one
+void flush_batch() {
+    if (P.batch_count) {
+        C3D_DrawElements(GPU_TRIANGLES, P.batch_count, C3D_UNSIGNED_SHORT, P.ibuf + P.batch_first);
+        P.batch_count = 0;
+        P.batches++;
+    }
+}
+
+// the attribute buffer starts at vertex `base`
+void bind_vertices(u32 base) {
+    P.seg_base = base;
+    C3D_BufInfo* bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    BufInfo_Add(bi, P.vbuf + base, sizeof(PVertex), 5, 0x43210);
+}
+
+// the frame's vertices and indices, written by the CPU, go to memory for the GPU (citro3d's
+// C3D_FrameEnd(0) would flush the whole linear heap: the guest's memory is in it)
+void flush_geometry() {
+    if (P.vused)
+        GSPGPU_FlushDataCache(P.vbuf, P.vused * sizeof(PVertex));
+    if (P.iused)
+        GSPGPU_FlushDataCache(P.ibuf, P.iused * sizeof(u16));
+}
+
+void end_frame() {
+    flush_batch();
+    flush_geometry();
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
+}
 
 // ---------------------------------------------------------------- textures
 u32 next_pow2(u32 v) {
@@ -91,13 +136,6 @@ u32 next_pow2(u32 v) {
     while (p < v && p < 1024)
         p <<= 1;
     return p;
-}
-
-// PICA textures are 8x8 tiles in Z order; texel (x, y) of a w-wide texture
-u32 tiled_offset(u32 x, u32 y, u32 w) {
-    u32 tile = (y >> 3) * (w >> 3) + (x >> 3);
-    u32 m = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
-    return tile * 64 + m;
 }
 
 GPU_TEXTURE_WRAP_PARAM gx_wrap(u32 m) {
@@ -169,6 +207,52 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     }
 }
 
+// The decoded image into a PICA texture of W x H (powers of two): repeating textures are
+// resampled to that size, the others padded. The PICA's t runs from the last row up (t = 0 is
+// row H-1), GX's from the first down: the image is stored upside down (padding then sits above
+// it, at t > height/H, where coordinates don't reach). Texels are in 8x8 tiles in Z order and
+// little-endian: RGBA8 0xRRGGBBAA, LA8 0xLLAA, LA4 0xLA, RGB565, RGBA5551 (R in the top bits).
+void upload(const GxTexture* gt, u8* out, u32 W, u32 H, GPU_TEXCOLOR fmt, bool repeat) {
+    // a texel's place = column part + row part; the source texel likewise
+    static std::vector<u32> col_dst, col_src;
+    col_dst.resize(W), col_src.resize(W);
+    for (u32 x = 0; x < W; x++) {
+        col_dst[x] = (x >> 3) * 64 + ((x & 1) | ((x & 2) << 1) | ((x & 4) << 2));
+        col_src[x] = repeat ? x * gt->width / W : std::min(x, gt->width - 1);
+    }
+    auto rows = [&](auto&& put) {
+        for (u32 y = 0; y < H; y++) {
+            u32 py = H - 1 - y;
+            u32 row_dst = (py >> 3) * (W >> 3) * 64 + (((py & 1) << 1) | ((py & 2) << 2) | ((py & 4) << 3));
+            u32 sy = repeat ? y * gt->height / H : std::min(y, gt->height - 1);
+            const u32* src = gt->rgba.data() + sy * gt->width;
+            for (u32 x = 0; x < W; x++)
+                put(row_dst + col_dst[x], src[col_src[x]]);  // c: R G B A in bytes 0-3
+        }
+    };
+    switch (fmt) {
+    case GPU_LA4:
+        rows([&](u32 i, u32 c) { out[i] = (u8)((c & 0xF0) | (c >> 28)); });
+        break;
+    case GPU_LA8:
+        rows([&](u32 i, u32 c) { ((u16*)out)[i] = (u16)((c & 0xFF) << 8 | c >> 24); });
+        break;
+    case GPU_RGB565:
+        rows([&](u32 i, u32 c) {
+            ((u16*)out)[i] = (u16)((c & 0xF8) << 8 | (c >> 5 & 0x7E0) | (c >> 19 & 0x1F));
+        });
+        break;
+    case GPU_RGBA5551:
+        rows([&](u32 i, u32 c) {
+            ((u16*)out)[i] = (u16)((c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 18 & 0x3E) | c >> 31);
+        });
+        break;
+    default:
+        rows([&](u32 i, u32 c) { ((u32*)out)[i] = __builtin_bswap32(c); });
+        break;
+    }
+}
+
 // the PICA texture for texture map `map`; scale: what to multiply its coordinates with
 C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     const GxTexture* gt = gx_texture(map);
@@ -196,47 +280,8 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
             return nullptr;
         }
         e.fmt = fmt;
-        u32 tb = texel_bytes(fmt);
         u8* out = (u8*)e.tex.data;
-        // repeating textures are resampled to the power-of-two size, the others padded
-        for (u32 y = 0; y < H; y++) {
-            for (u32 x = 0; x < W; x++) {
-                u32 sx_ = x, sy_ = y;
-                if (repeat) {
-                    sx_ = x * gt->width / W;
-                    sy_ = y * gt->height / H;
-                } else {
-                    sx_ = std::min(x, gt->width - 1);
-                    sy_ = std::min(y, gt->height - 1);
-                }
-                u32 c = gt->rgba[sy_ * gt->width + sx_];  // R G B A (bytes 0-3)
-                u32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF, a = c >> 24;
-                // The PICA's t runs from the last row up (t = 0 is row H-1), GX's from the first
-                // down: the image is stored upside down (padding then sits above it, at
-                // t > height/H, where coordinates don't reach). Texels are little-endian:
-                // RGBA8 0xRRGGBBAA, LA8 0xLLAA, LA4 0xLA, RGB565, RGBA5551 (R in the top bits).
-                u8* t = out + tiled_offset(x, H - 1 - y, W) * tb;
-                switch (fmt) {
-                case GPU_LA4: t[0] = (u8)((r & 0xF0) | a >> 4); break;
-                case GPU_LA8: t[0] = (u8)a, t[1] = (u8)r; break;
-                case GPU_RGB565: {
-                    u16 v = (u16)((r >> 3) << 11 | (g >> 2) << 5 | b >> 3);
-                    t[0] = (u8)v, t[1] = (u8)(v >> 8);
-                    break;
-                }
-                case GPU_RGBA5551: {
-                    u16 v = (u16)((r >> 3) << 11 | (g >> 3) << 6 | (b >> 3) << 1 | (a >> 7));
-                    t[0] = (u8)v, t[1] = (u8)(v >> 8);
-                    break;
-                }
-                default: {
-                    u32 v = r << 24 | g << 16 | b << 8 | a;
-                    memcpy(t, &v, 4);
-                    break;
-                }
-                }
-            }
-        }
+        upload(gt, out, W, H, fmt, repeat);
         C3D_TexFlush(&e.tex);
         e.version = gt->version;
         e.sx = repeat ? 1.0f : (float)gt->width / (float)W;
@@ -814,19 +859,22 @@ void set_xform() {
                    (u32)std::ceil(400 - X0));
 }
 
-bool culled(const GxOutVertex& v0, const GxOutVertex& v1, const GxOutVertex& v2, u32 cull) {
-    if (!cull)
-        return false;
-    const f32 *p0 = v0.clip, *p1 = v1.clip, *p2 = v2.clip;
-    f32 nz = (p0[0] * p2[3] - p2[0] * p0[3]) * p1[1] + (p2[0] * p0[1] - p0[0] * p2[1]) * p1[3] +
-             (p2[1] * p0[3] - p0[1] * p2[3]) * p1[0];
-    bool back = nz <= 0;
-    if (xf_f32(XF_VIEWPORT + 1) > 0)
-        back = !back;
-    if (xf_f32(XF_VIEWPORT + 0) < 0)
-        back = !back;
-    return back ? (cull == 2 || cull == 3) : (cull == 1 || cull == 3);
-}
+// Back-face culling as GX does it, on the clip-space positions (homogeneous: no division).
+// cull: GENMODE's mode; the viewport's signs flip which side is the back.
+struct Culler {
+    bool cull_back, cull_front, flip;
+    explicit Culler(u32 cull) {
+        cull_back = cull == 2 || cull == 3, cull_front = cull == 1 || cull == 3;
+        flip = (xf_f32(XF_VIEWPORT + 1) > 0) != (xf_f32(XF_VIEWPORT + 0) < 0);
+    }
+    bool culled(const PVertex& v0, const PVertex& v1, const PVertex& v2) const {
+        const f32 *p0 = v0.pos, *p1 = v1.pos, *p2 = v2.pos;
+        f32 nz = (p0[0] * p2[3] - p2[0] * p0[3]) * p1[1] + (p2[0] * p0[1] - p0[0] * p2[1]) * p1[3] +
+                 (p2[1] * p0[3] - p0[1] * p2[3]) * p1[0];
+        bool back = (nz <= 0) != flip;
+        return back ? cull_back : cull_front;
+    }
+};
 
 void begin_frame() {
     if (P.in_frame)
@@ -845,7 +893,12 @@ void begin_frame() {
     C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
     C3D_FrameDrawOn(P.top);
     P.vmax = std::max(P.vmax, P.vused);
-    P.vused = 0;
+    P.imax = std::max(P.imax, P.iused);
+    P.vused = P.iused = 0;
+    P.draws = P.batches = P.setups = 0;
+    P.batch_count = 0;
+    P.setup_serial = 0;
+    bind_vertices(0);
     P.in_frame = true;
 }
 
@@ -870,12 +923,11 @@ bool PicaRenderer::init() {
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);          // texture coordinates 0-2
     AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 4, GPU_FLOAT, 2);
-    P.vbuf = (PVertex*)linearAlloc(VBUF_BYTES);
-    if (!P.vbuf)
+    P.vbuf = (PVertex*)linearAlloc(VBUF_VERTICES * sizeof(PVertex));
+    P.ibuf = (u16*)linearAlloc(IBUF_INDICES * sizeof(u16));
+    if (!P.vbuf || !P.ibuf)
         return false;
-    C3D_BufInfo* bi = C3D_GetBufInfo();
-    BufInfo_Init(bi);
-    BufInfo_Add(bi, P.vbuf, sizeof(PVertex), 5, 0x43210);
+    bind_vertices(0);
     C3D_CullFace(GPU_CULL_NONE);
     P.ready = true;
     log("pica: renderer ready");
@@ -885,99 +937,110 @@ bool PicaRenderer::init() {
 void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     if (!P.ready || !count)
         return;
-    static std::vector<GxVertex> in;
-    static std::vector<GxOutVertex> out;
-    in.resize(count);
-    out.resize(count);
-    {
-        NOMA_PROF_SCOPE("(gx vertices)");
-        gx_decode_vertices(vat, count, data, in.data());
-        gx_transform(in.data(), count, out.data());
-    }
-    begin_frame();
-
-    // triangles (quads, strips and fans expanded; lines and points not drawn yet)
-    static std::vector<u32> idx;
-    idx.clear();
-    u32 cull = bits(g_gx.bp[BP_GENMODE], 14, 2);
-    auto tri = [&](u32 a, u32 b, u32 c) {
-        if (!culled(out[a], out[b], out[c], cull))
-            idx.push_back(a), idx.push_back(b), idx.push_back(c);
-    };
+    // triangles: quads, strips and fans as indices (lines and points not drawn yet)
+    u32 max_indices;
     switch (prim) {
     case 0x80:
-    case 0x88:
-        for (u32 i = 0; i + 3 < count; i += 4)
-            tri(i, i + 1, i + 2), tri(i, i + 2, i + 3);
-        break;
-    case 0x90:
-        for (u32 i = 0; i + 2 < count; i += 3)
-            tri(i, i + 1, i + 2);
-        break;
+    case 0x88: max_indices = count / 4 * 6; break;
+    case 0x90: max_indices = count / 3 * 3; break;
     case 0x98:
-        for (u32 i = 0; i + 2 < count; i++) {
-            if (i & 1)
-                tri(i + 1, i, i + 2);
-            else
-                tri(i, i + 1, i + 2);
-        }
-        break;
-    case 0xA0:
-        for (u32 i = 1; i + 1 < count; i++)
-            tri(0, i, i + 1);
-        break;
-    default:
-        return;
+    case 0xA0: max_indices = count >= 3 ? (count - 2) * 3 : 0; break;
+    default: return;
     }
-    if (idx.empty())
+    if (!max_indices || count > SEGMENT || bits(g_gx.bp[BP_GENMODE], 14, 2) == 3)  // (3: all culled)
         return;
-    if (P.vused + idx.size() > VBUF_BYTES / sizeof(PVertex)) {
+    begin_frame();
+    if (P.vused + count > VBUF_VERTICES || P.iused + max_indices > IBUF_INDICES) {
         if (P.warned++ < 4)
             log("pica: vertex buffer full");
         return;
     }
-
-    // state
-    NOMA_PROF_SCOPE("(gx state)");
-    Builder b;
-    tev_to_texenv(b);
-    float tsx[3] = {1, 1, 1}, tsy[3] = {1, 1, 1};
-    int coord[3] = {0, 0, 0};
-    int units = 0;
-    for (int u = 0; u < 3; u++) {
-        if (b.units[u].map < 0)
-            continue;
-        C3D_Tex* t = texture_for(b.units[u].map, &tsx[u], &tsy[u]);
-        if (t) {
-            C3D_TexBind(u, t);
-            units |= 1 << u;
-        } else {
-            C3D_TexBind(u, nullptr);
-        }
-        coord[u] = b.units[u].coord;
+    P.draws++;
+    if (P.vused + count - P.seg_base > SEGMENT) {
+        flush_batch();
+        bind_vertices(P.vused);
     }
-    pixel_state();
-    set_xform();
+
+    // state: set up again only when a register it comes from changed since the last draw
+    if (P.setup_serial != P.state_serial) {
+        flush_batch();
+        NOMA_PROF_SCOPE("(gx state)");
+        P.setups++;
+        Builder b;
+        tev_to_texenv(b);
+        P.setup = GxDrawSetup();
+        for (int u = 0; u < 3; u++) {
+            if (b.units[u].map < 0)
+                continue;
+            C3D_Tex* t = texture_for(b.units[u].map, &P.setup.sx[u], &P.setup.sy[u]);
+            C3D_TexBind(u, t);
+            P.setup.texgen[u] = (s8)b.units[u].coord;
+        }
+        pixel_state();
+        set_xform();
+        P.setup_serial = P.state_serial;
+    }
+
+    PVertex* v = P.vbuf + P.vused;
+    {
+        NOMA_PROF_SCOPE("(gx vertices)");
+        gx_transform_draw(vat, count, data, P.setup, v);
+    }
 
     NOMA_PROF_SCOPE("(gx submit)");
-    PVertex* v = P.vbuf + P.vused;
-    for (u32 i = 0; i < idx.size(); i++) {
-        const GxOutVertex& o = out[idx[i]];
-        PVertex& pv = v[i];
-        memcpy(pv.pos, o.clip, sizeof(pv.pos));
-        for (int k = 0; k < 4; k++) {
-            float c = o.color[0][k];
-            pv.color[k] = (u8)(c < 0 ? 0 : c > 255 ? 255 : c);
+    u16* idx = P.ibuf + P.iused;
+    u16* const idx0 = idx;
+    const u32 base = P.vused - P.seg_base;
+    u32 cull = bits(g_gx.bp[BP_GENMODE], 14, 2);
+    auto emit = [&](u32 a, u32 b, u32 c) {
+        idx[0] = (u16)(base + a), idx[1] = (u16)(base + b), idx[2] = (u16)(base + c);
+        idx += 3;
+    };
+    auto tri = [&](u32 a, u32 b, u32 c) {
+        emit(a, b, c);
+    };
+    Culler culler(cull);
+    auto tri_culled = [&](u32 a, u32 b, u32 c) {
+        if (!culler.culled(v[a], v[b], v[c]))
+            emit(a, b, c);
+    };
+    auto expand = [&](auto&& t) {
+        switch (prim) {
+        case 0x80:
+        case 0x88:
+            for (u32 i = 0; i + 3 < count; i += 4)
+                t(i, i + 1, i + 2), t(i, i + 2, i + 3);
+            break;
+        case 0x90:
+            for (u32 i = 0; i + 2 < count; i += 3)
+                t(i, i + 1, i + 2);
+            break;
+        case 0x98:
+            for (u32 i = 0; i + 2 < count; i++) {
+                if (i & 1)
+                    t(i + 1, i, i + 2);
+                else
+                    t(i, i + 1, i + 2);
+            }
+            break;
+        case 0xA0:
+            for (u32 i = 1; i + 1 < count; i++)
+                t(0, i, i + 1);
+            break;
         }
-        for (int u = 0; u < 3; u++) {
-            const f32* t = o.tex[coord[u]];
-            float q = t[2] != 0 ? t[2] : 1.0f;
-            pv.tc[u][0] = t[0] / q * tsx[u];
-            pv.tc[u][1] = t[1] / q * tsy[u];
-        }
-    }
-    C3D_DrawArrays(GPU_TRIANGLES, P.vused, idx.size());
-    P.vused += idx.size();
+    };
+    if (cull)
+        expand(tri_culled);
+    else
+        expand(tri);
+    u32 n = (u32)(idx - idx0);
+    if (!n)
+        return;  // (the vertices' space is used again)
+    if (!P.batch_count)
+        P.batch_first = P.iused;
+    P.batch_count += n;
+    P.iused += n;
+    P.vused += count;
 }
 
 // NOMA_SHOT_EVERY=N (env.txt): every Nth frame, the top screen goes to sdmc:/3ds/noma/shots/
@@ -1038,7 +1101,8 @@ bool read_back() {
     bool in_frame = P.in_frame;
     if (in_frame) {
         C3D_RenderTargetDetachOutput(P.top);
-        C3D_FrameEnd(0);
+        end_frame();
+        P.setup_serial = 0;  // (the new frame starts without state)
     }
     // outside a frame this waits for the GPU's queue, then for the transfer
     C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), s_readback,
@@ -1047,10 +1111,14 @@ bool read_back() {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(s_readback, 240 * 400 * 4);
     if (in_frame) {
         C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         C3D_FrameBegin(0);
         C3D_FrameDrawOn(P.top);
+        // the frame's buffers are reused from the start (the GPU finished with them)
+        P.vused = P.iused = 0;
+        bind_vertices(0);
     }
     return true;
 }
@@ -1076,7 +1144,7 @@ void readback_rgba(u32 x, u32 y, s32* out) {
 // the clear that goes with a copy: a rectangle in the clear color and depth (the copy's
 // source; color, alpha and depth as their update flags allow)
 void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
-    if (P.vused + 6 > VBUF_BYTES / sizeof(PVertex))
+    if (P.vused + 6 > VBUF_VERTICES)
         return;
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB], cm = bp[BP_CMODE0];
@@ -1090,6 +1158,10 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
         mask |= GPU_WRITE_DEPTH;
     if (!mask)
         return;
+    flush_batch();
+    P.setup_serial = 0;  // (its state replaces the draws')
+    if (P.vused + 6 - P.seg_base > SEGMENT)
+        bind_vertices(P.vused);
     C3D_DepthTest(true, GPU_ALWAYS, (GPU_WRITEMASK)mask);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -1115,13 +1187,19 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
     PVertex* v = P.vbuf + P.vused;
     clip(sx, sy, v[0]), clip(sx + w, sy, v[1]), clip(sx + w, sy + h, v[2]);
     v[3] = v[0], v[4] = v[2], clip(sx, sy + h, v[5]);
-    C3D_DrawArrays(GPU_TRIANGLES, P.vused, 6);
+    C3D_DrawArrays(GPU_TRIANGLES, P.vused - P.seg_base, 6);
     P.vused += 6;
 }
 
 }  // namespace
 
 void PicaRenderer::bp_write(u32 reg, u32 value) {
+    // a changed register moves the state serial on, and so does a palette load (paletted
+    // textures change with it); EFB copies set the state up again themselves (read_back)
+    if (P.bp_shadow[reg] != value || reg == BP_LOADTLUT1) {
+        P.bp_shadow[reg] = value;
+        P.state_serial++;
+    }
     if (reg == 0x45 && (value & 0xFF) == 2 && P.in_frame) {  // draw done: the frame is complete
         if (gx_efb_copy_test_frame() == (int)P.frame && read_back()) {
             efb_off_x = efb_off_y = 0;  // the whole frame
@@ -1129,7 +1207,7 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
         }
         {
             NOMA_PROF_SCOPE("(gx wait)");
-            C3D_FrameEnd(0);
+            end_frame();
         }
         P.in_frame = false;
         P.frame++;
@@ -1143,12 +1221,18 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
             for (auto& kv : P.textures)
                 kb += kv.second.tex.size >> 10;
             log("pica: %zu textures (%u KB), %u dropped for memory, %u not made; %u KB linear heap free, "
-                "heap %u KB used of %u KB; at most %u vertices a frame", P.textures.size(), kb, P.evicted,
-                P.failed, (u32)(linearSpaceFree() >> 10), (u32)(mallinfo().uordblks >> 10),
-                __ctru_heap_size >> 10, P.vmax);
-            P.vmax = 0;
+                "heap %u KB used of %u KB; at most %u vertices and %u indices a frame; last frame %u draws "
+                "in %u batches, %u state setups", P.textures.size(), kb, P.evicted, P.failed,
+                (u32)(linearSpaceFree() >> 10), (u32)(mallinfo().uordblks >> 10), __ctru_heap_size >> 10, P.vmax,
+                P.imax, P.draws, P.batches, P.setups);
+            P.vmax = P.imax = 0;
         }
     }
+}
+
+void PicaRenderer::xf_write(u32 addr, u32 value) {
+    if (addr >= XF_VIEWPORT && addr < XF_VIEWPORT + 6)  // set_xform's transform
+        P.state_serial++;
 }
 
 void PicaRenderer::efb_copy(u32 value) {
