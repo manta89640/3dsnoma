@@ -497,7 +497,12 @@ struct Half {
     bool used = false;
 };
 
-bool is_zero(const In& i) { return i.kind == In::ZERO || (i.kind == In::CONST && i.value == 0); }
+// a channel's part of a constant input (rgb or alpha): the stage's constant color holds both
+u32 channel_mask(bool alpha) { return alpha ? 0xFF000000u : 0x00FFFFFFu; }
+u32 const_value(const In& i) { return i.kind == In::ONE ? 0xFFFFFFFF : i.kind == In::ZERO ? 0 : i.value; }
+bool is_zero(const In& i, bool alpha) {
+    return i.kind == In::ZERO || (i.kind == In::CONST && (i.value & channel_mask(alpha)) == 0);
+}
 bool is_one(const In& i, bool alpha) {
     return i.kind == In::ONE || (i.kind == In::CONST && (alpha ? (i.value >> 24) == 255 : (i.value & 0xFFFFFF) == 0xFFFFFF));
 }
@@ -514,18 +519,27 @@ int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half
     In x;
     enum { NONE, SINGLE, PRODUCT, LERP } shape;
     In p0, p1;
-    if (is_zero(c)) {
-        shape = is_zero(a) ? NONE : SINGLE, x = a;
+    if (a.kind != In::SRC && b.kind != In::SRC && c.kind != In::SRC) {
+        // all constants: one constant (as GX computes it)
+        u32 va = const_value(a), vb = const_value(b), vc = const_value(c), v = 0;
+        for (int sh = 0; sh < 32; sh += 8) {
+            u32 ka = va >> sh & 255, kb = vb >> sh & 255, kc = (vc >> sh & 255) + (vc >> sh >> 7 & 1);
+            v |= (ka * (256 - kc) + kb * kc) >> 8 << sh;
+        }
+        x.kind = In::CONST, x.value = v;
+        shape = is_zero(x, alpha) ? NONE : SINGLE;
+    } else if (is_zero(c, alpha)) {
+        shape = is_zero(a, alpha) ? NONE : SINGLE, x = a;
     } else if (is_one(c, alpha)) {
-        shape = is_zero(b) ? NONE : SINGLE, x = b;
-    } else if (is_zero(a)) {
-        if (is_zero(b))
+        shape = is_zero(b, alpha) ? NONE : SINGLE, x = b;
+    } else if (is_zero(a, alpha)) {
+        if (is_zero(b, alpha))
             shape = NONE;
         else if (is_one(b, alpha))
             shape = SINGLE, x = c;
         else
             shape = PRODUCT, p0 = b, p1 = c;
-    } else if (is_zero(b)) {
+    } else if (is_zero(b, alpha)) {
         // a * (1 - c)
         shape = PRODUCT, p0 = a, p1 = c;
         p1.op = alpha ? (p1.op == GPU_TEVOP_A_SRC_ALPHA ? GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA : p1.op)
@@ -540,7 +554,20 @@ int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half
     } else {
         shape = LERP;
     }
-    bool has_d = !is_zero(d);
+    bool has_d = !is_zero(d, alpha);
+    // A stage has one constant color: a lerp between two different constants (the year
+    // picker's digits: lerp(C0, C1, texture)) takes one of them from a stage of its own first
+    auto distinct_consts = [&](const In& p, const In& q) {
+        return p.kind != In::SRC && q.kind != In::SRC &&
+               ((const_value(p) ^ const_value(q)) & channel_mask(alpha)) != 0;
+    };
+    bool hoist_a = false, hoist_b = false;
+    if (shape == LERP && !sub && !has_d) {
+        if (distinct_consts(a, b) || distinct_consts(a, c))
+            hoist_a = true;
+        else if (distinct_consts(b, c))
+            hoist_b = true;
+    }
     GPU_TEVSCALE sc = scale == 1 ? GPU_TEVSCALE_2 : scale == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1;
     int n = 0;
     auto half = [&](GPU_COMBINEFUNC f, In s0, In s1 = In(), In s2 = In()) {
@@ -581,7 +608,12 @@ int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half
                 half(GPU_MODULATE, p0, p1);
             break;
         case LERP:
-            half(GPU_INTERPOLATE, b, a, c);
+            if (hoist_a)
+                half(GPU_REPLACE, a), half(GPU_INTERPOLATE, b, prev, c);
+            else if (hoist_b)
+                half(GPU_REPLACE, b), half(GPU_INTERPOLATE, prev, a, c);
+            else
+                half(GPU_INTERPOLATE, b, a, c);
             if (has_d)
                 half(GPU_ADD, prev, d);
             break;
@@ -616,8 +648,8 @@ bool merge_consts(const Half& h, bool alpha, u32* color, u32* have) {
         const In& in = h.s[i];
         if (in.kind == In::SRC)
             continue;
-        u32 v = in.kind == In::ONE ? 0xFFFFFFFF : in.kind == In::ZERO ? 0 : in.value;
-        u32 mask = alpha ? 0xFF000000u : 0x00FFFFFFu;
+        u32 v = const_value(in);
+        u32 mask = channel_mask(alpha);
         u32 bit = alpha ? 2 : 1;
         if ((*have & bit) && ((*color ^ v) & mask))
             return false;
@@ -709,13 +741,16 @@ void tev_to_texenv(Builder& b) {
             bool have = false;
             // the half that is shorter passes its result on
             Half c = k < nc ? ch[k] : Half(), a = k < na ? ah[k] : Half();
+            // (its PREVIOUS is this pair's first stage, not the stage before the pair)
             if (k >= nc) {
                 c.func = GPU_REPLACE;
                 c.s[0].kind = In::SRC, c.s[0].src = GPU_PREVIOUS, c.s[0].op = GPU_TEVOP_RGB_SRC_COLOR;
+                c.s[0].pair_prev = true;
             }
             if (k >= na) {
                 a.func = GPU_REPLACE;
                 a.s[0].kind = In::SRC, a.s[0].src = GPU_PREVIOUS, a.s[0].op = GPU_TEVOP_A_SRC_ALPHA;
+                a.s[0].pair_prev = true;
             }
             if (k == 1) {
                 // the second stage of a pair: PREVIOUS now means the first stage's result; an
@@ -736,7 +771,10 @@ void tev_to_texenv(Builder& b) {
                         }
             }
             u32 have_bits = 0;
-            if (!merge_consts(c, false, &konst, &have_bits) || !merge_consts(a, true, &konst, &have_bits))
+            // (both always: a conflict in the color half mustn't leave the alpha's constant out)
+            bool merged_c = merge_consts(c, false, &konst, &have_bits);
+            bool merged_a = merge_consts(a, true, &konst, &have_bits);
+            if (!merged_c || !merged_a)
                 s_unsupported++;  // two different constants in one stage: one of them wins
             (void)have;
             apply_half(env, c, false);
