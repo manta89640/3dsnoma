@@ -22,6 +22,7 @@ Rules:
 | Native AX voice renderer: the Wii DSP's voice pipeline in C++, every voice, no 24-voice limit | `engine/audio/ax_render.cpp` | Replaced the emulated reference. Bit-exact (`NOMA_SELFTEST=ax`). |
 | Block renderer: ADPCM decoded a frame at a time straight from RAM; resampler planned in closed form, envelope folded in; muted voices and zero-volume buses only accounted for; PB copied a word at a time | `engine/audio/ax_render.cpp` | Room voice: 14,719 → 4,802 ARM11 instructions per 3 ms frame. Bit-exact on host and ARM. |
 | ARM11 DSP instructions in the mixer: SMLAD for the ADPCM predictor, PKHBT for its history, SSAT with shift for clamps, SMLAWB/SMLAWT to mix two samples per load (no clamp needed at volumes ≤ 1.0), REV16 for PB byte swaps | same | Included in the number above. |
+| The Wii Remote, native: KPAD and WPAD answered with the 3DS's controls; the Bluetooth stack (BTE, WUD), the emulated Bluetooth controller and Wii Remote, the remote's speaker stream and rumble are gone | `engine/input/remote.cpp` | No Bluetooth pairing at boot, no 100 Hz report traffic through IPC, no speaker audio encoding. The pointer goes exactly where it's put. |
 | 3DS texture memory: compact PICA formats (LA4/LA8/RGB565/RGBA5551) instead of RGBA8, LRU eviction | `platform/3ds/gx_pica.cpp` | Glyphs and textures fit again. |
 | Fused vertex path, indexed batched draws | `platform/3ds/gx_pica.cpp`, `runtime/hw/gx/` | Room ≈ 14.7 fps in Azahar. |
 
@@ -49,6 +50,25 @@ filters.
 | Biquad: the 5-tap sum with SMLALD (64-bit) | Only if the game turns biquads on (it hasn't so far) | Small | Yes |
 | Decode-once cache: non-streamed ADPCM decoded to PCM16 once, keyed by address, end, loop, coefficients, start/loop context and memory write generation | The ADPCM cost disappears for looped instrument samples | Medium | Yes, if the key is complete |
 | Mix two voices per pass over the buses (each bus word loaded and stored once per two voices) | Fewer bus loads and stores | Medium | Yes |
+
+### Wii parts with no purpose on a 3DS
+
+What the program does only because it runs on a Wii, and what replaces it.
+
+| Part | Status |
+|---|---|
+| Wii Remote (Bluetooth, WPAD, KPAD, speaker, rumble) | Done: native (`engine/input/remote.cpp`). |
+| HOME Button Menu | Done: never loads (`engine/system/home_button.cpp`). |
+| The Wii Remote strap screen at the start ("use the strap", until a button or 20 s) | Done: the title and pre-title scenes are made without it (`runtime/patches/wii_parts.cpp`). |
+| The first-run setup's video quality step (high or normal quality for streaming), and the line announcing it | Done: the setup goes from the family's Miis to its end; the message loses that line (`wii_parts.cpp`). |
+| The same setting in the room's options (OptionScene::StateVideo, the top menu's video page) | Open: hiding its button leaves a gap in the menu. |
+| The setup's warning that deleting the Mii in the Mii Channel (似顔絵チャンネル) or moving it to the Mii Parade deletes its registration | Candidate: there's no Mii Channel on a 3DS. |
+| A 3DS-native control scheme: the game's controller manager (0x802A2DA0: KPAD set-up; 0x802A2ED0: the per-frame read) and the screens' pointer handling replaced by the 3DS's own (touch to select, the D-pad and buttons for lists), with no Wii Remote in between | Planned: the next step after the native KPAD. `WiimoteInput` (`engine/input/remote.h`) is the one place the platform layers feed. |
+| GameCube controller (PAD over SI) | To check: the game only calls PADInit; the SI emulation answers "no controllers". |
+| USB keyboard (KBD, HID, KPR) | To check: one device-change request stays pending; likely nothing per frame. |
+| Disc drive (DVD), WiiConnect24 and the network daemons (NCD, NWC24, SO) | To check for periodic work in the room (offline, their requests fail at once). |
+| IOS IPC | Stays for files (NAND), but most of its traffic was the Bluetooth link. In the room, nothing polls IOS any more (host count with `NOMA_DEBUG_IOS`). |
+| NAND `/tmp`, wiped by the Wii at every boot: so the channel formats its cache volumes again at every launch, `/tmp/skua.vf` (13.7 MB, 27,067 writes of 512 bytes, 2 sectors not zero) and `/tmp/finch.vf` (21 MB), about 35 MB of zeros written to the SD card per launch | Done: `/tmp` is in memory (`runtime/hw/ios/fs.cpp`), sparse (pages only ever written with zeros aren't stored), empty at every start as on the Wii. Keeping it on the card instead crashes the channel at start: it can't take its volumes from an earlier launch. No SD writes (seconds on a real 3DS), no card wear. |
 
 ### Guest code
 

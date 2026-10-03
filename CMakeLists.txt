@@ -59,6 +59,7 @@ set(ENGINE_SOURCES
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
   engine/g3d/g3d.cpp
+  engine/input/remote.cpp
   engine/lyt/lyt.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
@@ -91,6 +92,7 @@ set(RUNTIME_SOURCES
   runtime/patches/heap.cpp
   runtime/patches/offline.cpp
   runtime/patches/profile.cpp
+  runtime/patches/wii_parts.cpp
   runtime/patches/wiilink.cpp
   runtime/hle/report.cpp
   runtime/trace.cpp
@@ -112,14 +114,12 @@ set(RUNTIME_SOURCES
   runtime/hw/ipc.cpp
   runtime/hw/mmio.cpp
   runtime/hw/vi.cpp
-  runtime/hw/ios/bt.cpp
   runtime/hw/ios/di.cpp
   runtime/hw/ios/es.cpp
   runtime/hw/ios/fs.cpp
   runtime/hw/ios/ios.cpp
   runtime/hw/ios/net.cpp
   runtime/hw/ios/usb_hid.cpp
-  runtime/hw/ios/wiimote.cpp
   third-party/libco/libco.c
 )
 

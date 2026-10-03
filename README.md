@@ -4,8 +4,10 @@ A port of *Wii no Ma* (Wii Room, the Japanese video-on-demand channel, title `00
 patched by WiiLink) to the Nintendo 3DS, built as a **decompilation**: the channel's PowerPC
 program is machine-decompiled to C++ and compiled for the 3DS's ARM CPU. Below the decompiled
 program, a runtime emulates the Wii hardware the program talks to (interrupts, video, audio DSP,
-the IOS services, a Wii Remote over emulated Bluetooth, the GX GPU), so the program itself runs
-unmodified, with its own SDK and middleware.
+the IOS services, the GX GPU), so the program itself runs unmodified, with its own SDK and
+middleware. Where the Wii's own parts have no purpose on a 3DS, native code takes their place:
+the Wii Remote is the 3DS's controls (`engine/input/remote.cpp`), the HOME Button Menu is left
+out.
 
 **No Nintendo data is in this repository.** You need your own copy of the channel: a WAD made
 from your own Wii (and your console's keys to decrypt it). Everything generated from it (the
@@ -18,8 +20,9 @@ decompiled sources, assembly, extracted files) stays out of git.
   libm, printf, strtol/strtod, 64-bit arithmetic, AES, calendar, the Mii database CRC, the
   paired-single matrix library).
 - Host and 3DS (tested in Azahar) both: boot through the SDK, show the strap safety screen and
-  the loading animation, play the channel's sound (AX mixing emulated; ndsp on the 3DS), take
-  the Wii Remote pointer (3DS: touch screen or circle pad), and talk to the network: RC24's
+  the loading animation, play the channel's sound (the AX voices mixed natively,
+  `engine/audio/ax_render.cpp`; streamed through ndsp on the 3DS), take the Wii Remote pointer
+  (3DS: touch screen or circle pad), and talk to the network: RC24's
   `/notify` and WiiLink's `conf/first.bin`. "Wii Menu" shuts the channel down and quits.
 - Offline by default (`NOMA_OFFLINE`, `=0` to go online): there is no network, and the channel's
   online steps are skipped inside its own flow (`runtime/patches/offline.cpp`): its start-up
@@ -56,7 +59,7 @@ decompiled sources, assembly, extracted files) stays out of git.
   while the main thread runs the guest. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
   where the time goes every `NOMA_PROFILE=seconds`: per guest thread, and per function (self
   and total), with the runtime's own work as `(gx)`, `(ax)`, `(ios)`, `(devices)`, `(idle)`.
-- Not yet: Wii Remote speaker sound (enabled but no audio sent so far), the speed work itself
+- Not yet: the speed work itself
   (next step), and the channel's dynamically linked Opera
   browser module (`wwwlib-rvl.lz7`, an RSO module with ~4.8 MB of PowerPC code, linked through
   `rso/douga.sel`): the RSO linker is stubbed, so whatever the channel shows with the browser
@@ -131,7 +134,6 @@ Useful environment variables:
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`) | run decompiled library code on reference vectors and exit (host) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
-| `NOMA_IR="sx,sy,ox,oy"` | override the Wii Remote pointer's camera mapping |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us` | slow guest code / file writes down to reproduce 3DS timing on the host |
 
 On the 3DS, the same switches go in `sdmc:/3ds/noma/env.txt` as `KEY=VALUE` lines (including
@@ -142,16 +144,20 @@ Nth frame as a BMP in `sdmc:/3ds/noma/shots`.
 
 The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom screen (or use the
 circle pad) to point, A/B as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad as the D-pad.
+The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
+answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
+there's no remote speaker or rumble.
 The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button suspends the app):
 `engine/system/home_button.cpp` keeps it from loading or opening.
 
 ## Layout
 
 - `engine/` — native 3DS code in place of the program's SDK functions (the base of the engine
-  the port is becoming): `os/` (interrupts, clock), `cw/` (compiler runtime helpers).
+  the port is becoming): `os/` (interrupts, clock), `cw/` (compiler runtime helpers), `input/`
+  (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
-  ES, Bluetooth HCI + Wii Remote, USB HID with nothing plugged in, ...); `patches/` changes what
+  ES, USB HID with nothing plugged in, ...); `patches/` changes what
   some decompiled functions do
   (offline mode, debugging aids; the original stays as `<name>_orig`), `profile.cpp` the
   sampling profiler.

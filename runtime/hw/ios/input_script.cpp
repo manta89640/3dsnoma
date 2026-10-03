@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "bt.h"
+#include "engine/input/remote.h"
 #include "../hw.h"
 
 namespace guest {

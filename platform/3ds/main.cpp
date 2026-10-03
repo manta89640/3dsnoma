@@ -19,7 +19,7 @@
 
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
-#include "runtime/hw/ios/bt.h"
+#include "engine/input/remote.h"
 #include "runtime/hw/ios/net.h"
 #include "runtime/runtime.h"
 

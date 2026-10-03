@@ -10,8 +10,6 @@
 
 #include <map>
 
-#include "bt.h"
-
 namespace guest {
 void noma_trace_dump_global();
 void memory_dump();
@@ -43,9 +41,10 @@ static void remove_tree(const std::string& dir) {
 void ios_init(const std::string& nand_root, const std::string& content_dir) {
     s_nand_root = nand_root;
     s_content_dir = content_dir;
-    // IOS empties /tmp whenever it starts a title
+    // /tmp is in memory (fs.cpp), empty at every start as IOS leaves it; one on the card is from an
+    // earlier version
     remove_tree(nand_root + "/tmp");
-    mkdir((nand_root + "/tmp").c_str(), 0755);
+    rmdir((nand_root + "/tmp").c_str());
 }
 
 std::string nand_host_path(const std::string& nand_path) {
@@ -76,8 +75,6 @@ static std::unique_ptr<IosHandle> open_path(const std::string& path, u32 mode, s
         return es_open_device();
     if (path == "/dev/di")
         return di_open_device();
-    if (path == "/dev/usb/oh1/57e/305")  // the Bluetooth controller
-        return bt_open_device();
     if (path == "/dev/usb/hid")  // USB HID, nothing plugged in
         return usb_hid_open_device();
     if (path.rfind("/dev/stm/", 0) == 0)

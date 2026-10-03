@@ -48,7 +48,7 @@ def sysconf_items():
         ("BT.SPKV", 3, 0x58),
         ("BT.MOT", 3, 1),
         ("BT.CDIF", 1, bytes(0x204)),
-        ("BT.DINF", 1, bt_dinf()),
+        ("BT.DINF", 1, bytes(0x461)),  # no Wii Remotes paired: the input is native
         ("NET.CTPC", 5, 0),
         ("NET.WCPC", 5, 0),
         ("NET.WCFG", 5, 1),           # WiiConnect24 on
@@ -58,19 +58,6 @@ def sysconf_items():
         ("DEV.DSM", 3, 0),
         ("MPLS.MOVIE", 7, 1),
     ]
-
-
-# the emulated Wii Remote (runtime/hw/ios/wiimote.cpp), in HCI byte order
-WIIMOTE_BDADDR = bytes([0x11, 0x02, 0x19, 0x79, 0x00, 0x00])
-
-
-def bt_dinf():
-    """Paired Wii Remotes: a count, 10 registered and 4 active entries (address, most
-    significant byte first, and a 0x40-byte name), the Balance Board, padding."""
-    entry = WIIMOTE_BDADDR[::-1] + b"Nintendo RVL-CNT-01".ljust(0x40, b"\0")
-    empty = bytes(0x46)
-    data = bytes([1]) + entry + empty * 9 + entry + empty * 3 + empty
-    return data + bytes(0x461 - len(data))
 
 
 def make_sysconf():
@@ -215,7 +202,7 @@ def main():
 
     nand = os.path.join(a.out, "nand")
     for d in ("shared2/sys", "shared2/menu/FaceLib", "title/00000001/00000002/data",
-              "title/00010001/4843494a/data", "tmp", "import", "meta", "ticket", "sys"):
+              "title/00010001/4843494a/data", "import", "meta", "ticket", "sys"):  # (/tmp: in memory)
         os.makedirs(os.path.join(nand, d), exist_ok=True)
     open(os.path.join(nand, "shared2/sys/SYSCONF"), "wb").write(make_sysconf())
     open(os.path.join(nand, "title/00000001/00000002/data/setting.txt"), "wb").write(make_setting_txt())

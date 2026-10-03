@@ -56,7 +56,6 @@ static void deliver(int kind) {
     g_msr = msr;
 }
 
-void bt_tick(u64 now_us);
 void ai_tick();
 void net_tick();
 void ipc_tick();
@@ -75,11 +74,10 @@ void poll_devices() {
     ai_tick();
     ipc_tick();
     gx_poll();
-    // the Bluetooth link and the sockets (system calls on the 3DS) at most every millisecond
+    // the sockets (system calls on the 3DS) at most every millisecond
     static u64 s_slow;
     if (now - s_slow >= 1000) {
         s_slow = now;
-        bt_tick(now);
         net_tick();
     }
 }

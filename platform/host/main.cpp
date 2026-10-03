@@ -20,7 +20,7 @@
 #include <sys/stat.h>
 
 #include "runtime/hw/gx/raster.h"
-#include "runtime/hw/ios/bt.h"
+#include "engine/input/remote.h"
 #include "runtime/runtime.h"
 
 bool write_png(const std::string& path, const u32* rgba, u32 w, u32 h);
