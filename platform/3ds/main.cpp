@@ -100,6 +100,18 @@ static void audio_init() {
     log("audio: ndsp ready");
 }
 
+// buffers the DSP hasn't finished yet
+static int audio_queued() {
+    int n = 0;
+    for (const ndspWaveBuf& wb : s_wbuf)
+        n += wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING;
+    return n;
+}
+
+// The AI DMA's frames, to the DSP in 24 ms buffers. Playing starts once AUDIO_PREBUFFER of them
+// are queued, and when the DSP ran out (the CPU fell behind for longer than that) it pauses until
+// the queue has filled again: one short pause instead of a gap at every buffer.
+static const int AUDIO_PREBUFFER = 3;
 void platform_audio_push(const s16* lr, u32 frames) {
     while (s_audio && frames) {
         ndspWaveBuf& wb = s_wbuf[s_wcur];
@@ -109,8 +121,13 @@ void platform_audio_push(const s16* lr, u32 frames) {
         memcpy((s16*)wb.data_vaddr + 2 * s_wfill, lr, n * 4);
         s_wfill += n, lr += 2 * n, frames -= n;
         if (s_wfill == AUDIO_FRAMES) {
+            int queued = audio_queued();
+            if (queued == 0)
+                ndspChnSetPaused(0, true);
             DSP_FlushDataCache(wb.data_vaddr, AUDIO_FRAMES * 4);
             ndspChnWaveBufAdd(0, &wb);
+            if (queued + 1 >= AUDIO_PREBUFFER && ndspChnIsPaused(0))
+                ndspChnSetPaused(0, false);
             s_wcur = (s_wcur + 1) % AUDIO_BUFS;
             s_wfill = 0;
         }

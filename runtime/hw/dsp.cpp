@@ -228,10 +228,10 @@ static void write16(u32 off, u16 v) {
 // threads above the main thread's priority get at most half the time since the last block, and
 // the audio plays late instead (at least 5 blocks a second).
 //
-// With the voices on the 3DS's DSP (engine/audio/dsp_ndsp.cpp) the samples play on in real time
-// whatever the CPU does, but the music is sequenced: the sound thread moves the sequences on
-// (notes, envelopes) one AX frame at a time, so frames the CPU took late are made up for, up to
-// CATCH_UP_US behind, instead of being skipped (which slowed the music down).
+// The AX frames make the sound (engine/audio/ax_render.cpp mixes them) and move the sequences on
+// (notes, envelopes) one frame at a time, so they have to come at the audio's own rate: frames the
+// CPU took late are made up for, up to CATCH_UP_US behind, instead of being skipped (which slowed
+// the music down and left gaps in the 3DS's audio stream). While it catches up the guard waits.
 static const s64 CATCH_UP_US = 100000;
 void dsp_tick(u64 now) {
     deliver_later_mail(now);
@@ -243,7 +243,8 @@ void dsp_tick(u64 now) {
         static u64 s_prev_block, s_prev_hiprio;
         u64 since = now - s_prev_block, hi = g_hiprio_us - s_prev_hiprio;
         static bool s_guard = !getenv("NOMA_AUDIO_GUARD") || atoi(getenv("NOMA_AUDIO_GUARD")) != 0;
-        if (s_guard && s_prev_block && hi * 2 > since && since < 200000)
+        bool behind = (s64)(now - s_dma_t0) > 2 * dur;
+        if (s_guard && !behind && s_prev_block && hi * 2 > since && since < 200000)
             return;
         s_prev_block = now, s_prev_hiprio = g_hiprio_us;
         platform_audio_push(s_dma_data.data(), s_dma_blocks * 8);
@@ -254,7 +255,7 @@ void dsp_tick(u64 now) {
                 s_dma_blocks * 32, s_dma_addr, g_ax_lists);
         s_dma_t0 += dur;
         // far behind (the CPU was late): continue from now
-        if ((s64)(now - s_dma_t0) > (audio_dsp_native() ? CATCH_UP_US : dur))
+        if ((s64)(now - s_dma_t0) > CATCH_UP_US)
             s_dma_t0 = now;
         if (!(s_ai_ctrl & 0x8000) || !(s_ai_ctrl & 0x7FFF))
             s_dma_on = false;
