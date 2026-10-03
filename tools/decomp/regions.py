@@ -4,7 +4,9 @@ Addresses are text ranges of main.dol (HCIJ v1025). The library anchors come fro
 library's version-string registration (see docs/library_map.md).
 """
 
-# (start, end, name, treatment)   treatment: decomp | native | stub
+# (start, end, name, treatment)   treatment: decomp | native | stub | dead
+# dead: only what can still run is decompiled, the rest is stubs (tools/decomp/reachable.py, which
+# decompile.py runs): libraries whose callers natives replaced
 REGIONS = [
     (0x80004000, 0x80006740, "init", "native"),        # __start, memcpy, memset (.init)
     (0x8000DEA0, 0x802B46E8, "app", "decomp"),         # Wii no Ma itself
@@ -26,11 +28,11 @@ REGIONS = [
     (0x8030F510, 0x80310B60, "esp", "native"),
     (0x80310B60, 0x80315200, "ipc", "native"),
     (0x80315200, 0x80317E80, "pad", "native"),
-    (0x80317E80, 0x80330C00, "wpad", "native"),
-    (0x80330C00, 0x80363C60, "kpad_bt", "native"),
+    (0x80317E80, 0x80330C00, "wpad", "dead"),         # the Wii Remote: engine/input/remote.cpp
+    (0x80330C00, 0x80363C60, "kpad_bt", "dead"),      # and its Bluetooth stack
     (0x80363C60, 0x80368950, "cnt", "native"),
-    (0x80368950, 0x8038A6C0, "hbm", "decomp"),
-    (0x8038A6C0, 0x80390360, "pd_kpr_kbd_hid", "decomp"),
+    (0x80368950, 0x8038A6C0, "hbm", "dead"),          # HOME Button Menu: engine/system/home_button.cpp
+    (0x8038A6C0, 0x80390360, "pd_kpr_kbd_hid", "dead"),
     (0x80390360, 0x80394ED0, "rso", "stub"),
     (0x80394ED0, 0x803A4910, "jpeg", "native"),
     (0x803A4910, 0x8040A000, "net", "decomp"),           # NCD MP NWC24 REX NHTTP SSL SO FCD EC DWCDL

@@ -41,6 +41,7 @@ from ppc.decode import decode  # noqa: E402
 from ppc.dol import Dol  # noqa: E402
 from ppc.symbols import SymbolTable  # noqa: E402
 from decomp.regions import KEEP, REGIONS, region_of  # noqa: E402
+from decomp import reachable  # noqa: E402
 
 M2C_DIR = os.environ.get("M2C_DIR", os.path.expanduser("~/devkitpro-3ds/decomp-tools/m2c"))
 OUT = os.path.join(ROOT, "build", "decomp")
@@ -381,6 +382,11 @@ def find_native(dol, st):
 
 def treatments(dol, st, protos):
     native_auto = find_native(dol, st)
+    live = set()
+    if any(r[3] == "dead" for r in REGIONS):  # what can still run, for the "dead" regions
+        natives = {f.name for f in st.functions if f.name in NATIVE_NAMES or f.addr in native_auto}
+        addr = reachable.load_symbols()
+        live, _ = reachable.reach(addr, *reachable.load_graph(addr), natives)
     out = {}
     for f in st.functions:
         if not f.size or f.section not in (".text", ".init"):
@@ -389,6 +395,8 @@ def treatments(dol, st, protos):
         if f.name in NATIVE_NAMES:
             t = "native"
         elif how == "stub" and f.addr not in KEEP:
+            t = "stub"
+        elif how == "dead" and f.name not in live:
             t = "stub"
         elif f.addr in native_auto:
             t = "native"
