@@ -22,11 +22,18 @@ struct GxState {
     // moves on when the lighting setup may have changed (light memory 0x600-0x7FF, the color
     // channel registers 0x1009-0x1011): the draw path keeps its light plans until then
     u32 light_serial;
+    // move on when XF memory (matrices, lights: below 0x1000) or an XF register changed: the
+    // draw path keeps its plan for a draw until then
+    u32 xf_mem_serial, xf_reg_serial;
 };
-// the XF words [addr, addr + count) were written
+// the XF words [addr, addr + count) were written with new values
 static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
     if ((addr < 0x800 && addr + count > 0x600) || (addr < 0x1012 && addr + count > 0x1009))
         s.light_serial++;
+    if (addr < 0x1000)
+        s.xf_mem_serial++;
+    if (addr + count > 0x1000)
+        s.xf_reg_serial++;
 }
 extern GxState g_gx;
 
@@ -41,14 +48,11 @@ enum : u32 {
     CP_ARRAY_STRIDE = 0xB0,
 };
 
-// Bytes one vertex takes in the stream for a vertex format (vat 0-7).
-u32 gx_vertex_size(u32 vat);
-
 // Called by the command decoder (cp.cpp) for what a renderer cares about.
 struct GxRenderer {
     virtual ~GxRenderer() {}
     // a primitive: type (GX_QUADS 0x80 ... GX_POINTS 0xB8), vertex format, count, the raw
-    // vertex data in the stream (count * gx_vertex_size(vat) bytes)
+    // vertex data in the stream (count * gx_vertex_format(vat).size bytes)
     virtual void draw(u32 prim, u32 vat, u32 count, const u8* data) {}
     virtual void bp_write(u32 reg, u32 value) {}
     virtual void xf_write(u32 addr, u32 value) {}
@@ -77,6 +81,9 @@ void gx_run();  // execute whatever the GPU's FIFO holds now (also called from d
 
 // cp.cpp: decode commands; returns bytes used, or 0 if [p, p+n) ends in the middle of one
 u32 gx_decode(const u8* p, u32 n, bool in_display_list);
+// while a renderer's draw() runs: whether the draw came from a display list, and its primitive
+bool gx_in_display_list();
+u32 gx_current_prim();
 
 // pe events
 void pe_finish();               // BP 0x45 (draw done)

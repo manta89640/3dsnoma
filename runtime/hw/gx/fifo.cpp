@@ -254,6 +254,7 @@ static void gpu_thread() {
         s_ring_tail.store(head, std::memory_order_release);
         if (s_cpu_waiting.load(std::memory_order_seq_cst))
             platform_signal(s_cpu_wake);
+        NOMA_PROF_SCOPE("(gx decode)");
         decode_pending();
     }
 }

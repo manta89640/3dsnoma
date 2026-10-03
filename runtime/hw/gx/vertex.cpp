@@ -27,7 +27,7 @@ const u32 k_comp_bytes[8] = {1, 1, 2, 2, 4, 1, 1, 1};
 
 const u32 k_color_bytes[8] = {2, 3, 4, 2, 3, 4, 4, 4};
 
-// bytes a component or a direct color takes in the stream (as gx_vertex_size counts them)
+// bytes a component or a direct color takes in the stream (a vertex's size in the stream)
 const u8 k_stream_comp[8] = {1, 1, 2, 2, 4, 0, 0, 0};
 const u8 k_stream_color[8] = {2, 3, 4, 2, 3, 4, 0, 0};
 
@@ -95,9 +95,12 @@ const GxVertexFormat& gx_vertex_format(u32 vat) {
     const u32 regs[5] = {g_gx.cp[CP_VCD_LO], g_gx.cp[CP_VCD_HI], g_gx.cp[CP_VAT_A + vat], g_gx.cp[CP_VAT_B + vat],
                          g_gx.cp[CP_VAT_C + vat]};
     Slot& s = s_slots[vat];
-    if (memcmp(s.regs, regs, sizeof(regs)) != 0) {
+    if (s.regs[0] != regs[0] || s.regs[1] != regs[1] || s.regs[2] != regs[2] || s.regs[3] != regs[3] ||
+        s.regs[4] != regs[4]) {
+        static u32 s_serial;
         memcpy(s.regs, regs, sizeof(regs));
         s.f = compile_format(regs[0], regs[1], regs[2], regs[3], regs[4]);
+        s.f.serial = ++s_serial;
     }
     return s.f;
 }

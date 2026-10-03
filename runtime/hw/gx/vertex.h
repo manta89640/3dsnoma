@@ -47,6 +47,7 @@ struct GxVertexFormat {
     GxAttrFormat pos, nrm, color[2], tex[8];
     bool nbt = false;             // normal, binormal and tangent
     bool nrm_index3 = false;      // ... with an index each
+    u32 serial = 0;               // a new number each time a format is compiled
 };
 const GxVertexFormat& gx_vertex_format(u32 vat);
 

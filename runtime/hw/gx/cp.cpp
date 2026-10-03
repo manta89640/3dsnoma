@@ -16,6 +16,7 @@
 #include "gx.h"
 #include "regs.h"
 #include "texture.h"
+#include "vertex.h"
 
 namespace guest {
 
@@ -40,50 +41,6 @@ static bool s_debug = getenv("NOMA_DEBUG_GX") != nullptr;
 static u32 be16(const u8* p) { return (u32)p[0] << 8 | p[1]; }
 static u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 
-// ---- vertex sizes
-static const u32 k_comp_size[8] = {1, 1, 2, 2, 4, 0, 0, 0};       // u8 s8 u16 s16 f32
-static const u32 k_color_size[8] = {2, 3, 4, 2, 3, 4, 0, 0};      // 565 888 888x 4444 6666 8888
-
-static u32 index_size(u32 mode) { return mode == 2 ? 1 : 2; }
-
-u32 gx_vertex_size(u32 vat) {
-    const u32 lo = g_gx.cp[CP_VCD_LO], hi = g_gx.cp[CP_VCD_HI];
-    const u32 a = g_gx.cp[CP_VAT_A + vat], b = g_gx.cp[CP_VAT_B + vat], c = g_gx.cp[CP_VAT_C + vat];
-    u32 size = 0;
-    // matrix indices, one byte each
-    for (int i = 0; i < 9; i++)
-        size += (lo >> i) & 1;
-    // position
-    if (u32 m = (lo >> 9) & 3)
-        size += m == 1 ? ((a & 1) ? 3 : 2) * k_comp_size[(a >> 1) & 7] : index_size(m);
-    // normal (N, or NBT: three vectors; indexed NBT may carry one index or three)
-    if (u32 m = (lo >> 11) & 3) {
-        bool nbt = (a >> 9) & 1;
-        if (m == 1)
-            size += (nbt ? 9 : 3) * k_comp_size[(a >> 10) & 7];
-        else
-            size += index_size(m) * ((nbt && (a >> 31)) ? 3 : 1);
-    }
-    // colors
-    for (int i = 0; i < 2; i++) {
-        u32 m = (lo >> (13 + 2 * i)) & 3;
-        if (m)
-            size += m == 1 ? k_color_size[(a >> (14 + 4 * i)) & 7] : index_size(m);
-    }
-    // texture coordinates: elements (S or ST) and format for each of the eight
-    const u32 tc_fields[8][2] = {
-        {(a >> 21) & 1, (a >> 22) & 7}, {(b >> 0) & 1, (b >> 1) & 7},   {(b >> 9) & 1, (b >> 10) & 7},
-        {(b >> 18) & 1, (b >> 19) & 7}, {(b >> 27) & 1, (b >> 28) & 7}, {(c >> 5) & 1, (c >> 6) & 7},
-        {(c >> 14) & 1, (c >> 15) & 7}, {(c >> 23) & 1, (c >> 24) & 7},
-    };
-    for (int i = 0; i < 8; i++) {
-        u32 m = (hi >> (2 * i)) & 3;
-        if (m)
-            size += m == 1 ? (tc_fields[i][0] ? 2 : 1) * k_comp_size[tc_fields[i][1]] : index_size(m);
-    }
-    return size;
-}
-
 // ---- register loads
 static void load_cp(u32 reg, u32 v) {
     s_stats.cp++;
@@ -105,6 +62,9 @@ void platform_backtrace(const char* why);
 // as it lands), or for a display list the guest address of the word (for NOMA_WATCH)
 static u32 s_dl_addr;        // the display list running (guest address) ...
 static const u8* s_dl_host;  // ... and our copy of it
+static u32 s_cur_prim;       // the draw command being executed (for the draw path's statistics)
+bool gx_in_display_list() { return s_dl_host != nullptr; }
+u32 gx_current_prim() { return s_cur_prim; }
 static void check_nan(u32 addr, u32 v, const u8* from = nullptr) {
     static bool s_on = getenv("NOMA_DEBUG_GX_NAN") != nullptr;
     static int s_left = 4;
@@ -125,9 +85,10 @@ static void check_nan(u32 addr, u32 v, const u8* from = nullptr) {
 static void load_xf(u32 addr, u32 v, const u8* from = nullptr) {
     s_stats.xf++;
     check_nan(addr, v, from);
-    if (addr < sizeof(g_gx.xf) / 4)
+    if (addr < sizeof(g_gx.xf) / 4 && g_gx.xf[addr] != v) {
         g_gx.xf[addr] = v;
-    gx_xf_written(g_gx, addr, 1);
+        gx_xf_written(g_gx, addr, 1);
+    }
     s_renderer->xf_write(addr, v);
 }
 
@@ -142,6 +103,7 @@ static void dump_stats() {
         s_stats.draws, s_stats.vertices, s_stats.bp, s_stats.cp, s_stats.xf, s_stats.dl, s_stats.copies,
         s_stats.finish, s_stats.tokens, s_stats.unknown);
 }
+
 
 static void load_bp(u32 cmd) {
     s_stats.bp++;
@@ -217,13 +179,22 @@ static void call_display_list(u32 addr, u32 size) {
         log("gx: display list at %08X has an unlikely size (%u bytes)", addr, size);
         return;
     }
+    // decoded where it is when the guest's memory holds it in one piece, else from a copy
     static std::vector<u8> s_list;  // (lists don't nest: CALL_DL inside one is ignored)
-    s_list.resize(size);
-    read_g(s_list.data(), 0x80000000 | (addr & 0x1FFFFFFF), size);
-    s_dl_addr = 0x80000000 | (addr & 0x1FFFFFFF), s_dl_host = s_list.data();
+    const u32 a = 0x80000000 | (addr & 0x1FFFFFFF);
+    const u8* list = size ? host_ptr(a) : nullptr;
+    for (u32 pg = (a >> PAGE_BITS) + 1; list && pg <= (a + size - 1) >> PAGE_BITS; pg++)
+        if (host_ptr(pg << PAGE_BITS) != list + ((pg << PAGE_BITS) - a))
+            list = nullptr;
+    if (!list) {
+        s_list.resize(size);
+        read_g(s_list.data(), a, size);
+        list = s_list.data();
+    }
+    s_dl_addr = a, s_dl_host = list;
     u32 done = 0;
     while (done < size) {
-        u32 used = gx_decode(s_list.data() + done, size - done, true);
+        u32 used = gx_decode(list + done, size - done, true);
         if (!used)
             break;  // a truncated command at the end of the list is dropped, as on hardware
         done += used;
@@ -287,13 +258,14 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
             return 0;
         u32 vat = cmd & 7, prim = cmd & 0xF8;
         u32 count = be16(p + 1);
-        u32 len = 3 + count * gx_vertex_size(vat);
+        u32 len = 3 + count * gx_vertex_format(vat).size;
         if (n < len)
             return 0;
         s_stats.draws++;
         s_stats.vertices += count;
         if (count) {
             NOMA_PROF_SCOPE("(gx draw)");
+            s_cur_prim = prim;
             s_renderer->draw(prim, vat, count, p + 3);
         }
         if (s_debug)
