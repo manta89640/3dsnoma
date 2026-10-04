@@ -181,7 +181,11 @@ if(NINTENDO_3DS)
   target_link_libraries(noma noma_decomp citro3d ctru m)
 else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
-                           platform/host/selftest.cpp)
+                           platform/host/selftest.cpp platform/host/selftest_g3d.cpp engine/g3d/package_writer.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
   target_link_libraries(noma-host noma_decomp)
+  # ng3d-bake: a package's GX textures in their PICA formats, offline (tools/ng3d_bake.cpp)
+  add_executable(ng3d-bake tools/ng3d_bake.cpp engine/g3d/package.cpp engine/g3d/texture.cpp
+                           engine/g3d/package_writer.cpp)
+  target_include_directories(ng3d-bake PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime)
 endif()
