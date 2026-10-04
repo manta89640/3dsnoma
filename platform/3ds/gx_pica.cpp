@@ -1595,11 +1595,13 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 r = &x;
                 break;
             }
+        u32 reuse_first = 0, reuse_count = 0;  // a stale record's pool vertices, made again in place
         if (r && r->count) {
             int stale = dl_record_stale(*r, vat, plan);
             if (stale) {
                 (stale == 2 ? P.rebuilt_arrays : P.rebuilt_regs)++;
-                *r = DlRecord();  // (its pool vertices are given up: the record is made again below)
+                reuse_first = r->first, reuse_count = r->count;
+                *r = DlRecord();
                 r->offset = offset;
             }
         }
@@ -1661,7 +1663,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 r->offset = offset;
                 pushed = true;
             }
-            if (P.cache_next + count > POOL_VERTICES) {
+            const bool in_place = reuse_count == count;
+            if (!in_place && P.cache_next + count > POOL_VERTICES) {
                 P.cache_full = true;
                 P.no_room++;
                 if (pushed)
@@ -1669,14 +1672,15 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             } else {
                 NOMA_PROF_SCOPE("(gx vertices)");
                 Timed timed(Timers::VERTICES);
-                u32 first = P.cache_next;
+                u32 first = in_place ? reuse_first : P.cache_next;
                 u32 n = gx_tnl_vertices(plan, data, 0, count, P.pal, P.vbuf + first, P.slots + first, P.rows + first);
                 if (n < count) {
                     flush_batch();
                     n = gx_tnl_vertices(plan, data, 0, count, P.pal, P.vbuf + first, P.slots + first, P.rows + first);
                 }
                 if (n == count) {
-                    P.cache_next += count;
+                    if (!in_place)
+                        P.cache_next += count;
                     P.built_vertices += count;
                     P.cache_lo = std::min(P.cache_lo, first), P.cache_hi = std::max(P.cache_hi, first + count);
                     slots_written(first, count);
