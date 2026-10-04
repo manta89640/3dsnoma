@@ -72,7 +72,15 @@ void gx_fifo_init() {
     g_gather_n = 0;
 }
 
+// (a check that compares what two pieces of code send: the bursts go to it instead of the FIFO)
+void (*g_gather_capture)(const u8* burst);
+
 static void store_burst() {
+    if (g_gather_capture) {
+        g_gather_capture(g_gather);
+        g_gather_n = 0;
+        return;
+    }
     u32 a = s_pi_wptr & 0x1FFFFFE0;
     // the GPU executes the FIFO as it fills (nothing older waiting): the burst goes straight to
     // its thread (nothing reads it back from memory)

@@ -167,7 +167,7 @@ NATIVE_NAMES = {
 PATCHED_NAMES = {
     # engine/lyt/quad.cpp: nw4r::lyt's quads, native; the decompiled ones stay as *_orig for
     # tools/armbench/armbench.py --lyt to compare against
-    "nw4r_lyt_detail_DrawQuad", "nw4r_lyt_detail_DrawQuad_Alpha",
+    "nw4r_lyt_detail_DrawQuad", "nw4r_lyt_detail_DrawQuad_Alpha", "nw4r_lyt_Material_SetupGX",
     # the channel's heaps: allocations that fail are logged (runtime/patches/heap.cpp)
     "lib_allocator_HeapBase_AllocFromCurrent",
     # GXLoadPosMtxImm: NOMA_DEBUG_GX_NAN reports matrices holding NaNs (runtime/patches/debug.cpp)

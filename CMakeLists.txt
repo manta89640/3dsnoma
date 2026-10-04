@@ -64,6 +64,7 @@ set(ENGINE_SOURCES
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
   engine/lyt/quad.cpp
+  engine/lyt/material.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
   engine/math/mtx.cpp
