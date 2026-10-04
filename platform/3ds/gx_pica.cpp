@@ -1619,16 +1619,14 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         u32 reuse_first = 0, reuse_count = 0;
         if (r && r->count == ~0u)
             reuse_first = r->first, reuse_count = count, r->count = 0;
-        if (!r && variants >= 4 && oldest) {  // too many passes: the oldest record's place
+        if (!r && variants >= 4) {
+            // registers that keep changing (arrays written anew each frame): not worth keeping
             P.rebuilt_regs++;
-            if (oldest->slots_frame != P.frame && oldest->count == count)
-                reuse_first = oldest->first, reuse_count = count;
-            *oldest = DlRecord();
-            oldest->offset = offset;
-            r = oldest;
-        } else if (!r && variants) {
-            P.rebuilt_regs++;  // (a new pass of a list: counted once, when its record is made)
+            r = nullptr;
+            goto immediate;
         }
+        if (!r && variants)
+            P.rebuilt_regs++;  // (a new pass of a list: counted once, when its record is made)
         if (r && r->count == count && r->slots_frame == P.frame)
             P.drawn_twice++;
         if (r && r->count == count && r->slots_frame != P.frame) {
@@ -1734,6 +1732,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         }
         // (a record drawn twice in a frame with other matrices, or no room: the immediate way)
     }
+immediate:
 
     // ---- an immediate draw: the vertices for this frame, in pieces when the palette can't hold
     // all their matrices at once (the pending batch goes to the GPU between pieces)
