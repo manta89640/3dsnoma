@@ -51,8 +51,10 @@ u32 nw4r_lyt_detail_DrawQuad_Alpha(u32, u32, u32, u32, u32, u32);
 
 using namespace guest;
 
-extern "C" u8 gx_mem1[0x900000] __attribute__((aligned(32)));
-u8 gx_mem1[0x900000] __attribute__((aligned(32)));
+namespace guest {
+u8 g_mem1[0x900000] __attribute__((aligned(32)));
+}
+extern "C" u8 gx_mem1[0x900000] __attribute__((alias("_ZN5guest6g_mem1E")));
 
 namespace {
 const u32 MEM1 = 0x80000000, BASE = 0x80810000, SIZE = 0x80810010, TEX = 0x80810100, COLORS = 0x80810400;

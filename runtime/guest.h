@@ -43,6 +43,9 @@ static const u32 PAGE_BITS = 20;
 static const u32 PAGE_SIZE = 1u << PAGE_BITS;
 static const u32 MEM1_SIZE = 24u << 20;
 extern uintptr_t g_page[1u << (32 - PAGE_BITS)];
+// MEM1 itself (its page entries point here): a link-time address, so that a constant address in it
+// (a global) is a constant host address, with no page entry to load
+extern u8 g_mem1[];
 // current guest stack pointer (r1) of the running guest thread
 extern u32 g_sp;
 
@@ -76,15 +79,17 @@ __attribute__((always_inline)) static inline u8* host_ptr(u32 a) {
 
 // whether an access at a, whose page entry is b, goes to RAM (else to the device emulation)
 #define NOMA_IS_RAM(a, b) (NOMA_CONST_MEM1(a) || (!NOMA_CONST_MMIO(a) && __builtin_expect((b) != 0, 1)))
+// the page entry of a: for a constant address in MEM1, the static array's (no load)
+#define NOMA_PAGE(a) (NOMA_CONST_MEM1(a) ? (uintptr_t)g_mem1 - 0x80000000u : g_page[(a) >> PAGE_BITS])
 
 __attribute__((always_inline)) static inline u8 load8(u32 a) {
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b))
         return *(u8*)(b + a);
     return (u8)mmio_read(a, 1);
 }
 __attribute__((always_inline)) static inline u16 load16(u32 a) {
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b)) {
         u16 v;
         ::memcpy(&v, (u8*)(b + a), 2);
@@ -93,7 +98,7 @@ __attribute__((always_inline)) static inline u16 load16(u32 a) {
     return (u16)mmio_read(a, 2);
 }
 __attribute__((always_inline)) static inline u32 load32(u32 a) {
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b)) {
         u32 v;
         ::memcpy(&v, (u8*)(b + a), 4);
@@ -151,7 +156,7 @@ __attribute__((always_inline)) static inline void store8(u32 a, u8 v) {
         gather_put<1>(v);
         return;
     }
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b))
         *(u8*)(b + a) = v;
     else
@@ -163,7 +168,7 @@ __attribute__((always_inline)) static inline void store16(u32 a, u16 v) {
         gather_put<2>(v);
         return;
     }
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap16(v);
         ::memcpy((u8*)(b + a), &v, 2);
@@ -177,7 +182,7 @@ __attribute__((always_inline)) static inline void store32(u32 a, u32 v) {
         gather_put<4>(v);
         return;
     }
-    uintptr_t b = g_page[a >> PAGE_BITS];
+    uintptr_t b = NOMA_PAGE(a);
     if (NOMA_IS_RAM(a, b)) {
         v = __builtin_bswap32(v);
         ::memcpy((u8*)(b + a), &v, 4);

@@ -35,8 +35,9 @@ void noma_start_guest();
 extern "C" u32 __ctru_linear_heap_size, __ctru_heap_size, __ctru_heap, __ctru_linear_heap;
 extern "C" char *fake_heap_start, *fake_heap_end;
 // (GPU_RESERVE: the PICA's vertex and index buffers, the textures it keeps, read-backs and sound
-// take about 8 MB in the room; LINEAR_MIN also has room for the frame buffers and MEM1)
-static const u32 GPU_RESERVE = 16u << 20, LINEAR_MIN = GPU_RESERVE + (24u << 20) + (8u << 20), HEAP_MAX = 120u << 20;
+// take about 8 MB in the room; LINEAR_MIN also has room for the frame buffers. MEM1 is the
+// program's own .bss, guest::g_mem1, already committed when this runs)
+static const u32 GPU_RESERVE = 16u << 20, LINEAR_MIN = GPU_RESERVE + (8u << 20), HEAP_MAX = 120u << 20;
 
 extern "C" void __system_allocateHeaps(void) {
     Handle reslimit = 0;
@@ -319,8 +320,8 @@ void platform_fatal(const char* msg) {
 
 void platform_backtrace(const char* why) { log("%s", why); }
 
-// Guest memory (MEM1, MEM2; nothing reads it by DMA): in the linear heap while GPU_RESERVE stays
-// free there, else in the normal heap.
+// Guest memory (MEM2; MEM1 is a static array; nothing reads it by DMA): in the linear heap while
+// GPU_RESERVE stays free there, else in the normal heap.
 void* platform_alloc_guest(u32 size) {
     void* p = linearSpaceFree() >= size + GPU_RESERVE ? linearAlloc(size) : nullptr;
     log("memory: %u MB of guest memory in the %s heap", size >> 20, p ? "linear" : "normal");

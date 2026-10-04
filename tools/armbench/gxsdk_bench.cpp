@@ -83,8 +83,10 @@ namespace {
 // guest memory: MEM1 at 0x80000000 (the globals, __GXData's pointer among them)
 const u32 MEM1 = 0x80000000, MEM1_BYTES = 0x900000;
 }  // namespace
-extern "C" u8 gx_mem1[0x900000] __attribute__((aligned(32)));
-u8 gx_mem1[0x900000] __attribute__((aligned(32)));
+namespace guest {
+u8 g_mem1[0x900000] __attribute__((aligned(32)));
+}
+extern "C" u8 gx_mem1[0x900000] __attribute__((alias("_ZN5guest6g_mem1E")));
 #define s_mem1 gx_mem1
 namespace {
 const u32 GXDATA = 0x80800000;  // the GXData structure

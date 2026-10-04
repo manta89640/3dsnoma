@@ -8,6 +8,7 @@
 
 namespace guest {
 uintptr_t g_page[1u << (32 - PAGE_BITS)];
+u8 g_mem1[32];  // (no MEM1 here)
 u32 g_sp;
 FnSlot g_fn_cache[4096];
 s32 g_loop_budget = 20000;

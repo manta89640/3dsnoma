@@ -30,7 +30,12 @@ extern "C" void __cxa_guard_release(int* g) { *(char*)g = 1; }
 extern "C" void __cxa_guard_abort(int*) {}
 
 namespace {
-u8 s_mem1[1u << guest::PAGE_BITS] __attribute__((aligned(32)));
+}  // namespace
+namespace guest {
+u8 g_mem1[1u << PAGE_BITS] __attribute__((aligned(32)));
+}
+namespace {
+u8* const s_mem1 = guest::g_mem1;
 const u32 MANAGER = 0x80010000, VOICES = 0x80020000, AXVOICES = 0x80040000, PBS = 0x80060000, AXMAN = 0x80080000;
 const u32 VOICE_SIZE = 0x200, AXV_SIZE = 0x80, PB_SIZE = 0x180;
 void st8(u32 a, u8 v) { guest::store8(a, v); }

@@ -16,7 +16,8 @@ uintptr_t g_page[1u << (32 - PAGE_BITS)];
 u32 g_sp;
 
 u8 g_locked_cache[LC_SIZE] __attribute__((aligned(32)));
-static u8* s_mem1;
+u8 g_mem1[MEM1_SIZE] __attribute__((aligned(64)));
+static u8* const s_mem1 = g_mem1;
 static u8* s_mem2;
 static u32 s_mem2_size;
 // write generations, per 4 KB page (see mem_mark_written)
@@ -38,12 +39,11 @@ static void map_bank(u32 phys, u8* host, u32 size) {
 void memory_init(u32 mem2_size) {
     if (mem2_size % PAGE_SIZE)
         fatal("guest memory: MEM2 size %X is not a whole number of pages", mem2_size);
-    s_mem1 = (u8*)platform_alloc_guest(MEM1_SIZE);
     s_mem2_size = mem2_size;
     s_mem2 = (u8*)platform_alloc_guest(mem2_size);
     s_page_gen2 = (u32*)calloc(mem2_size >> 12, sizeof(u32));
-    if (!s_mem1 || !s_mem2)
-        fatal("guest memory: could not allocate %u MB", (MEM1_SIZE + mem2_size) >> 20);
+    if (!s_mem2)
+        fatal("guest memory: could not allocate %u MB", mem2_size >> 20);
     for (uintptr_t& b : g_page)
         b = 0;
     map_bank(0x00000000, s_mem1, MEM1_SIZE);

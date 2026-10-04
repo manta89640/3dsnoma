@@ -31,7 +31,12 @@ extern "C" void __cxa_guard_abort(int*) {}
 namespace {
 
 // MEM1's first page: the command list, the set-up and output buffers, the PBs; the samples in MEM2
-u8 s_mem1[1u << guest::PAGE_BITS] __attribute__((aligned(32)));
+}  // namespace
+namespace guest {
+u8 g_mem1[1u << PAGE_BITS] __attribute__((aligned(32)));
+}
+namespace {
+u8* const s_mem1 = guest::g_mem1;
 u8 s_mem2[0x40000] __attribute__((aligned(32)));
 const u32 LIST = 0x80001000, SETUP = 0x80001200, SURROUND = 0x80001400, LR = 0x80001600, PBS = 0x80002000;
 const u32 DATA = 0x90000000;
