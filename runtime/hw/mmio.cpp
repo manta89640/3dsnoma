@@ -104,19 +104,19 @@ void mmio_log_unhandled(const char* dev, u32 off, u32 v, int size, bool write) {
         unhandled_read(dev, off, size);
 }
 
-// ---- locked cache (16 KB of L1 data cache at 0xE0000000, used as scratch memory)
-static u8 s_lc[16 * 1024];
+// ---- locked cache (memory.cpp maps it as a page: only addresses beyond its first 1 MB come
+// here, and wrap around as its 16 KB do)
 u32 lc_read(u32 addr, int size) {
-    u32 o = addr & 0x3FFF;
+    u32 o = addr & (LC_SIZE - 1);
     u32 v = 0;
     for (int i = 0; i < size; i++)
-        v = (v << 8) | s_lc[(o + i) & 0x3FFF];
+        v = (v << 8) | g_locked_cache[(o + i) & (LC_SIZE - 1)];
     return v;
 }
 void lc_write(u32 addr, u32 value, int size) {
-    u32 o = addr & 0x3FFF;
+    u32 o = addr & (LC_SIZE - 1);
     for (int i = size - 1; i >= 0; i--) {
-        s_lc[(o + i) & 0x3FFF] = (u8)value;
+        g_locked_cache[(o + i) & (LC_SIZE - 1)] = (u8)value;
         value >>= 8;
     }
 }

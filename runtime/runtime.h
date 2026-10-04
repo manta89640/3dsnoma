@@ -16,6 +16,11 @@ void memory_init(u32 mem2_size);
 static const u32 MEM2_SIZE = 48u << 20;
 void* platform_alloc_guest(u32 size);  // zeroed memory for MEM1/MEM2, one block each
 u32 mem2_size();
+// the locked cache: 16 KB of the CPU's L1 data cache at 0xE0000000, used as scratch memory (NW4R
+// computes its model matrices there); a page of guest memory like RAM, so loads and stores reach
+// it directly
+static const u32 LC_BASE = 0xE0000000u, LC_SIZE = 16u << 10;
+extern u8 g_locked_cache[LC_SIZE];
 void read_g(void* out, u32 src, u32 n);
 void write_g(u32 dst, const void* in, u32 n);
 std::string read_string(u32 addr, u32 max = 1024);

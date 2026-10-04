@@ -1,7 +1,9 @@
 // PowerPC state the decompiled code reaches through intrinsics: special-purpose registers
 // (GQRs for quantized loads, HIDs, decrementer, time base) and the MSR's interrupt enable.
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 
 #include "runtime.h"
 #include "hw/hw.h"
@@ -37,18 +39,33 @@ void lc_write(u32 addr, u32 value, int size);
 // The locked cache's DMA (DMA_U 922: memory address, the length's high bits; DMA_L 923: the
 // cache address, LD (bit 4: memory to cache, else back), the length's low bits, T (bit 1: go)),
 // in 32-byte blocks, 0 meaning 128. NW4R computes model matrices in the locked cache and stores
-// them with it (LCStoreData). The transfer is done at once: HID2's queue length stays 0.
+// them with it (LCStoreData). The transfer is done at once: HID2's queue length stays 0. Both
+// hold big-endian bytes: a block copy (the cache's addresses wrap within its 16 KB).
 static void lc_dma(u32 u, u32 l) {
     u32 blocks = ((u & 0x1F) << 2) | ((l >> 2) & 3);
     if (!blocks)
         blocks = 128;
-    u32 mem = 0x80000000u | (u & 0x1FFFFFE0), lc = l & 0xFFFFFFE0;
+    u32 mem = 0x80000000u | (u & 0x1FFFFFE0), lc = l & (LC_SIZE - 32);
     bool load = (l & 0x10) != 0;
-    for (u32 i = 0; i < blocks * 32; i += 4) {
-        if (load)
-            lc_write(lc + i, load32(mem + i), 4);
-        else
-            store32(mem + i, lc_read(lc + i, 4));
+    u8* m = host_ptr(mem);
+    for (u32 done = 0, n = blocks * 32; done < n;) {
+        u32 chunk = std::min(n - done, LC_SIZE - lc);
+        u8* c = g_locked_cache + lc;
+        if (m && host_ptr(mem + done + chunk - 1) == m + done + chunk - 1) {
+            if (load)
+                memcpy(c, m + done, chunk);
+            else
+                memcpy(m + done, c, chunk);
+        } else {  // (memory across a page edge or unmapped: word by word)
+            for (u32 i = 0; i < chunk; i += 4) {
+                if (load)
+                    lc_write(LC_BASE + lc + i, load32(mem + done + i), 4);
+                else
+                    store32(mem + done + i, lc_read(LC_BASE + lc + i, 4));
+            }
+        }
+        done += chunk;
+        lc = 0;
     }
 }
 

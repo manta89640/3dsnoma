@@ -15,6 +15,7 @@ namespace guest {
 uintptr_t g_page[1u << (32 - PAGE_BITS)];
 u32 g_sp;
 
+u8 g_locked_cache[LC_SIZE] __attribute__((aligned(32)));
 static u8* s_mem1;
 static u8* s_mem2;
 static u32 s_mem2_size;
@@ -47,6 +48,8 @@ void memory_init(u32 mem2_size) {
         b = 0;
     map_bank(0x00000000, s_mem1, MEM1_SIZE);
     map_bank(0x10000000, s_mem2, mem2_size);
+    // (its 1 MB page holds only the 16 KB the guest uses: NW4R stays within them)
+    g_page[LC_BASE >> PAGE_BITS] = (uintptr_t)g_locked_cache - LC_BASE;
 }
 
 u32 mem2_size() { return s_mem2_size; }
