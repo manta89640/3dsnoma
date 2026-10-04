@@ -12,6 +12,10 @@
 
 #include "runtime/runtime.h"
 
+namespace engine::g3d {
+class Package;
+}
+
 namespace engine::wuhu {
 
 // what the player does, read once a frame by the scene
@@ -40,6 +44,13 @@ public:
     // (the scene's 2D goes over them)
     virtual void draw_opaque() = 0;
     virtual void draw_translucent() = 0;
+
+    // The exploration menu's way about (docs/wuhu_design.md §8): the island's package, whose
+    // markers of kind 3 are the places it offers (their names, in Japanese, are what it lists), or
+    // nullptr while loading; and the jump there, while the screen is black: the player stands at
+    // marker `marker` facing its direction, the camera behind it (the scene then fades in again).
+    virtual const engine::g3d::Package* package() const { return nullptr; }
+    virtual void warp(u32 marker) { (void)marker; }
 };
 
 // the island's content, made by the scene's constructor (the gameplay's; content_placeholder.cpp
