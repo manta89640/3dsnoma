@@ -158,6 +158,16 @@ clock. An airship placed at the origin with the default `flight` CHR0 would fly 
 circle at sea level through the island: the Flyover must place it by code not traced, so the title
 sequence's flight is used instead.
 
+A moving model's box (`Model.bbox`, `radius`, model space) holds every pose its instances'
+animations give it, not only its rest pose: the cars, cruisers, liner and airship run world routes
+on an identity instance matrix, so their rest boxes sit at the origin, and a renderer that culls
+an instance by its matrix and its model's box would drop them wherever they are seen. Grown so
+(radius): car 35 -> 6,781, cruiser 68 -> 25,608 (its eight routes), liner 168 -> 16,061, airship
+491 -> 11,028, balloon 295 -> 3,131, whale 342 -> 1,134, gull and hawk ~10 -> ~720, windmill 396
+-> 474 (the blades turning). The price is that those instances are rarely culled (up to 23 more a
+frame through the reference cameras); a renderer that culls by the posed root node instead could
+do better with the rest boxes.
+
 Not in this placement file, so not staged: the seaplanes (`PlnSub.carc`'s Flyover course and
 `StageArc.carc:SeaPlane/WS2_common_pln_path.pmp`'s routes), hermit crabs (title sequence), and the
 night's torches, campfire and fireworks (`WS2_pln_island_tag2.pmp`).
@@ -281,8 +291,10 @@ parasols, windmills, boats in `PlnCol_1.carc`): not staged.
 - `ng3d.py selftest`: 23 structs (fields, types, array sizes), 23 static_asserts, 25 section tags
   and 12 enums against `engine/g3d/ng3d_format.h` (changing a field's type or a tag in a copy of
   the header is caught).
-- `ng3d.py check DATA/wuhu/island.ng3d`: every reference in range; read and written again, the
-  same 12,155,376 bytes.
+- `ng3d.py check DATA/wuhu/island.ng3d`: every reference in range, every payload inside its
+  section and of the size its levels or layout take, key frames in order; read and written again,
+  the same 12,155,376 bytes. A package another writer laid out (the renderer's `ng3d-bake`) passes
+  when its records come back the same.
 - The package rendered by `tools/g3d/preview.py` from the six `view_*` cameras at 1280x720,
   compared with the research's renders of the BRRES (`tools/wuhu/check_views.py`; PSNR in dB, and
   the share of pixels more than 16 levels off):

@@ -6,6 +6,7 @@
     cells = MeshSet(cv)                                          # static geometry, batched by key
     cells.add(key, cv.material(brres, mdl, mat), corners_world)  # ... then cells.build()
     ab = AnimBuilder(pkg, "name", frames=200, loop=True)         # tracks from CHR0/SRT0/CLR0 curves
+    widen_model_bounds(pkg)                                      # once the instances are placed
 
 Nothing here knows about an island: tools/wuhu/stage_wuhu.py composes a world from these, and
 tools/g3d/preview.py converts a BRRES with them to draw it the way the engine will.
@@ -666,3 +667,101 @@ def add_chr0(ab, anim, model_index, node_map, mdl=None, rename=None, time_scale=
                 ab.add_curve(target, node_map[tgt], c, model=model_index, time_scale=time_scale, period=period)
                 n += 1
     return n
+
+
+# ------------------------------------------------------------------------------------- posed bounds
+
+
+def track_values(pkg, tr, frames):
+    """A track's values at `frames` (an array), as the engine's curves give them: the first key's
+    value up to it, the last key's from it on, step / linear / Hermite in between (two keys at one
+    frame: a jump to the second)."""
+    k = np.array([(x.frame, x.value, x.slope) for x in pkg.keys[tr.first_key:tr.first_key + tr.n_keys]], np.float64)
+    F, V, S = k[:, 0], k[:, 1], k[:, 2]
+    f = np.asarray(frames, np.float64)
+    if len(F) == 1:
+        return np.full(len(f), V[0])
+    i = np.clip(np.searchsorted(F, f, side="right") - 1, 0, len(F) - 2)
+    f0, f1, v0, v1, s0, s1 = F[i], F[i + 1], V[i], V[i + 1], S[i], S[i + 1]
+    d = f1 - f0
+    t = np.where(d > 0, (f - f0) / np.where(d > 0, d, 1.0), 1.0)
+    if tr.interp == ng3d.IP_STEP:
+        out = np.where(t < 1, v0, v1)
+    elif tr.interp == ng3d.IP_LINEAR:
+        out = v0 + (v1 - v0) * t
+    else:
+        t2, t3 = t * t, t * t * t
+        out = (v0 * (2 * t3 - 3 * t2 + 1) + v1 * (-2 * t3 + 3 * t2) + s0 * d * (t3 - 2 * t2 + t) +
+               s1 * d * (t3 - t2))
+    return np.where(f <= F[0], V[0], np.where(f >= F[-1], V[-1], out))
+
+
+def _srt_matrices(s, r, t):
+    """nw4r's node matrices T * Rz * Ry * Rx * S for arrays of components: s, r (degrees), t of
+    shape (3, n) -> (n, 4, 4)."""
+    rx, ry, rz = np.radians(r)
+    cx, sx, cy, sy, cz, sz = np.cos(rx), np.sin(rx), np.cos(ry), np.sin(ry), np.cos(rz), np.sin(rz)
+    m = np.zeros((len(cx), 4, 4))
+    rot = [[cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz],
+           [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz],
+           [-sy, sx * cy, cx * cy]]
+    for a in range(3):
+        for b in range(3):
+            m[:, a, b] = rot[a][b] * s[b]
+        m[:, a, 3] = t[a]
+    m[:, 3, 3] = 1.0
+    return m
+
+
+def model_poses(pkg, mi, ai, frames):
+    """Model-space matrices (n_nodes, len(frames), 4, 4) of model mi's nodes posed by animation ai
+    (its node tracks for this model; the other components at the node's rest SRT)."""
+    m = pkg.models[mi]
+    nodes = pkg.nodes[m.first_node:m.first_node + m.n_nodes]
+    n = len(frames)
+    srt = np.array([[list(nd.scale) + list(nd.rotate) + list(nd.translate)] * n for nd in nodes],
+                   np.float64).transpose(0, 2, 1)                                    # (nodes, 9, n)
+    a = pkg.anims[ai]
+    for tr in pkg.tracks[a.first_track:a.first_track + a.n_tracks]:
+        if tr.target <= ng3d.TT_NODE_TRANS_Z and tr.model == mi:
+            srt[tr.index, tr.target] = track_values(pkg, tr, frames)
+    W = np.empty((len(nodes), n, 4, 4))
+    for k, nd in enumerate(nodes):           # (parents come before their children)
+        L = _srt_matrices(srt[k, 0:3], srt[k, 3:6], srt[k, 6:9])
+        W[k] = L if nd.parent == NONE16 else W[nd.parent] @ L
+    return W
+
+
+def widen_model_bounds(pkg, samples=1024):
+    """Model.bbox and radius made to hold every pose the animations of the model's instances give
+    it (sampled over each animation's length, its node tracks' keys included), still in model
+    space. A model's own box is its rest pose; an instance that moves by node animation (a world
+    route on an identity matrix, a flight relative to its placement, turning blades) would leave
+    it, and a renderer culls an instance by its matrix and this box. Returns {model: (old radius,
+    new radius)} for the models that grew."""
+    pairs = sorted({(n.model, n.anim) for n in pkg.instances
+                    if n.flags & ng3d.INST_ANIMATED and n.anim != NONE16})
+    grown = {}
+    for mi, ai in pairs:
+        m, a = pkg.models[mi], pkg.anims[ai]
+        if not m.n_batches:
+            continue
+        keys = [k.frame for tr in pkg.tracks[a.first_track:a.first_track + a.n_tracks]
+                if tr.target <= ng3d.TT_NODE_TRANS_Z and tr.model == mi
+                for k in pkg.keys[tr.first_key:tr.first_key + tr.n_keys]]
+        frames = np.unique(np.concatenate([np.linspace(0.0, a.frames, samples + 1),
+                                           np.clip(np.array(keys, np.float64), 0.0, a.frames)]))
+        W = model_poses(pkg, mi, ai, frames)
+        lo, hi = np.array(m.bbox[:3], np.float64), np.array(m.bbox[3:], np.float64)
+        for b in range(m.first_batch, m.first_batch + m.n_batches):
+            bt = pkg.batches[b]
+            corners = np.array([[bt.bbox[3 * (c >> 0 & 1) + 0], bt.bbox[3 * (c >> 1 & 1) + 1],
+                                 bt.bbox[3 * (c >> 2 & 1) + 2], 1.0] for c in range(8)])
+            P = (W[bt.node] @ corners.T)[:, :3, :]                                  # (frames, 3, 8)
+            lo, hi = np.minimum(lo, P.min(axis=(0, 2))), np.maximum(hi, P.max(axis=(0, 2)))
+        radius = float(np.linalg.norm(hi - lo) / 2)
+        if radius > m.radius * (1 + 1e-6):
+            grown[mi] = (grown.get(mi, (m.radius,))[0], radius)
+            m.bbox = [float(x) for x in list(lo) + list(hi)]
+            m.radius = radius
+    return grown

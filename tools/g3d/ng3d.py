@@ -10,7 +10,8 @@
 
     ng3d.py selftest            the structs below against the header (fields, sizes, tags, enums)
     ng3d.py info FILE           sections, counts, sizes
-    ng3d.py check FILE          validate every offset and index, and round-trip (read, write, compare)
+    ng3d.py check FILE          validate every offset, index and payload size, and round-trip (read,
+                                write, compare: the bytes, or for another writer's file the records)
 
 The header is the definition: STRUCTS mirrors each of its structs field by field (name, type, array
 size), SECTIONS its section tags and ENUMS its enumerations, and `selftest` parses the header and
@@ -30,7 +31,10 @@ import re
 import struct
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gxtex  # noqa: E402
+
+ROOT =os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEADER = os.path.join(ROOT, "engine/g3d/ng3d_format.h")
 
 MAGIC = 0x4433474E          # 'NG3D'
@@ -257,6 +261,31 @@ def sizeof(kind):
     return struct.calcsize("<" + _fmt(kind))
 
 
+# bits a texel of each PICA format (TexFormat order)
+PICA_BITS = [32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8]
+
+
+def texture_bytes(t):
+    """The bytes a Texture record's levels take: GX's level sizes from the source size (TEX_GX_RAW;
+    each level max(1, src >> level), padded to GX's tiles), else the PICA format's at width x
+    height. None for a format this doesn't know."""
+    if t.flags & TEX_GX_RAW:
+        if t.gx_format not in gxtex.BLOCK:
+            return None
+        return sum(gxtex.level_bytes(t.gx_format, max(1, t.src_width >> l), max(1, t.src_height >> l))
+                   for l in range(t.levels))
+    if t.format >= len(PICA_BITS):
+        return None
+    return sum((t.width >> l) * (t.height >> l) * PICA_BITS[t.format] // 8 for l in range(t.levels))
+
+
+def vertex_bytes(attrs, flags):
+    """Bytes of a vertex of this layout (VtxAttr order: POS, NRM, CLR, UV0, UV1)."""
+    uv = 8 if flags & VB_UV_FLOAT else 4
+    return (12 if attrs & VA_POS else 0) + (4 if attrs & VA_NRM else 0) + (4 if attrs & VA_CLR else 0) + \
+        (uv if attrs & VA_UV0 else 0) + (uv if attrs & VA_UV1 else 0)
+
+
 # ------------------------------------------------------------------------------------- the package
 
 
@@ -423,15 +452,31 @@ class Package:
         def s_ok(what, off):
             if off >= ns or (off and self.strs[off - 1] != 0):
                 bad.append("%s: string offset %d" % (what, off))
+        # payloads inside their sections (a package read from a file: another writer may have laid
+        # it out; this one's write() puts them there)
+        secs = dict(getattr(self, "sections", []))
+
+        def in_sec(what, t4, off, size):
+            s = secs.get(t4)
+            if secs and (s is None or off < s.offset or off + size > s.offset + s.size):
+                bad.append("%s: %d bytes at %d outside %s" % (what, size, off, t4))
         for i, t in enumerate(self.textures):
             s_ok("texture %d" % i, t.name)
             if t.levels < 1 or t.width < 8 or t.height < 8 or t.width & (t.width - 1) or t.height & (t.height - 1):
                 bad.append("texture %d: %dx%d %d levels" % (i, t.width, t.height, t.levels))
             if t.data % 128:
                 bad.append("texture %d: data not 128-aligned" % i)
+            in_sec("texture %d" % i, "TDAT", t.data, t.size)
+            # (Texture.size is filled in by write(): before it, the payload's length)
+            size = len(self.texture_data[i]) if i < len(self.texture_data) else t.size
+            need = texture_bytes(t)
+            if need is not None and (size < need if t.flags & TEX_GX_RAW else size != need):
+                bad.append("texture %d: %d bytes, its %d levels take %d" % (i, size, t.levels, need))
         nt, nm, nx = len(self.textures), len(self.materials), len(self.tex_mtx)
         for i, m in enumerate(self.materials):
             s_ok("material %d" % i, m.name)
+            if not 1 <= m.n_stages <= MAX_TEV_STAGES or m.n_texgens > MAX_TEXGENS:
+                bad.append("material %d: %d stages, %d texgens" % (i, m.n_stages, m.n_texgens))
             for k, mp in enumerate(m.maps):
                 if mp.texture != NONE16 and mp.texture >= nt:
                     bad.append("material %d map %d: texture %d" % (i, k, mp.texture))
@@ -449,6 +494,9 @@ class Package:
         for i, v in enumerate(self.vertex_buffers):
             if v.data % 16 or v.count > 65536:
                 bad.append("vertex buffer %d: data %d count %d" % (i, v.data, v.count))
+            if v.stride < vertex_bytes(v.attrs, v.flags) or v.stride % 4 or not v.attrs & VA_POS:
+                bad.append("vertex buffer %d: attributes %02x, stride %d" % (i, v.attrs, v.stride))
+            in_sec("vertex buffer %d" % i, "VDAT", v.data, v.count * v.stride)
         for i, b in enumerate(self.batches):
             if b.material >= nm or b.vbuf >= len(self.vertex_buffers) or b.n_indices % 3 or \
                     b.first_index + b.n_indices > ni:
@@ -484,6 +532,8 @@ class Package:
             for l in range(c.n_lods):
                 if c.first[l] + c.count[l] > nc:
                     bad.append("cell %d lod %d: %d+%d" % (i, l, c.first[l], c.count[l]))
+                if l and c.lod_distance[l] < c.lod_distance[l - 1]:
+                    bad.append("cell %d lod %d: distance %g below the level before" % (i, l, c.lod_distance[l]))
         for i, b in enumerate(self.cell_batches):
             if b >= nb:
                 bad.append("cell batch %d: %d" % (i, b))
@@ -494,11 +544,15 @@ class Package:
         nk = len(self.keys)
         for i, a in enumerate(self.anims):
             s_ok("anim %d" % i, a.name)
-            if a.first_track + a.n_tracks > len(self.tracks):
-                bad.append("anim %d: tracks %d+%d" % (i, a.first_track, a.n_tracks))
+            if a.first_track + a.n_tracks > len(self.tracks) or not a.frames > 0:
+                bad.append("anim %d: tracks %d+%d, %g frames" % (i, a.first_track, a.n_tracks, a.frames))
         for i, t in enumerate(self.tracks):
-            if t.n_keys < 1 or t.first_key + t.n_keys > nk:
-                bad.append("track %d: keys %d+%d" % (i, t.first_key, t.n_keys))
+            if t.n_keys < 1 or t.first_key + t.n_keys > nk or t.interp > IP_HERMITE:
+                bad.append("track %d: keys %d+%d, interpolation %d" % (i, t.first_key, t.n_keys, t.interp))
+                continue
+            fr = [k.frame for k in self.keys[t.first_key:t.first_key + t.n_keys]]
+            if any(b < a for a, b in zip(fr, fr[1:])):
+                bad.append("track %d: key frames out of order" % i)
             if t.target <= TT_NODE_TRANS_Z:
                 if t.model >= len(self.models) or t.index >= self.models[t.model].n_nodes:
                     bad.append("track %d: node %d of model %d" % (i, t.index, t.model))
@@ -528,7 +582,22 @@ class Package:
             s_ok("marker %d" % i, m.name)
         for i, c in enumerate(self.collisions):
             s_ok("collision %d" % i, c.name)
+            in_sec("collision %d" % i, "BLOB", c.data, c.size)
         return bad
+
+    def records(self):
+        """Everything the package holds except its layout (file offsets of the payloads): to tell
+        whether two packages are the same content."""
+        def strip(r, kind):
+            v = dict(r._v)
+            for f in {"Texture": ("data",), "VertexBuffer": ("data",), "Collision": ("data",)}.get(kind, ()):
+                v[f] = None
+            return v
+        out = {lst: [strip(r, LIST_KIND[lst]) if isinstance(r, Rec) else r for r in getattr(self, lst)]
+               for lst in SECTION_LISTS.values()}
+        out.update(env=self.env, strs=bytes(self.strs), texture_data=self.texture_data,
+                   vertex_data=self.vertex_data, blobs=self.blobs)
+        return out
 
     def summary(self):
         """[(tag, bytes, count)] from the sections as written."""
@@ -664,9 +733,14 @@ def main(argv):
                 print("BAD", b)
             again = p.write()
             same = again == data
+            # a file another writer laid out (e.g. the renderer's ng3d-bake, which pads differently)
+            # round-trips to other bytes: then its records must come back the same
+            same_records = same or Package.read(again).records() == p.records()
             print("references: %s; round trip (read, write): %s" % (
-                "%d problems" % len(bad) if bad else "all in range", "identical" if same else "DIFFERENT"))
-            return 0 if same and not bad else 1
+                "%d problems" % len(bad) if bad else "all in range",
+                "identical" if same else "the same records (laid out by another writer)" if same_records
+                else "DIFFERENT"))
+            return 0 if same_records and not bad else 1
         return 0
     print(__doc__)
     return 1

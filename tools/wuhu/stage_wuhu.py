@@ -609,6 +609,14 @@ class Stager:
         for cls, n in made.items():
             self.inv["props"][cls]["instances"] = n
             self.inv["props"][cls]["animation"] = notes.get(cls)
+        # the moving models' boxes over their animations: the cars, boats, liner and airship run
+        # world routes on an identity matrix, so their rest boxes sit at the origin; a renderer
+        # culling an instance by its matrix and its model's box must see where they go
+        grown = convert.widen_model_bounds(pkg)
+        self.say("model bounds over their animations: %s" % ", ".join(
+            "%s %.0f -> %.0f" % (pkg.string(pkg.models[mi].name), r0, r1) for mi, (r0, r1) in sorted(grown.items())))
+        self.inv["model_radius_over_animation"] = {pkg.string(pkg.models[mi].name): [r0, r1]
+                                                   for mi, (r0, r1) in sorted(grown.items())}
 
     # ------------------------------------------------------------------------------- the cells
     def build_cells(self):
@@ -828,7 +836,7 @@ class Stager:
         for cls, f in ((2, "WS2_common_tree.kcl"), (3, "WS2_common_tree2.kcl"), (4, "WS2_common_tree3.kcl")):
             t, a, _ = kcl_triangles(w.get(arc, f))
             v = t[a == 0x1105].reshape(-1, 3)
-            cx, cz = (v[:, 0].min() + v[:, 0].max()) / 2, (v[:, 2].min() + v[:, 2].max()) / 2
+            cx, cz = float(v[:, 0].min() + v[:, 0].max()) / 2, float(v[:, 2].min() + v[:, 2].max()) / 2
             rad = float(np.max(np.hypot(v[:, 0] - cx, v[:, 2] - cz)))
             trunks[cls] = (cx, cz, float(v[:, 1].min()), float(v[:, 1].max()), rad)
         n = 0
@@ -934,18 +942,23 @@ def main(argv=None):
     with open(raw, "wb") as f:
         f.write(data)
     if a.bake:
+        # (a bake that fails must not leave the last run's package looking like this one's)
+        if os.path.exists(out):
+            os.remove(out)
         subprocess.run([a.bake, raw, out], check=True)
         if not a.keep_raw:
             os.remove(raw)
+    # the sections of the file as written (the bake changes TDAT); texture bytes as GX has them
+    sections = ng3d.Package.read(open(out, "rb").read()).sections
     st.inv["package"] = dict(path=out, bytes=os.path.getsize(out), baked=bool(a.bake),
-                             sections=[dict(tag=t, bytes=s, count=c) for t, s, c in pkg.summary()],
+                             sections=[dict(tag=t, bytes=s.size, count=s.count) for t, s in sections],
                              textures=texture_summary(pkg), stats=dict(st.cv.stats))
     st.inv["log"] = st.log
     with open(a.json or os.path.join(out_dir, "island.json"), "w") as f:
         json.dump(st.inv, f, ensure_ascii=False, indent=1,
                   default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x))
     st.say("wrote %s: %d bytes in %.1f s (%s)" % (out, os.path.getsize(out), time.time() - t0,
-                                                 ", ".join("%s %d" % (t, s) for t, s, _ in pkg.summary())))
+                                                 ", ".join("%s %d" % (t, s.size) for t, s in sections)))
     for k, v in sorted(st.cv.stats.items()):
         print("  %s: %s" % (k, v))
     return 0
