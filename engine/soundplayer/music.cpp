@@ -76,7 +76,12 @@ void Music::play(u32 id) {
 
 void Music::pause() { g::fn_802A284C(bgm(), 1); }
 
-void Music::resume() { g::fn_802A284C(bgm(), 0); }
+// (Stop leaves the room's theme paused in slot 2 with the current slot still 2: resuming then
+// would play it again behind the player's back, with nothing current. Only a piece current resumes.)
+void Music::resume() {
+    if (guest::load32(bgm() + 0x28) != NO_SOUND)
+        g::fn_802A284C(bgm(), 0);
+}
 
 void Music::stop() { stop_with_fade(FADE_FRAMES); }
 

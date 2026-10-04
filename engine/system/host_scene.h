@@ -44,6 +44,10 @@ using HostSceneMaker = HostScene* (*)();
 // below that make something belong.
 void host_scene_boot(void (*make_lasting)());
 
+// guest memory for as long as the program runs (aligned to `align` bytes: 32 for what the GPU
+// reads), only from inside make_lasting
+u32 lasting_alloc(u32 size, u32 align = 8);
+
 // The guest lib::Scene::Factory for a scene class (made at the start, then found again by `make`;
 // class_name is the C++ name its type_info carries, e.g. "scene::SoundPlayerScene"). Hand it to
 // lib::SceneManager::ChangeScene. It isn't on the manager's list of factories, so changing scene

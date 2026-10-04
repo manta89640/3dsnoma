@@ -16,7 +16,9 @@ public:
     void update(const Music& music);
     // its layouts (after the 3D, before the controls and the cursor)
     void draw();
-    // a button of the scene's was pushed (the push animation ended): the list's? (then it acts)
+    // a button of the scene's starts its push / was pushed (the push animation ended): the
+    // list's? (then it acts)
+    bool on_push_start(u32 button);
     bool on_pushed(u32 button);
     // the track (an index into catalog()) chosen since the last call, or -1
     int take_chosen();

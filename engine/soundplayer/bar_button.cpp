@@ -3,11 +3,12 @@
 // animations and sounds. Here it gets its own icon and label, in the bar's two-tone style
 // (art.h): a pair of beamed eighth notes drawn here, and サウンド set from the channel's font,
 // both measured against the bar's own textures (Move_Btn_Icon_*.tpl, Move_Btn_Text_*.tpl).
-// The textures are made once, while the room is being built: their texels come from the current
-// heap (the room's), last as long as the room, and are never written again.
+// The textures are drawn once, the first time the room is built, into a block reserved at the
+// start (the room is built again every time it comes back; see below), and never written again.
 #include "engine/soundplayer/sound_player.h"
 
 #include "engine/soundplayer/art.h"
+#include "engine/system/host_scene.h"
 
 #include <algorithm>
 #include <cmath>
@@ -119,34 +120,47 @@ Coverage draw_label(u32 font) {
     return label;
 }
 
+// The textures' block: made at the start (the room is made again every time it comes back, and a
+// block of its own each time would keep the room's memory under it from being given back: the
+// heaps are stacks), drawn the first time the bar is made (the font is loaded by then), and used by
+// every bar after that. The label gets the room it needs, up to LABEL_MAX_W.
+const u32 LABEL_MAX_W = 128;
+u32 s_texels = 0;
+u32 s_label_w = 0;  // 0: not drawn yet
+
 }  // namespace
+
+void reserve_bar_button() {
+    s_texels = engine::system::lasting_alloc(art::ia4_size(ICON_SIZE, ICON_SIZE) + art::ia4_size(LABEL_MAX_W, LABEL_HEIGHT),
+                                             32);
+}
 
 void dress_bar_button(u32 button) {
     u32 icon_pane = find_pane(button, "Pic_Icon"), label_pane = find_pane(button, "Pic_Text");
     u32 font = art::system_font();
-    if (!icon_pane || !label_pane || !font) {
-        guest::log("soundplayer: bar button %08X: no icon or label pane, or no font (%08X %08X %08X)", button,
-                   icon_pane, label_pane, font);
+    if (!s_texels || !icon_pane || !label_pane || !font) {
+        guest::log("soundplayer: bar button %08X: no textures, icon or label pane, or font (%08X %08X %08X %08X)",
+                   button, s_texels, icon_pane, label_pane, font);
         return;
     }
-    std::vector<u8> icon = art::two_tone_ia4(draw_icon(), ICON_OUTLINE, 1.0f);
-    Coverage label_shape = draw_label(font);
-    std::vector<u8> label = art::two_tone_ia4(label_shape, LABEL_OUTLINE, LABEL_OUTLINE_OPACITY);
-    // one block for both (their sizes are whole tiles of 32 bytes, so the label's stays aligned)
-    u32 texels = art::alloc_texels((u32)(icon.size() + label.size()));
-    if (!texels) {
-        guest::log("soundplayer: bar button %08X: no memory for its textures", button);
-        return;
+    // the label's texels follow the icon's (whole 32-byte tiles: they stay aligned)
+    u32 label_texels = s_texels + art::ia4_size(ICON_SIZE, ICON_SIZE);
+    if (!s_label_w) {
+        Coverage label_shape = draw_label(font);
+        if (label_shape.w > LABEL_MAX_W) {
+            guest::log("soundplayer: bar button: its label is %u pixels wide, more than %u", label_shape.w, LABEL_MAX_W);
+            return;
+        }
+        art::write_texels(s_texels, art::two_tone_ia4(draw_icon(), ICON_OUTLINE, 1.0f));
+        art::write_texels(label_texels, art::two_tone_ia4(label_shape, LABEL_OUTLINE, LABEL_OUTLINE_OPACITY));
+        s_label_w = label_shape.w;
+        guest::log("soundplayer: bar button: icon %ux%u, label %ux%u (texels at %08X)", ICON_SIZE, ICON_SIZE,
+                   s_label_w, LABEL_HEIGHT, s_texels);
     }
-    u32 label_texels = texels + (u32)icon.size();
-    art::write_texels(texels, icon);
-    art::write_texels(label_texels, label);
-    art::set_texmap(art::pane_texmap(icon_pane), texels, ICON_SIZE, ICON_SIZE, art::GX_TF_IA4);
+    art::set_texmap(art::pane_texmap(icon_pane), s_texels, ICON_SIZE, ICON_SIZE, art::GX_TF_IA4);
     art::set_pane_size(icon_pane, ICON_PANE_SIZE, ICON_PANE_SIZE);
-    art::set_texmap(art::pane_texmap(label_pane), label_texels, label_shape.w, label_shape.h, art::GX_TF_IA4);
-    art::set_pane_size(label_pane, (f32)label_shape.w, (f32)label_shape.h);
-    guest::log("soundplayer: bar button %08X: icon %ux%u, label %ux%u (texels at %08X)", button, ICON_SIZE, ICON_SIZE,
-               label_shape.w, label_shape.h, texels);
+    art::set_texmap(art::pane_texmap(label_pane), label_texels, s_label_w, LABEL_HEIGHT, art::GX_TF_IA4);
+    art::set_pane_size(label_pane, (f32)s_label_w, (f32)LABEL_HEIGHT);
 }
 
 }  // namespace engine::soundplayer

@@ -190,6 +190,7 @@ struct TrackList::Impl {
         RowPanes panes;
         u32 focus = 0;           // its Focus animation
         int entry = -1;          // the entry it shows (-1: none)
+        int pushed_entry = -1;   // the entry it showed when its push started (it may move on before the push ends)
         bool header = false;
         bool posed = false;      // posed in its focused look (the D-pad's highlight)
         bool name_shown = true;  // its name is shown (not under the playing bar)
@@ -592,16 +593,30 @@ void TrackList::update(const Music& music) {
 
 void TrackList::draw() { layout_draw(impl_->window); }
 
+// A row's push: what it showed when the push started is what was chosen (the list can glide on
+// during the push, the D-pad changing the track, and give the row to another entry).
+bool TrackList::on_push_start(u32 button) {
+    for (Impl::Row& r : impl_->rows) {
+        if (r.button == button) {
+            r.pushed_entry = r.entry >= 0 && !r.header ? r.entry : -1;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool TrackList::on_pushed(u32 button) {
     Impl& m = *impl_;
     if (button == m.up || button == m.down)
         return true;
-    for (const Impl::Row& r : m.rows) {
+    for (Impl::Row& r : m.rows) {
         if (r.button != button)
             continue;
-        if (r.entry >= 0 && !r.header) {
-            m.chosen = m.entries[r.entry];
-            m.highlight = r.entry;
+        int e = r.pushed_entry;
+        r.pushed_entry = -1;
+        if (e >= 0 && m.entries[e] >= 0) {
+            m.chosen = m.entries[e];
+            m.highlight = e;
         }
         return true;
     }

@@ -46,12 +46,18 @@ std::unordered_map<u32, HostScene*> s_scenes;  // guest lib::Scene -> its native
 // from coming back. Lasting blocks are therefore made at the start, with the channel's own
 // (host_scene_boot()), from the heap current then.
 bool s_booting;
-u32 alloc_lasting(u32 size) {
+u32 alloc_lasting(u32 size, u32 align = 8) {
     if (!s_booting)
         guest::fatal("host scene: lasting guest memory asked for after the start");
+    GFRAME(0x10);
+    u32 scope = (u32)&GS(u32, 0x8);
+    if (align > 8)
+        g::lib_allocator_ScopedAlignment_ctor(scope, align);
     u32 p = g::operator_new(size);
+    if (align > 8)
+        g::lib_allocator_ScopedAlignment_dtor(scope, (u32)-1);
     if (!p)
-        guest::fatal("host scene: out of guest memory (%u bytes)", size);
+        guest::fatal("host scene: out of guest memory (%u bytes)", (unsigned)size);
     return p;
 }
 
@@ -215,6 +221,8 @@ void hook_button(u32 button) {
     }
     guest::fatal("host scene: button %08X's class (vtable %08X) wasn't made hookable at the start", button, vt);
 }
+
+u32 lasting_alloc(u32 size, u32 align) { return alloc_lasting(size, align); }
 
 void host_scene_boot(void (*make_lasting)()) {
     s_booting = true;

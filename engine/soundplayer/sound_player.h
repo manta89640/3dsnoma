@@ -14,7 +14,8 @@ void boot();
 u32 scene_factory();
 
 // the room bar's button for the Sound Player (a layout::Button made from いろんな間's layout):
-// give it its own icon and label
+// give it its own icon and label (their textures' block is reserved at the start)
+void reserve_bar_button();
 void dress_bar_button(u32 button);
 
 }  // namespace engine::soundplayer

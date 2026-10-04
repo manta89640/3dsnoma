@@ -34,12 +34,14 @@ public:
     void update() override;
     void draw() override;
     u32 cursor() override { return cursor_; }
+    void on_push_start(u32 button) override { list_->on_push_start(button); }
     void on_pushed(u32 button) override;
 
 private:
     void leave();
     void play_index(int i);
     void step(int direction);
+    void toggle_play();
     int current_index() const;
 
     u32 cursor_ = 0;
@@ -111,6 +113,17 @@ void SoundPlayerScene::step(int direction) {
     play_index(((i + direction) % n + n) % n);
 }
 
+// the play/pause button and +: pause what plays, resume what's paused, play the track current
+// (or the list's highlighted one) when stopped; nothing while the player switches pieces
+void SoundPlayerScene::toggle_play() {
+    switch (music_->state()) {
+    case PlayState::PLAYING: music_->pause(); break;
+    case PlayState::PAUSED: music_->resume(); break;
+    case PlayState::STOPPED: play_index(current_index() >= 0 ? current_index() : list_->highlighted()); break;
+    case PlayState::SWITCHING: break;
+    }
+}
+
 void SoundPlayerScene::update() {
     if (music_->state() != logged_state_ || music_->current() != logged_sound_) {
         logged_state_ = music_->state();
@@ -134,14 +147,7 @@ void SoundPlayerScene::update() {
     case Controls::PREVIOUS: step(-1); break;
     case Controls::NEXT: step(1); break;
     case Controls::STOP: music_->stop(); break;
-    case Controls::PLAY_PAUSE:
-        if (music_->state() == PlayState::PLAYING)
-            music_->pause();
-        else if (music_->state() == PlayState::PAUSED)
-            music_->resume();
-        else
-            play_index(current_index() >= 0 ? current_index() : list_->highlighted());
-        break;
+    case Controls::PLAY_PAUSE: toggle_play(); break;
     case Controls::NONE: break;
     }
 
@@ -153,7 +159,7 @@ void SoundPlayerScene::update() {
     else if (pressed & game::PAD_RIGHT)
         step(1);
     else if (pressed & game::PAD_PLUS)
-        music_->state() == PlayState::PLAYING ? music_->pause() : music_->resume();
+        toggle_play();
     else if (pressed & game::PAD_MINUS)
         music_->stop();
     else if ((pressed & game::PAD_A) && !game::pointer_on_screen())
@@ -190,6 +196,7 @@ const char* const CLASS_NAME = "scene::SoundPlayerScene";
 
 void make_lasting() {
     engine::system::host_scene_factory(CLASS_NAME, &make_scene);
+    reserve_bar_button();
     engine::system::hookable_button_class(game::VTABLE_LAYOUT_BUTTON, game::LAYOUT_BUTTON_SLOTS);
     // layout::movie::PlayButton (the controls' play/pause disc): 21 virtuals, as layout::Button's
     engine::system::hookable_button_class(GA_lbl_80796B4C, 21);
