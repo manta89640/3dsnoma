@@ -969,6 +969,38 @@ def add_loop_polls(fn_text, name, addr):
     return "\n".join(out)
 
 
+# The DOL's .sdata2 (0x80883DA0..0x80888430): the compiler's constants (float literals, the
+# int-to-float magic numbers, pointers to tables), which nothing writes. A read of one by name is
+# its value at compile time, not a load from guest memory (a page lookup, a byte swap and a move to
+# a VFP register for a float).
+SDATA2 = (0x80883DA0, 0x80888430)
+RO_READ = re.compile(r"(?<![&\w])GV\((f32|f64|u32|s32|u16|s16|u8|s8|gp<[\w<> ]+>), GA_lbl_([0-9A-F]{8})\)"
+                     r"(?!\s*(?:=[^=]|\+=|-=|\*=|/=|\|=|&=|\^=|<<=|>>=|\+\+|--|\.|->|\[))")
+RO_SIZE = {"f32": 4, "f64": 8, "u32": 4, "s32": 4, "u16": 2, "s16": 2, "u8": 1, "s8": 1}
+
+
+def fold_ro_reads(fn_text, dol):
+    def value(m):
+        t, addr = m.group(1), int(m.group(2), 16)
+        n = RO_SIZE.get(t, 4)
+        if not (SDATA2[0] <= addr and addr + n <= SDATA2[1]):
+            return m.group(0)
+        b = dol.read_bytes(addr, n)
+        if b is None or len(b) != n:
+            return m.group(0)
+        v = int.from_bytes(b, "big")
+        if t == "f32":
+            return "noma_kf32(0x%08Xu)" % v
+        if t == "f64":
+            return "noma_kf64(0x%016Xull)" % v
+        if t.startswith("gp<"):
+            return "%s(0x%08Xu)" % (t, v)
+        if t[0] == "s":
+            return "((%s)0x%Xu)" % (t, v)
+        return "((%s)0x%Xu)" % (t, v)
+    return RO_READ.sub(value, fn_text)
+
+
 def postprocess(fn_text, name_map):
     """Make names C++-safe and point GA_ constants at sanitized names; C++-ify a few m2c
     constructs (a label needs a statement after it, no casts on the left of an assignment)."""
@@ -1187,6 +1219,7 @@ def main():
             start_line = len(out) + 1
             body_text = fix_return_type(postprocess(body, None), protos.get(f.addr), n)
             body_text = add_loop_polls(body_text, n, f.addr)
+            body_text = fold_ro_reads(body_text, dol)
             if n in ALIGNED_FRAMES or asm_name(f) in ALIGNED_FRAMES:
                 afs, align = ALIGNED_FRAMES.get(n) or ALIGNED_FRAMES[asm_name(f)]
                 body_text = re.sub(r"\bGFRAME\(0x%X\);" % afs, "GFRAME_ALIGN(0x%X, %d);" % (afs, align),

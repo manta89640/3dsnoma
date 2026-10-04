@@ -606,6 +606,9 @@ NOMA_REGHELPER(29) NOMA_REGHELPER(30) NOMA_REGHELPER(31)
 
 // globals and functions by guest address (GA_<name> constants come from gsyms.h)
 #define GV(T, addr) (*gp<T>((u32)(addr)))
+// a constant of the DOL's read-only .sdata2, by its bits (tools/decomp/decompile.py fold_ro_reads)
+static constexpr inline f32 noma_kf32(u32 bits) { return __builtin_bit_cast(f32, bits); }
+static constexpr inline f64 noma_kf64(u64 bits) { return __builtin_bit_cast(f64, bits); }
 #define GARR(T, addr) (gp<T>((u32)(addr)))
 #define GFN(f) (gp<void>(GA_##f))
 
