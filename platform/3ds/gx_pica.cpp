@@ -67,9 +67,10 @@ using PVertex = GxTnlVertex;  // the vertex shader's inputs (tnl.h)
 static_assert(sizeof(PVertex) == 64, "PVertex layout");
 
 // ---- the display-list cache: a list's draws, with their vertices in the pool, found again by
-// the list and the draw command's offset in it; valid while the list's bytes, the vertex arrays
+// the list and the draw command's offset in it; valid while the draw's bytes, the vertex arrays
 // they index (by write generation), the CP registers they were decoded with and what the shader
-// wants of a vertex (the recipe) stay the same
+// wants of a vertex (the recipe) stay the same. A list the game writes again every frame (two in
+// the room: 132 draws) mostly keeps its draws' bytes: they are compared when the list changed.
 struct DlRange {
     u32 attr, addr, size, gen;
 };
@@ -84,6 +85,8 @@ struct DlRecord {
     u8 recipe[12] = {};
     GxTnlSlots slots = {};     // the slots all its vertices were given (fixed-matrix draws)
     u32 slots_frame = 0;       // the frame they were written in (0: never)
+    u64 data_hash = 0;         // its vertex data's bytes in the list ...
+    u32 list_gen = 0;          // ... as they were at this write generation of the list
 };
 struct DlEntry {
     u32 addr = 0, size = 0;  // the list (0: free)
@@ -137,6 +140,7 @@ struct State {
     u32 draws = 0, batches = 0, setups = 0;  // this frame
     u32 cached_draws = 0, cached_vertices = 0, built_vertices = 0;  // this frame
     u32 rebuilt_arrays = 0, rebuilt_regs = 0, drawn_twice = 0, no_room = 0;  // why list draws were built
+    u32 cache_made = 0, lists_rewritten = 0, lists_new = 0;  // pool vertices given out; lists whose bytes changed, new
     // what the GPU must see of memory the CPU wrote this frame: slot and cache vertex ranges
     u32 slots_lo = ~0u, slots_hi = 0, cache_lo = ~0u, cache_hi = 0;
     DlEntry* dl = nullptr;     // the display-list cache
@@ -176,6 +180,8 @@ struct Timers {
     u32 frames = 0;
     u32 consts_vectors = 0, pal_slots = 0, pieces = 0, tev_misses = 0, plan_misses0 = 0;
     GxDecodeCounts dec0 = {};
+    GxTnlPalStats pal0 = {};
+    u32 cache_made = 0, vary_draws = 0, slot_rewrites = 0, slot_vertices = 0;
     int every = -2;
 } T;
 inline bool timers_on() {
@@ -206,7 +212,7 @@ void timers_frame_end() {
     if (T.frames < (u32)T.every)
         return;
     const double ms = 1000.0 / SYSCLOCK_ARM11 / T.frames;
-    char line[640];
+    char line[1024];
     int n = snprintf(line, sizeof(line), "gx timers: %u frames, %.1f ms each:", T.frames, (double)T.wall * ms);
     u64 sum = 0;
     for (int k = 0; k < Timers::N; k++) {
@@ -216,12 +222,20 @@ void timers_frame_end() {
                           T.calls[k] / T.frames);
     }
     GxDecodeCounts d = gx_decode_counts();
-    snprintf(line + n, sizeof(line) - n, "; rest %.2f | per frame: %u draws %u vertices %u bp %u xf %u cp %u lists, %u const vectors, %u palette slots, %u pieces, %u tev misses, %u plan misses",
+    GxTnlPalStats ps = gx_tnl_pal_stats();
+    n += snprintf(line + n, sizeof(line) - n, "; rest %.2f | per frame: %u draws %u vertices %u bp %u xf %u cp %u lists, %u const vectors, %u palette slots, %u pieces, %u tev misses, %u plan misses",
              (double)(T.wall > sum ? T.wall - sum : 0) * ms, (d.draws - T.dec0.draws) / T.frames,
              (d.vertices - T.dec0.vertices) / T.frames, (d.bp - T.dec0.bp) / T.frames, (d.xf - T.dec0.xf) / T.frames,
              (d.cp - T.dec0.cp) / T.frames, (d.dl - T.dec0.dl) / T.frames, T.consts_vectors / T.frames,
              T.pal_slots / T.frames, T.pieces / T.frames, T.tev_misses / T.frames,
              (gx_tnl_plan_misses() - T.plan_misses0) / T.frames);
+    snprintf(line + n, sizeof(line) - n, "; palette %u fills %u checks (%u stale) %u searches; %u list vertices made; "
+             "cached draws: %u with matrices per vertex, %u fixed with slots rewritten (%u vertices)",
+             (ps.fills - T.pal0.fills) / T.frames, (ps.checks - T.pal0.checks) / T.frames,
+             (ps.stale - T.pal0.stale) / T.frames, (ps.scans - T.pal0.scans) / T.frames, T.cache_made / T.frames,
+             T.vary_draws / T.frames, T.slot_rewrites / T.frames, T.slot_vertices / T.frames);
+    T.pal0 = ps;
+    T.cache_made = T.vary_draws = T.slot_rewrites = T.slot_vertices = 0;
     log("%s", line);
     memset(T.ticks, 0, sizeof(T.ticks));
     memset(T.calls, 0, sizeof(T.calls));
@@ -1286,6 +1300,7 @@ void begin_frame() {
     P.draws = P.batches = P.setups = 0;
     P.cached_draws = P.cached_vertices = P.built_vertices = 0;
     P.rebuilt_arrays = P.rebuilt_regs = P.drawn_twice = P.no_room = 0;
+    P.cache_made = P.lists_rewritten = P.lists_new = 0;
     P.batch_count = 0;
     P.all_dirty = true;
     P.env_valid = false;
@@ -1314,6 +1329,7 @@ DlEntry* dl_entry(u32 addr, u32 size) {
     }
     *victim = DlEntry();
     victim->addr = addr, victim->size = size;
+    P.lists_new++;
     return victim;
 }
 
@@ -1326,7 +1342,20 @@ void dl_recipe(const GxTnlPlan& plan, u8 out[12]) {
 
 // the record still describes the draw: registers, recipe, and the arrays unchanged (0), or
 // what changed: 1 registers or recipe, 2 the arrays
-int dl_record_stale(const DlRecord& r, u32 vat, const GxTnlPlan& plan) {
+// a draw's vertex data in its list (the indices, mostly: a few bytes), 64 bits of it
+u64 dl_data_hash(const u8* p, u32 n) {
+    u64 h = 14695981039346656037ull ^ n;
+    u32 w;
+    for (; n >= 4; p += 4, n -= 4) {
+        memcpy(&w, p, 4);
+        h = (h ^ w) * 1099511628211ull;
+    }
+    for (; n; p++, n--)
+        h = (h ^ *p) * 1099511628211ull;
+    return h ^ (h >> 29);
+}
+
+int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, const u8* data, u32 count) {
     const u32* cp = g_gx.cp;
     if (r.vat != vat || r.regs[0] != cp[CP_VCD_LO] || r.regs[1] != cp[CP_VCD_HI] || r.regs[2] != cp[CP_VAT_A + vat] ||
         r.regs[3] != cp[CP_VAT_B + vat] || r.regs[4] != cp[CP_VAT_C + vat])
@@ -1341,6 +1370,11 @@ int dl_record_stale(const DlRecord& r, u32 vat, const GxTnlPlan& plan) {
             return 1;
         if (mem_generation(g.addr, g.size) != g.gen)
             return 2;
+    }
+    if (r.list_gen != list_gen) {  // the list was written again: the draw's own bytes
+        if (count != r.count || dl_data_hash(data, count * plan.fmt->size) != r.data_hash)
+            return 2;
+        r.list_gen = list_gen;
     }
     return 0;
 }
@@ -1582,8 +1616,13 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         if (addr != P.dl_addr || offset <= P.dl_offset) {
             u32 gen = mem_generation(addr, size);
             if (e->gen != gen) {
-                e->recs.clear();
+                // its draws are checked against their bytes as they come; records no draw of the
+                // last frames used (draws at other offsets now) go
+                P.lists_rewritten += !e->recs.empty();
                 e->gen = gen;
+                e->recs.erase(std::remove_if(e->recs.begin(), e->recs.end(),
+                                             [](const DlRecord& x) { return x.slots_frame + 2 < P.frame; }),
+                              e->recs.end());
             }
             P.dl_addr = addr;
         }
@@ -1602,7 +1641,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             variants++;
             if (!oldest || x.slots_frame < oldest->slots_frame)
                 oldest = &x;
-            int stale = x.count ? dl_record_stale(x, vat, plan) : 1;
+            int stale = x.count ? dl_record_stale(x, vat, plan, e->gen, data, count) : 1;
             if (stale == 1)
                 continue;
             r = &x;
@@ -1634,6 +1673,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             NOMA_PROF_SCOPE("(gx slots)");
             Timed timed(Timers::SLOTS);
             if (gx_tnl_rows_vary(plan)) {
+                T.vary_draws++;
                 for (u32 done = 0; done < count;) {
                     u32 left = count - done;
                     u32 n = gx_tnl_slots(plan, P.rows + r->first + done, left, P.pal, P.slots + r->first + done);
@@ -1662,6 +1702,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                         return;
                 }
                 if (!r->slots_frame || memcmp(&fs, &r->slots, sizeof(fs)) != 0) {
+                    T.slot_rewrites++, T.slot_vertices += count;
                     GxTnlSlots* dst = P.slots + r->first;
                     for (u32 i = 0; i < count; i++)
                         dst[i] = fs;
@@ -1702,7 +1743,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 }
                 if (n == count) {
                     if (!in_place)
-                        P.cache_next += count;
+                        P.cache_next += count, P.cache_made += count, T.cache_made += count;
                     P.built_vertices += count;
                     P.cache_lo = std::min(P.cache_lo, first), P.cache_hi = std::max(P.cache_hi, first + count);
                     slots_written(first, count);
@@ -1717,6 +1758,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                         r->arrays[i][0] = cp[CP_ARRAY_BASE + ranges[i].attr], r->arrays[i][1] = cp[CP_ARRAY_STRIDE + ranges[i].attr];
                     }
                     dl_recipe(plan, r->recipe);
+                    r->data_hash = dl_data_hash(data, count * plan.fmt->size), r->list_gen = e->gen;
                     if (!gx_tnl_rows_vary(plan))
                         r->slots = P.slots[first];
                     r->slots_frame = P.frame;
@@ -1966,11 +2008,13 @@ void PicaRenderer::draw_done() {
                 "heap %u KB used of %u KB; at most %u immediate vertices and %u indices a frame; last frame %u draws "
                 "in %u batches, %u state setups, %u draws (%u vertices) from the list cache, %u vertices built "
                 "(%u list draws made again for their arrays, %u for registers, %u drawn twice, %u without room), "
-                "cache at %u of %u", P.textures.size(), kb, P.evicted, P.failed,
+                "cache at %u of %u (%u vertices given out; %u lists new, %u rewritten); the GPU %.2f ms drawing "
+                "the last frame (%.2f ms for its command list)", P.textures.size(), kb, P.evicted, P.failed,
                 (u32)(linearSpaceFree() >> 10), (u32)(mallinfo().uordblks >> 10), __ctru_heap_size >> 10, P.vmax,
                 P.imax, P.draws, P.batches, P.setups, P.cached_draws, P.cached_vertices, P.built_vertices,
                 P.rebuilt_arrays, P.rebuilt_regs, P.drawn_twice, P.no_room, P.cache_next - IMM_VERTICES,
-                POOL_VERTICES - IMM_VERTICES);
+                POOL_VERTICES - IMM_VERTICES, P.cache_made, P.lists_new, P.lists_rewritten,
+                (double)C3D_GetDrawingTime(), (double)C3D_GetProcessingTime());
             P.vmax = P.imax = 0;
         }
     }
