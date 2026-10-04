@@ -13,7 +13,6 @@
 // have to be resampled the same texture memory as from_rgba of the decoded image, byte for byte.
 #pragma once
 #include <cstring>
-#include <vector>
 
 #include "runtime/hw/gx/gx.h"
 
@@ -23,11 +22,11 @@ enum Fmt : u8 { LA4, LA8, RGB565, RGBA5551, RGBA8 };
 
 inline u32 texel_bytes(Fmt f) { return f == LA4 ? 1 : f == RGBA8 ? 4 : 2; }
 
-// a texel's place: column part + row part (the row part of image row y, stored upside down)
+// a texel's place: column part + row part (the row part of image row y, stored upside down);
+// textures are at most 1024 x 1024
 struct Places {
-    std::vector<u32> col, row;
+    u32 col[1024], row[1024];
     void make(u32 W, u32 H) {
-        col.resize(W), row.resize(H);
         for (u32 x = 0; x < W; x++)
             col[x] = (x >> 3) * 64 + ((x & 1) | ((x & 2) << 1) | ((x & 4) << 2));
         for (u32 y = 0; y < H; y++) {
@@ -56,8 +55,7 @@ inline void put(u8* out, u32 i, u32 v) {
 inline void from_rgba(const u32* rgba, u32 w, u32 h, u8* out, u32 W, u32 H, Fmt fmt, bool repeat) {
     static Places pl;
     pl.make(W, H);
-    static std::vector<u32> col_src;
-    col_src.resize(W);
+    static u32 col_src[1024];
     for (u32 x = 0; x < W; x++)
         col_src[x] = repeat ? x * w / W : (x < w - 1 ? x : w - 1);
     auto rows = [&](auto store) {
