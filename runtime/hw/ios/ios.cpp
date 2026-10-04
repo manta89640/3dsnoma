@@ -4,7 +4,9 @@
 #include "ios.h"
 #include "../../load_stats.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -135,20 +137,87 @@ int s_io_state;  // 0: not started, 1: running, -1: none (reads are done at once
 void io_thread();
 }  // namespace
 
-// NOMA_READ_MBPS=N: reads take as long as at N MB/s (the 3DS's SD card on a fast host)
+// NOMA_READ_MBPS=N: reads take as long as at N MB/s, NOMA_READ_US=N: N microseconds more each (the
+// 3DS's SD card on a fast host: Azahar's model of it, from hardware, is about 5.5 MB/s and 520 us)
 size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n) {
     static int s_mbps = getenv("NOMA_READ_MBPS") ? atoi(getenv("NOMA_READ_MBPS")) : 0;
-    u64 t0 = s_mbps > 0 ? host_time_us() : 0;
+    static int s_us = getenv("NOMA_READ_US") ? atoi(getenv("NOMA_READ_US")) : 0;
+    u64 t0 = s_mbps > 0 || s_us > 0 ? host_time_us() : 0;
     size_t got = fseek(f, (long)off, SEEK_SET) == 0 ? fread(dst, 1, n, f) : 0;
-    if (s_mbps > 0) {
-        u64 until = t0 + (u64)n / (u64)s_mbps;  // (bytes / (MB/s) = microseconds)
+    if (t0) {
+        u64 until = t0 + (s_mbps > 0 ? (u64)n / (u64)s_mbps : 0) + (u64)s_us;  // (bytes / (MB/s) = us)
         if (host_time_us() < until)
             host_sleep_us(until - host_time_us());
     }
     return got;
 }
 
+// ---- small files read whole: CNT reads a compressed file's 32-byte header first (its size) and then
+// the file from its start; csv files come 32 bytes at a time. Each was an SD access (~0.5 ms of
+// latency in Azahar's hardware-derived model): when a small read begins a small file of an archive,
+// the whole file is read at once and what follows of it is copied from there. The archives' tables
+// come from the guest's own read of them (a content's first bytes). The I/O thread's alone.
 namespace {
+const u32 WHOLE_MAX = 32 << 10, WHOLE_ASK_MAX = 32;
+struct ArcEntry {
+    u32 off, size;
+};
+std::map<u32, std::vector<ArcEntry>> s_arc;  // content index -> its files by offset
+struct Whole {
+    u32 content = ~0u, off = 0, size = 0;
+    std::vector<u8> data;
+};
+Whole s_whole[4];
+u32 s_whole_next;
+
+void arc_note(u32 content, const u8* d, u32 n) {  // a content's first n bytes, read for the guest
+    auto be = [](const u8* p) { return (u32)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; };
+    if (n < 16 || be(d) != 0x55AA382D || s_arc.count(content))
+        return;
+    u32 root = be(d + 4), size = be(d + 8);
+    if ((u64)root + size > n || size < 12)
+        return;
+    const u8* t = d + root;
+    u32 count = be(t + 8);
+    if ((u64)count * 12 > size)
+        return;
+    std::vector<ArcEntry>& v = s_arc[content];
+    for (u32 i = 1; i < count; i++)
+        if (t[i * 12] == 0)
+            v.push_back({be(t + i * 12 + 4), be(t + i * 12 + 8)});
+    std::sort(v.begin(), v.end(), [](const ArcEntry& a, const ArcEntry& b) { return a.off < b.off; });
+}
+
+// a content read: from a file read whole (true), or the read itself that starts one
+bool whole_read(IoJob& j) {
+    for (Whole& w : s_whole)
+        if (w.content == j.tag && j.off >= w.off && j.off + j.n <= (u64)w.off + w.size) {
+            ::memcpy(j.dst, w.data.data() + (j.off - w.off), j.n);
+            j.result = (s32)j.n;
+            return true;
+        }
+    auto it = s_arc.find(j.tag);
+    if (j.n > WHOLE_ASK_MAX || it == s_arc.end())
+        return false;
+    const std::vector<ArcEntry>& v = it->second;
+    auto e = std::lower_bound(v.begin(), v.end(), j.off, [](const ArcEntry& a, u64 off) { return a.off < off; });
+    if (e == v.end() || e->off != j.off || e->size <= j.n || e->size > WHOLE_MAX)
+        return false;
+    // (to the archive's 32-byte alignment: CNT reads a file's size rounded up so)
+    u32 size = (e->size + 31) & ~31u;
+    Whole& w = s_whole[s_whole_next++ % 4];
+    w.data.resize(size);
+    u32 got = (u32)ios_read_at(j.f, e->off, w.data.data(), size);
+    if (got < j.n) {
+        w.content = ~0u;
+        return false;
+    }
+    w.content = j.tag, w.off = e->off, w.size = got;
+    ::memcpy(j.dst, w.data.data(), j.n);
+    j.result = (s32)j.n;
+    return true;
+}
+
 void io_thread() {
     for (;;) {
         u32 d = s_job_done.load(std::memory_order_relaxed);
@@ -160,7 +229,13 @@ void io_thread() {
         IoJob& j = s_jobs[d % IO_JOBS];
         if (g_lstats)
             j.start = host_time_us();
-        j.result = j.f ? (s32)ios_read_at(j.f, j.off, j.dst, j.n) : j.work();
+        if (!j.f) {
+            j.result = j.work();
+        } else if (!whole_read(j)) {
+            j.result = (s32)ios_read_at(j.f, j.off, j.dst, j.n);
+            if (j.off == 0 && j.result > 0)
+                arc_note(j.tag, j.dst, (u32)j.result);
+        }
         if (g_lstats) {
             j.end = host_time_us();
             // NOMA_LOAD_STATS_JOBS=1: each job of 5 ms or more (a line costs ~2 ms in Azahar, which

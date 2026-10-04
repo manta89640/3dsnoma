@@ -32,6 +32,15 @@ static void write_ticket_view(u32 addr) {
     memset_g(addr + 0x56, 0xFF, 0x40);  // content access permissions
 }
 
+// A content's file stays open when the channel closes it, for its next open (the start opens content
+// 2 three times; an open and a close were ~19 ms of SD access in Azahar): the files only ever read,
+// at given places. Touched by the I/O thread's jobs (or, with no I/O thread, the CPU's).
+struct Spare {
+    FILE* f;
+    u64 size;
+};
+static std::map<u32, Spare> s_spare;  // by content index
+
 class EsDevice : public IosHandle {
 public:
     std::map<u32, ContentHandle> contents;
@@ -50,6 +59,7 @@ public:
         char name[64];
         snprintf(name, sizeof(name), "/%08x.app", index);
         struct Opened {
+            u32 index;
             std::string path;
             FILE* f = nullptr;
             u64 size = 0;
@@ -57,8 +67,13 @@ public:
         };
         auto o = std::make_shared<Opened>();
         o->path = content_dir() + name;
+        o->index = index;
         auto work = [o] {
-            if ((o->f = fopen(o->path.c_str(), "rb"))) {
+            auto spare = s_spare.find(o->index);
+            if (spare != s_spare.end()) {
+                o->f = spare->second.f, o->size = spare->second.size;
+                s_spare.erase(spare);
+            } else if ((o->f = fopen(o->path.c_str(), "rb"))) {
                 fseek(o->f, 0, SEEK_END);
                 o->size = (u64)ftell(o->f);
                 rewind(o->f);
@@ -134,22 +149,26 @@ public:
             }
             return (s32)got;
         }
-        case 0x0B: {  // CloseContent: after the reads before it (the I/O thread's jobs run in order)
+        case 0x0B: {  // CloseContent: after the reads before it (the I/O thread's jobs run in order); the
+                      // file is kept for the next open
             auto it = contents.find(load32(in[0].addr));
             if (it == contents.end())
                 return ES_EINVAL;
-            FILE* f = it->second.f;
+            ContentHandle c = it->second;
             contents.erase(it);
-            if (ios_async_call(cur_request, [f] {
-                    fclose(f);
-                    return (s32)IOS_OK;
-                }, nullptr, "es close")) {
+            auto close = [c] {
+                if (s_spare.count(c.index))
+                    fclose(c.f);
+                else
+                    s_spare[c.index] = {c.f, c.size};
+                return (s32)IOS_OK;
+            };
+            if (ios_async_call(cur_request, close, nullptr, "es close")) {
                 pending = true;
                 return 0;
             }
             ios_async_drain();
-            fclose(f);
-            return IOS_OK;
+            return close();
         }
         case 0x23: {  // SeekContent: cfd, offset, whence
             auto it = contents.find(load32(in[0].addr));
