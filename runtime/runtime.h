@@ -55,6 +55,7 @@ u64 host_time_us();  // monotonic microseconds
 u64 host_timebase();  // the same clock in Wii timebase ticks (TB_HZ)
 void host_sleep_us(u64 us);
 void platform_present(u32 xfb);  // a vertical retrace: show the frame buffer at xfb (0: none)
+void platform_log_idle();  // (the I/O thread, every 100 ms at least) write out the log if it is due
 
 // ---- host threads beside the one that runs every guest thread
 // The GPU's own thread (runtime/hw/gx/fifo.cpp), on a core of its own where the platform has a

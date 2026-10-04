@@ -79,7 +79,8 @@ size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n);  // the read itself (eit
 // Any work for a request, on the I/O thread after the jobs before it; then finish(work's result) on
 // the CPU's thread gives the reply. False: there is no I/O thread (do it now). The work may read and
 // write guest memory (as a device's DMA would) but must not touch what the CPU's thread uses.
-bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish = nullptr);
+bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish = nullptr,
+                    const std::string& what = std::string());  // what: (NOMA_LOAD_STATS) for a slow job's line
 void ios_async_drain();  // wait for every job in flight and send its reply
 void ios_async_poll();   // (poll_devices) replies for the jobs done
 bool ios_async_busy();   // jobs not yet answered

@@ -75,17 +75,43 @@ static const char* DATA_DIR = "sdmc:/3ds/noma";
 static LightLock s_log_lock;  // (the GPU's thread logs too)
 __attribute__((constructor(102))) static void init_log_lock() { LightLock_Init(&s_log_lock); }
 
+// noma.log is buffered (16 KB) and written at most every LOG_FLUSH_TICKS: a write per line was an SD
+// card access on the CPU's thread for each of the ~400 lines of a start. The I/O thread, which
+// wakes every 100 ms, writes what a stopped program left (platform_log_idle); a fatal error, a
+// crash and quitting write it at once.
+static const u64 LOG_FLUSH_TICKS = SYSCLOCK_ARM11 / 2;
+static u64 s_log_flushed;  // (ticks)
+static bool s_log_dirty;
+
+static void log_flush_due(u64 now) {  // (with s_log_lock)
+    if (s_log && s_log_dirty && now - s_log_flushed >= LOG_FLUSH_TICKS) {
+        fflush(s_log);
+        s_log_dirty = false;
+        s_log_flushed = now;
+    }
+}
+
+void platform_log_idle() {
+    if (!s_log_dirty)
+        return;
+    LightLock_Lock(&s_log_lock);
+    log_flush_due(svcGetSystemTick());
+    LightLock_Unlock(&s_log_lock);
+}
+
 void log(const char* fmt, ...) {
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    double t = (double)(svcGetSystemTick() - s_tick0) / SYSCLOCK_ARM11;
+    u64 now = svcGetSystemTick();
+    double t = (double)(now - s_tick0) / SYSCLOCK_ARM11;
     LightLock_Lock(&s_log_lock);
     if (s_log) {
         fprintf(s_log, "[%8.3f] %s\n", t, buf);
-        fflush(s_log);
+        s_log_dirty = true;
+        log_flush_due(now);
     }
     svcOutputDebugString(buf, (s32)strlen(buf));  // emulators show it in their log
     printf("%.79s\n", buf);
@@ -564,6 +590,8 @@ int main(int argc, char** argv) {
     guest::s_tick0 = svcGetSystemTick();
     std::string data = guest::DATA_DIR;
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");
+    if (guest::s_log)
+        setvbuf(guest::s_log, nullptr, _IOFBF, 16 << 10);
     printf("Wii no Ma 3DS\n");
     std::vector<u8> dol = read_file(data + "/main.dol");
     if (dol.empty()) {

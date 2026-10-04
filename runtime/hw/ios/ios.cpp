@@ -123,6 +123,7 @@ struct IoJob {
     // before the reply (which gets what `finish` returns)
     std::function<s32()> work;
     std::function<s32(s32)> finish;
+    std::string what;  // (NOMA_LOAD_STATS) what it is, for a slow job's line
 };
 const u32 IO_JOBS = 64;
 IoJob s_jobs[IO_JOBS];
@@ -153,14 +154,22 @@ void io_thread() {
         u32 d = s_job_done.load(std::memory_order_relaxed);
         if (d == s_job_put.load(std::memory_order_acquire)) {
             platform_wait(s_io_wake, 100000);
+            platform_log_idle();
             continue;
         }
         IoJob& j = s_jobs[d % IO_JOBS];
         if (g_lstats)
             j.start = host_time_us();
         j.result = j.f ? (s32)ios_read_at(j.f, j.off, j.dst, j.n) : j.work();
-        if (g_lstats)
+        if (g_lstats) {
             j.end = host_time_us();
+            // NOMA_LOAD_STATS_JOBS=1: each job of 5 ms or more (a line costs ~2 ms in Azahar, which
+            // the I/O thread takes from the guest's: they share a core)
+            static bool s_jobs_log = getenv("NOMA_LOAD_STATS_JOBS") != nullptr;
+            if (s_jobs_log && j.end - j.start >= 5000)
+                log("lstats: io job %s took %.1f ms", j.f ? "(content read)" : j.what.c_str(),
+                    (j.end - j.start) / 1000.0);
+        }
         s_job_done.store(d + 1, std::memory_order_release);
         platform_signal(s_io_done);
     }
@@ -200,13 +209,15 @@ bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n, u32 tag
     return true;
 }
 
-bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish) {
+bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish,
+                    const std::string& what) {
     if (!io_thread_up())
         return false;
     IoJob& j = next_job();
     j.f = nullptr, j.off = 0, j.dst = nullptr, j.n = 0, j.request = request_phys, j.result = 0, j.tag = 0;
     j.queued = g_lstats ? host_time_us() : 0;
     j.work = std::move(work), j.finish = std::move(finish);
+    j.what = g_lstats ? what : std::string();
     queue_job();
     return true;
 }
@@ -327,7 +338,7 @@ void ios_execute(u32 request_phys) {
             if (ios_async_call(request_phys, [o, path, mode] {
                     o->h = fs_open_file(path, mode, &o->err);
                     return 0;
-                }, [o, path, mode](s32) { return opened(path, mode, std::move(o->h), o->err); }))
+                }, [o, path, mode](s32) { return opened(path, mode, std::move(o->h), o->err); }, slow.what))
                 return;
         }
         s32 err;
@@ -368,7 +379,7 @@ void ios_execute(u32 request_phys) {
                 if (s_debug && cmd >= 3)
                     log("ios: %s: cmd %u (%08X %08X %08X) -> %d", name.c_str(), cmd, args[0], args[1], args[2], r);
                 return r;
-            }))
+            }, slow.what))
             return;
         if (cmd == 2) {  // (no I/O thread: the handle went with the job, freed unrun; their close() is IOS_OK)
             reply(req, IOS_OK);

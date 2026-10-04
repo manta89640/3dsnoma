@@ -37,6 +37,8 @@ void hw_init();
 static FILE* s_log;
 static auto s_t0 = std::chrono::steady_clock::now();
 
+void platform_log_idle() {}  // (every line is written at once)
+
 void log(const char* fmt, ...) {
     char buf[2048];
     va_list ap;

@@ -1,10 +1,12 @@
 // Frame-time spikes and what loading did in them (NOMA_LOAD_STATS=ms): every game frame's time,
 // and for each frame longer than ms, what happened during it: the guest threads' CPU time, the
-// content reads (bytes, files, how long the guest waited), CX decompression, NAND reads, heap
-// allocations and the GPU thread's texture uploads. A summary every NOMA_LOAD_STATS_EVERY seconds
-// (default 10) gives the frame-time distribution, and a line per loading burst (reads with less
-// than a second between them) its time, bytes and decompression. NOMA_LOAD_STATS_READS=1 also logs
-// every content read.
+// content reads (bytes, files, how long the guest waited), CX decompression, the file system's
+// jobs, heap allocations and the GPU thread's texture uploads; in profile builds, that frame's own
+// top functions. A summary every NOMA_LOAD_STATS_EVERY seconds (default 10) gives the frame-time
+// distribution, and a line per loading burst (reads with less than a second between them) its
+// time, bytes and decompression. NOMA_LOAD_STATS_READS=1 also logs every content read,
+// NOMA_LOAD_STATS_JOBS=1 every I/O job of 5 ms or more. In Azahar a log line costs ~2 ms
+// (svcOutputDebugString): the lines of a slow frame are written after it, into the next.
 #pragma once
 
 #include "guest.h"

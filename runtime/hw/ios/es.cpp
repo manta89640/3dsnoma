@@ -77,7 +77,7 @@ public:
             log("es: open content %u -> cfd %u", index, cfd);
             return (s32)cfd;
         };
-        if (ios_async_call(cur_request, work, finish)) {
+        if (ios_async_call(cur_request, work, finish, g_lstats ? "es open " + o->path : std::string())) {
             pending = true;
             return 0;
         }
@@ -143,7 +143,7 @@ public:
             if (ios_async_call(cur_request, [f] {
                     fclose(f);
                     return (s32)IOS_OK;
-                })) {
+                }, nullptr, "es close")) {
                 pending = true;
                 return 0;
             }

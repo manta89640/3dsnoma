@@ -256,24 +256,28 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
         return h;
     }
     std::string host = nand_host_path(path);
-    struct stat st;  // (one stat: on the 3DS each is an SD card access)
-    if (stat(host.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) {
-        *err = FS_ENOENT;
-        return nullptr;
-    }
-    auto h = std::make_unique<FsFile>();
-    h->mode = mode;
-    h->host = host;
     for (FsFile* o : s_open_files)  // what other handles wrote is in the file for this one
         if (o->dirty && o->host == host) {
             fflush(o->f);
             o->dirty = false;
         }
-    h->f = fopen(host.c_str(), (mode & 2) ? "r+b" : "rb");
-    if (!h->f) {
-        *err = FS_EACCESS;
+    // opened first, measured through the open file: on the 3DS a stat is an SD card access of its
+    // own (it opens the file too); only a failure is looked at again, for its reason
+    FILE* f = fopen(host.c_str(), (mode & 2) ? "r+b" : "rb");
+    struct stat st;
+    if (f && (fstat(fileno(f), &st) != 0 || S_ISDIR(st.st_mode))) {
+        fclose(f);
+        *err = FS_ENOENT;
         return nullptr;
     }
+    if (!f) {
+        *err = stat(host.c_str(), &st) == 0 && !S_ISDIR(st.st_mode) ? FS_EACCESS : FS_ENOENT;
+        return nullptr;
+    }
+    auto h = std::make_unique<FsFile>();
+    h->mode = mode;
+    h->host = host;
+    h->f = f;
     setvbuf(h->f, nullptr, _IOFBF, (mode & 2) ? 64 * 1024 : 4 * 1024);
     h->size = (long)st.st_size;
     s_open_files.push_back(h.get());
