@@ -311,6 +311,32 @@ u64 load_pos_mtx_imm(u32 mtx, u32 id) {
     return (u64)0xCC008000u << 32 | mtx;  // r3: the matrix, r4: the pipe (as the original leaves them)
 }
 
+// GXBegin's flush of a primitive after BP writes (bpSentNot = 0): a dummy draw of vnum * vlim zero
+// bytes, as words, in triangle strips of format 0
+void begin_flush(const Data& d) {
+    const u32 n = d.h(D_VNUM) * d.h(D_VLIM);
+    Pipe p;
+    p.byte(0x98);
+    guest::gather_put<2>(d.h(D_VNUM));
+    const u32 words = n ? (n + 3) >> 2 : 0;
+    for (u32 i = 0; i < words; i++)
+        p.word(0);
+    if (words && (guest::g_loop_budget -= (s32)(words / 8 + 1)) < 0)
+        guest::loop_poll();
+    d.set_h(D_BP_SENT_NOT, 1);
+}
+
+// a __GXData word at an offset that may lie anywhere (an index the original doesn't check)
+inline u32 any_w(const Data& d, u64 off) {
+    return off + 4 <= 0x600 ? d.w((u32)off) : guest::load32(d.a + (u32)off);
+}
+inline void any_set_w(const Data& d, u64 off, u32 v) {
+    if (off + 4 <= 0x600)
+        d.set_w((u32)off, v);
+    else
+        guest::store32(d.a + (u32)off, v);
+}
+
 }  // namespace engine::gx
 
 // ---- the guest ABI (decl.h)
@@ -436,6 +462,154 @@ u32 GXLoadTexObjPreLoaded(u32 obj, u32 region, u32 map) {
     d.set_w(D_DIRTY_STATE, dirty);
     d.set_h(D_BP_SENT_NOT, 0);
     return dirty;
+}
+
+// GXBegin(type, vtxfmt, nverts)
+u32 GXBegin(u32 type, u32 fmt, u32 n) {
+    const Data d = gxdata();
+    if (d.w(D_DIRTY_STATE))
+        set_dirty_state();
+    if (d.w(0) == 0)
+        begin_flush(d);
+    guest::gather_put<1>((fmt | type) & 0xFF);
+    guest::gather_put<2>(n & 0xFFFF);
+    return 0xCC010000u;
+}
+
+// GXSetArray(attr, base, stride): the CP array registers
+void GXSetArray(u32 attr, u32 base, u32 stride) {
+    const u32 a = (attr == 0x19 ? 0xA : attr) - 9;
+    Pipe p;
+    p.cp((a | 0xA0) & 0xFF, base & 0x3FFFFFFF);
+    p.cp((a | 0xB0) & 0xFF, stride);
+}
+
+// GXLoadTexObj(obj, map): the texture's region from the game's callback, then preloaded
+u32 GXLoadTexObj(u32 obj, u32 map) {
+    const Data d = gxdata();
+    return GXLoadTexObjPreLoaded(obj, gcall<u32>(guest::load32(d.a + 0x518), obj, map, d.a), map);
+}
+
+// GXSetCurrentMtx(id)
+void GXSetCurrentMtx(u32 id) {
+    const Data d = gxdata();
+    d.set_w(D_MATIDX_A, (d.w(D_MATIDX_A) & ~0x3Fu) | (id & 0x3F));
+    d.set_w(D_DIRTY_STATE, d.w(D_DIRTY_STATE) | 0x04000000);
+}
+
+// GXCallDisplayList(list, size)
+u32 GXCallDisplayList(u32 list, u32 size) {
+    const Data d = gxdata();
+    if (d.w(D_DIRTY_STATE))
+        set_dirty_state();
+    if (d.w(0) == 0)
+        __GXSendFlushPrim();
+    Pipe p;
+    p.byte(0x40), p.word(list), p.word(size);
+    return 0xCC010000u;
+}
+
+// GXLoadLightObjImm(obj, light): a light's 16 XF words (3 zeros, its color, 12 floats)
+void GXLoadLightObjImm(u32 obj, u32 light, u32, u32) {
+    Pipe p;
+    p.byte(0x10);
+    p.word((((0x1F - clz32(light)) * 0x10) & 0x70) + 0x600 | 0xF0000);
+    p.word(0), p.word(0), p.word(0);
+    p.word(guest::load32(obj + 0xC));
+    for (u32 i = 0; i < 12; i++)
+        p.word(guest::load32(obj + 0x10 + 4 * i));
+    gxdata().set_h(D_BP_SENT_NOT, 1);
+}
+
+// GXLoadNrmMtxImm(mtx, id): a normal matrix's 3x3 part
+void GXLoadNrmMtxImm(u32 mtx, u32 id) {
+    Pipe p;
+    p.byte(0x10);
+    p.word((id * 3 + 0x400) | 0x80000);
+    for (u32 r = 0; r < 3; r++)
+        for (u32 c = 0; c < 3; c++)
+            p.word(guest::load32(mtx + r * 0x10 + c * 4));
+}
+
+// GXSetVtxDesc(attr, type): r3 and r4 as the original leaves them
+u64 GXSetVtxDesc(u32 attr, u32 type) {
+    const Data d = gxdata();
+    u32 r3 = d.a;
+    auto lo = [&](u32 shift, u32 mask) { d.set_w(D_VCD_LO, (d.w(D_VCD_LO) & ~mask) | ((type << shift) & mask)); };
+    auto hi = [&](u32 shift, u32 mask) { d.set_w(D_VCD_HI, (d.w(D_VCD_HI) & ~mask) | ((type << shift) & mask)); };
+    switch (attr) {
+    case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: lo(attr, 1u << attr); break;
+    case 9: lo(9, 0x600); break;
+    case 10:
+    case 25:
+        if (type != 0) {
+            r3 = 1;
+            d.set_b(attr == 10 ? D_HAS_NBTS : D_HAS_BI_NRMS, 1);
+            d.set_b(attr == 10 ? D_HAS_BI_NRMS : D_HAS_NBTS, 0);
+            d.set_w(0x520, type);
+        } else {
+            d.set_b(attr == 10 ? D_HAS_NBTS : D_HAS_BI_NRMS, 0);
+        }
+        break;
+    case 11: lo(13, 0x6000); break;
+    case 12: lo(15, 0x18000); break;
+    case 13: case 14: case 15: case 16: case 17: case 18: case 19: case 20: hi((attr - 13) * 2, 3u << ((attr - 13) * 2)); break;
+    default: r3 = attr; break;
+    }
+    if (d.b(D_HAS_NBTS) || d.b(D_HAS_BI_NRMS)) {
+        r3 = (d.w(D_VCD_LO) & ~0x1800u) | ((d.w(0x520) << 11) & 0x1800);
+        d.set_w(D_VCD_LO, r3);
+    } else {
+        d.set_w(D_VCD_LO, d.w(D_VCD_LO) & 0xFFFFE7FF);
+    }
+    d.set_w(D_DIRTY_STATE, d.w(D_DIRTY_STATE) | 8);
+    return NOMA_U64(r3, d.a);
+}
+
+void GXClearVtxDesc() {
+    const Data d = gxdata();
+    d.set_w(D_VCD_LO, 0x200);
+    d.set_w(D_VCD_HI, 0);
+    d.set_b(D_HAS_NBTS, 0);
+    d.set_b(D_HAS_BI_NRMS, 0);
+    d.set_w(D_DIRTY_STATE, d.w(D_DIRTY_STATE) | 8);
+}
+
+// GXSetVtxAttrFmt(vtxfmt, attr, cnt, type, frac): r3 and r4 as the original leaves them
+u64 GXSetVtxAttrFmt(u32 vf, u32 attr, u32 cnt, u32 type, u32 frac) {
+    const Data d = gxdata();
+    const u64 a = D_VAT_A + (u64)vf * 4, b = a + 0x20, c = a + 0x40;
+    auto set = [&](u64 off, u32 mask, u32 v) { any_set_w(d, off, (any_w(d, off) & ~mask) | (v & mask)); };
+    switch (attr) {
+    case 9: set(a, 0x1FF, (cnt & 1) | ((type << 1) & 0xE) | ((frac << 4) & 0x1F0)); break;
+    case 10:
+    case 25:
+        set(a, 0x1C00, type << 10);
+        if (cnt == 2)
+            any_set_w(d, a, any_w(d, a) | 0x200 | 0x80000000);
+        else
+            any_set_w(d, a, ((any_w(d, a) & ~0x200u) | ((cnt << 9) & 0x200)) & 0x7FFFFFFF);
+        break;
+    case 11: set(a, 0x1E000, ((cnt << 13) & 0x2000) | ((type << 14) & 0x1C000)); break;
+    case 12: set(a, 0x1E0000, ((cnt << 17) & 0x20000) | ((type << 18) & 0x1C0000)); break;
+    case 13: set(a, 0x3FE00000, ((cnt << 21) & 0x200000) | ((type << 22) & 0x1C00000) | ((frac << 25) & 0x3E000000)); break;
+    case 14: set(b, 0x1FF, (cnt & 1) | ((type << 1) & 0xE) | ((frac << 4) & 0x1F0)); break;
+    case 15: set(b, 0x3FE00, ((cnt << 9) & 0x200) | ((type << 10) & 0x1C00) | ((frac << 13) & 0x3E000)); break;
+    case 16: set(b, 0x7FC0000, ((cnt << 18) & 0x40000) | ((type << 19) & 0x380000) | ((frac << 22) & 0x7C00000)); break;
+    case 17:
+        set(b, 0x78000000, ((cnt << 27) & 0x8000000) | ((type << 28) & 0x70000000));
+        set(c, 0x1F, frac);
+        break;
+    case 18: set(c, 0x3FE0, ((cnt << 5) & 0x20) | ((type << 6) & 0x1C0) | ((frac << 9) & 0x3E00)); break;
+    case 19: set(c, 0x7FC000, ((cnt << 14) & 0x4000) | ((type << 15) & 0x38000) | ((frac << 18) & 0x7C0000)); break;
+    case 20: set(c, 0xFF800000, ((cnt << 23) & 0x800000) | ((type << 24) & 0x7000000) | (frac << 27)); break;
+    }
+    const u32 dirty = d.w(D_DIRTY_STATE);
+    d.set_w(D_DIRTY_STATE, dirty | 0x10);
+    const u32 vats = d.b(D_DIRTY_VAT);
+    const u32 sh = vf & 0xFF & 0x3F;  // (slw: the low 6 bits of the count; 32 to 63 give 0)
+    d.set_b(D_DIRTY_VAT, vats | (u8)(sh < 32 ? 1u << sh : 0));
+    return NOMA_U64(vats, dirty);
 }
 
 }  // namespace g

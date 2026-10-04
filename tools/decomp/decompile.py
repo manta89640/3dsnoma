@@ -121,10 +121,6 @@ NATIVE_NAMES = {
     # the search for the heap that holds an address (every free)
     "wii_Thread_GetUnusedStackSize", "lib_allocator_Fill",
     "lib_allocator_HeapBase_FindContainHeap",
-    # engine/gx: the GX library's hottest calls (gx_sdk.cpp; armbench.py --gxsdk compares them)
-    "__GXSetDirtyState", "__GXSetSUTexRegs", "__SetSURegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
-    "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
-    "GXLoadTexObjPreLoaded",
     # engine/input: the Wii Remote is the 3DS's controls; WPAD's Bluetooth stack never starts (remote.cpp)
     "KPADInitEx", "KPADReadEx", "KPADSetPosParam", "KPADSetConnectCallback", "WPADRegisterAllocator",
     "WPADProbe", "WPADDisconnect", "WPADControlMotor", "WPADIsSpeakerEnabled", "WPADSendStreamData",
@@ -172,6 +168,12 @@ PATCHED_NAMES = {
     # engine/lyt/quad.cpp: nw4r::lyt's quads, native; the decompiled ones stay as *_orig for
     # tools/armbench/armbench.py --lyt to compare against
     "nw4r_lyt_detail_DrawQuad", "nw4r_lyt_detail_DrawQuad_Alpha", "nw4r_lyt_Material_SetupGX",
+    # engine/gx/gx_sdk.cpp: the GX library's hottest calls, native (armbench.py --gxsdk compares them
+    # with the decompiled *_orig on random states)
+    "__GXSetDirtyState", "__GXSetSUTexRegs", "__SetSURegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
+    "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
+    "GXLoadTexObjPreLoaded", "GXBegin", "GXSetArray", "GXLoadTexObj", "GXSetCurrentMtx", "GXCallDisplayList",
+    "GXLoadLightObjImm", "GXLoadNrmMtxImm", "GXSetVtxDesc", "GXClearVtxDesc", "GXSetVtxAttrFmt",
     # the channel's heaps: allocations that fail are logged (runtime/patches/heap.cpp)
     "lib_allocator_HeapBase_AllocFromCurrent",
     # GXLoadPosMtxImm: NOMA_DEBUG_GX_NAN reports matrices holding NaNs (runtime/patches/debug.cpp)

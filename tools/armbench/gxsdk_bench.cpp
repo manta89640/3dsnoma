@@ -64,6 +64,16 @@ void dec_GXSetTevKColor(u32, u32);
 u32 dec_GXSetTevSwapModeTable(u32, u32, u32, u32, u32);
 void dec_GXLoadTexMtxImm(u32, u32, u32);
 u32 dec_GXLoadTexObjPreLoaded(u32, u32, u32);
+u32 dec_GXBegin(u32, u32, u32);
+void dec_GXSetArray(u32, u32, u32);
+u32 dec_GXLoadTexObj(u32, u32);
+void dec_GXSetCurrentMtx(u32);
+u32 dec_GXCallDisplayList(u32, u32);
+void dec_GXLoadLightObjImm(u32, u32, u32, u32);
+void dec_GXLoadNrmMtxImm(u32, u32);
+u64 dec_GXSetVtxDesc(u32, u32);
+void dec_GXClearVtxDesc();
+u64 dec_GXSetVtxAttrFmt(u32, u32, u32, u32, u32);
 }  // namespace g
 
 using namespace guest;
@@ -126,6 +136,36 @@ void call(u32 fn, u32 native, u32 a, u32 b, u32 c, u32 d, u32* r) {
     case 10:
         *r = native ? g::GXLoadTexObjPreLoaded(OBJ, REGION, a & 7) : g::dec_GXLoadTexObjPreLoaded(OBJ, REGION, a & 7);
         break;
+    case 11:
+        if (a & 1) {  // (the flush of a primitive after BP writes, a short one)
+            store32(GXDATA, 0);
+            store16(GXDATA + 4, (u16)(b & 15)), store16(GXDATA + 6, (u16)(c & 15));
+        }
+        *r = native ? g::GXBegin((a >> 4) & 0xF8, b & 7, c & 0xFFFF) : g::dec_GXBegin((a >> 4) & 0xF8, b & 7, c & 0xFFFF);
+        break;
+    case 12: native ? g::GXSetArray(9 + a % 17, b, c) : g::dec_GXSetArray(9 + a % 17, b, c); break;
+    case 13: *r = native ? g::GXLoadTexObj(OBJ, a & 7) : g::dec_GXLoadTexObj(OBJ, a & 7); break;
+    case 14: native ? g::GXSetCurrentMtx(a) : g::dec_GXSetCurrentMtx(a); break;
+    case 15:
+        if (a & 1)
+            store32(GXDATA, 0);
+        *r = native ? g::GXCallDisplayList(b, c) : g::dec_GXCallDisplayList(b, c);
+        break;
+    case 16: native ? g::GXLoadLightObjImm(OBJ, b, 0, 0) : g::dec_GXLoadLightObjImm(OBJ, b, 0, 0); break;
+    case 17: native ? g::GXLoadNrmMtxImm(OBJ, a % 40) : g::dec_GXLoadNrmMtxImm(OBJ, a % 40); break;
+    case 18: {
+        u64 v = native ? g::GXSetVtxDesc(a % 28, b & 3) : g::dec_GXSetVtxDesc(a % 28, b & 3);
+        *r = (u32)v ^ (u32)(v >> 32) * 31;
+        break;
+    }
+    case 19: native ? g::GXClearVtxDesc() : g::dec_GXClearVtxDesc(); break;
+    case 20: {
+        u32 vf = (a & 0x100) ? a >> 9 : a & 7;  // (a format past the tables now and then)
+        u64 v = native ? g::GXSetVtxAttrFmt(vf & 0xFF, b % 27, c & 3, d & 7, (d >> 4) & 31)
+                       : g::dec_GXSetVtxAttrFmt(vf & 0xFF, b % 27, c & 3, d & 7, (d >> 4) & 31);
+        *r = (u32)v ^ (u32)(v >> 32) * 31;
+        break;
+    }
     }
 }
 

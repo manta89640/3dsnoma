@@ -325,7 +325,8 @@ def bench_gx(funcs_kind=None, draws=64, flush_every=7):
 # --gxsdk: engine/gx/gx_sdk.cpp's natives against the decompiled functions they replace
 GXSDK_FUNCS = ["__GXSetDirtyState", "__GXSetSUTexRegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
                "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
-               "GXLoadTexObjPreLoaded"]
+               "GXLoadTexObjPreLoaded", "GXBegin", "GXSetArray", "GXLoadTexObj", "GXSetCurrentMtx", "GXCallDisplayList",
+               "GXLoadLightObjImm", "GXLoadNrmMtxImm", "GXSetVtxDesc", "GXClearVtxDesc", "GXSetVtxAttrFmt"]
 # natives the benched ones call, compared through them
 GXSDK_CALLED = ["__SetSURegs"]
 DECOMP_FLAGS = ["-O1", "-w", "-fno-strict-aliasing", "-fwrapv", "-ftrivial-auto-var-init=zero"]
@@ -341,11 +342,13 @@ def decompiled_functions(names, natives):
         if fn.endswith(".cpp"):
             texts[fn] = open(os.path.join(src_dir, fn), errors="replace").read()
     def find(name):
-        pat = re.compile(r"^[A-Za-z_][\w<> ]* " + re.escape(name) + r"\(.*?^}\n", re.S | re.M)
-        for t in texts.values():
-            m = pat.search(t)
-            if m:
-                return m.group(0)
+        # (a patched function's decompiled body is <name>_orig: taken under its own name)
+        for n in (name, name + "_orig"):
+            pat = re.compile(r"^[A-Za-z_][\w<> ]* " + re.escape(n) + r"\(.*?^}\n", re.S | re.M)
+            for t in texts.values():
+                m = pat.search(t)
+                if m:
+                    return m.group(0).replace(" %s(" % n, " %s(" % name, 1)
         return None
     decl = open(os.path.join(ROOT, "build/decomp/include/decl.h")).read()
     known = set(re.findall(r"^[\w<> ]+? (\w+)\(", decl, re.M))
