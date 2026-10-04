@@ -245,9 +245,9 @@ def bench_snd(counts):
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out, ("tools/armbench/snd_bench.cpp", "engine/snd/voice.cpp", "engine/snd/ax_voice.cpp",
                                 "engine/snd/tables.cpp"), ("snd",)), ("snd",))
-        for n in counts:
-            ins = (m.instructions("snd", n, 8, 0) - m.instructions("snd", n, 0, 0)) / 8
-            cyc = (m.cycles("snd", n, 4, 0) - m.cycles("snd", n, 0, 0)) / 4
+        for n in counts:  # (frames 4 to 12: the mixes have reached their targets, as in the game)
+            ins = (m.instructions("snd", n, 12, 0) - m.instructions("snd", n, 4, 0)) / 8
+            cyc = (m.cycles("snd", n, 12, 0) - m.cycles("snd", n, 4, 0)) / 8
             print("%3d voices: %7.0f ARM instructions, %7.0f estimated ARM11 cycles a frame (%.0f a voice); "
                   "state hash %08X" % (n, ins, cyc, cyc / n, m.call("snd", n, 6, 1)), flush=True)
 

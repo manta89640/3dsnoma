@@ -185,11 +185,19 @@ bool ax_set_mix(GuestObj ax, const MixParam& mix) {
     u32 ctrl = 0;
     u8* pbm = pb.p + PB_MIX;
     if (!changed) {  // (as a rule: at the targets, no steps, and the volumes reached stay)
+        u32 words[12];   // the (volume, 0) pairs in AXPBMIX order, as guest memory holds them
+#pragma GCC unroll 12
         for (int k = 0; k < 12; k++) {
             u32 i = kMixToAx[k];
-            store_pair(pbm + 4 * i, cur[k], 0);
+            words[i] = __builtin_bswap16(cur[k]);
             if (cur[k])
                 ctrl |= kMixerCtrlBits[2 * i];
+        }
+        if (((uintptr_t)pbm & 3) == 0) {
+            memcpy(pbm, words, sizeof(words));
+        } else {
+            for (int i = 0; i < 12; i++)
+                memcpy(pbm + 4 * i, words + i, 2), memset(pbm + 4 * i + 2, 0, 2);
         }
         pb.set32(PB_MIXER_CTRL, ctrl);
         ax.or32(AXV_SYNC, 0x12);
