@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 
+#include "engine/wuhu/music.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
@@ -21,6 +22,10 @@ namespace engine::soundplayer {
 namespace {
 
 enum : u8 { SOUND_SEQ = 1 };
+
+// 「広い世界へ」, the island's music, is the port's own (engine/wuhu/music.cpp): no sound of the
+// archive, it plays for its own sound ID. It is listed under its sequence's own label.
+const char ISLAND_LABEL[] = "SEQ_BGM_HIROI_SEKAI";
 
 // The channel's labels in words, in the list's order: the room's own music first, then the other
 // rooms and screens, the seasonal slideshows, the shop; the jingles last.
@@ -55,6 +60,8 @@ const Named NAMES[] = {
     {"SEQ_BGM_COMPANY_H", u"企業の間 H", false},
     {"SEQ_BGM_VOTE", u"みんなで投票", false},
     {"SEQ_BGM_DSI_DELIVERY_NEW", u"DSi配信", false},
+    // the island (出発): the port's own piece, not in the archive (see read_catalog)
+    {ISLAND_LABEL, u"広い世界へ", false},
     // the calendar's seasonal slideshows (歳時記), in the order the slideshow numbers them
     {"SEQ_BGM_SAIZIKI_A", u"歳時記 1", false},
     {"SEQ_BGM_SAIZIKI_B", u"歳時記 2", false},
@@ -153,6 +160,7 @@ std::vector<Track> read_catalog() {
             continue;
         by_label[text] = {id, music};
     }
+    by_label[ISLAND_LABEL] = {engine::wuhu::WIDE_WORLD_ID, true};
 
     for (const Named& n : NAMES) {
         auto it = by_label.find(n.label);

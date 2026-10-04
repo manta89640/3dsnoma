@@ -108,7 +108,7 @@ set(ENGINE_SOURCES
   engine/wuhu/bar_button.cpp
   engine/wuhu/content_placeholder.cpp
   engine/wuhu/follow_camera.cpp
-  engine/wuhu/music_stub.cpp
+  engine/wuhu/music.cpp
   engine/wuhu/player.cpp
   engine/wuhu/scene.cpp
 )
