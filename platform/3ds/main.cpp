@@ -141,6 +141,7 @@ static void audio_init() {
     ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
     float mix[12] = {1.0f, 1.0f};
     ndspChnSetMix(0, mix);
+    ndspChnSetPaused(0, true);  // (until the first buffers are queued)
     s16* data = (s16*)linearAlloc(AUDIO_BUFS * AUDIO_FRAMES * 4);
     if (!data) {
         ndspExit();
@@ -164,10 +165,12 @@ static int audio_queued() {
     return n;
 }
 
-// The AI DMA's frames, to the DSP in 24 ms buffers. Playing starts once AUDIO_PREBUFFER of them
-// are queued, and when the DSP ran out (the CPU fell behind for longer than that) it pauses until
-// the queue has filled again: one short pause instead of a gap at every buffer.
-static const int AUDIO_PREBUFFER = 3;
+// The AI DMA's frames, to the DSP in 24 ms buffers. Playing starts once s_prebuffer of them are
+// queued, and when the DSP ran out (the CPU fell behind for longer than that) it pauses until the
+// queue has filled again: one short pause instead of a gap at every buffer. Each time it runs out
+// the queue it waits for grows by a buffer (up to 6, 144 ms): a game that keeps falling behind by a
+// little gets a little more latency instead of a crackle every few frames.
+static int s_prebuffer = 3;
 void platform_audio_push(const s16* lr, u32 frames) {
     while (s_audio && frames) {
         ndspWaveBuf& wb = s_wbuf[s_wcur];
@@ -178,11 +181,15 @@ void platform_audio_push(const s16* lr, u32 frames) {
         s_wfill += n, lr += 2 * n, frames -= n;
         if (s_wfill == AUDIO_FRAMES) {
             int queued = audio_queued();
-            if (queued == 0)
+            if (queued == 0 && !ndspChnIsPaused(0)) {  // ran out while playing
                 ndspChnSetPaused(0, true);
+                if (s_prebuffer < AUDIO_BUFS - 2)
+                    log("audio: the DSP ran out; %d buffers (%d ms) before playing again", ++s_prebuffer,
+                        s_prebuffer * 24);
+            }
             DSP_FlushDataCache(wb.data_vaddr, AUDIO_FRAMES * 4);
             ndspChnWaveBufAdd(0, &wb);
-            if (queued + 1 >= AUDIO_PREBUFFER && ndspChnIsPaused(0))
+            if (queued + 1 >= s_prebuffer && ndspChnIsPaused(0))
                 ndspChnSetPaused(0, false);
             s_wcur = (s_wcur + 1) % AUDIO_BUFS;
             s_wfill = 0;
