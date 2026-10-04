@@ -299,14 +299,153 @@ namespace {
 // root, the leaf they reach (its symbol and length) or the node after all of them. Built for the
 // tree a context holds (once it has passed CXiVerifyHuffmanTable), and kept while the context
 // holds the same tree: the glyph sheets of a font come in pieces, each sheet with its own tree.
+// Besides, for the same bits, the whole symbols they hold (up to an output word's worth): the glyph
+// sheets' codes are about 2 bits long, so a lookup gives 4 symbols where it gave one.
 const u32 HUFF_LUT_BITS = 10;
+const u32 HUFF_RUN_MIN = 6;  // a run taken at once from this many symbols
 enum : u32 { HUFF_LEAF = 0x100 };  // an entry: symbol or node (offset in the context) << 16, leaf, bits
 struct HuffLut {
     u32 ctx;
+    u8 bit_size;
     u8 tree[0x200];  // the tree it was made from: the size byte, then the nodes
     u32 entry[1u << HUFF_LUT_BITS];
+    // the symbols in the bits (the first in the low bits, bit_size bits each) in the low word; in the
+    // high word, the bits they take, and the output bits they make << 8 (no symbol: the bits 0xFF);
+    // bit 31: the bits begin with HUFF_RUN_MIN codes of a single bit (a run, see huff_groups)
+    u64 group[1u << HUFF_LUT_BITS];
+    u32 run_flip;  // a run's bit (0: 0, ~0: 1)
+    u32 run_word;  // the symbol of the 1-bit code in every place of an output word
 };
-HuffLut s_lut;
+HuffLut s_lut __attribute__((aligned(8)));
+
+// the groups, from the single symbols: each code that ends inside the bits looked up
+void group_fill(u32 bit_size) {
+    const u32 mask = (1u << HUFF_LUT_BITS) - 1, max_symbols = 32 / bit_size;
+    for (u32 i = 0; i <= mask; i++) {
+        u32 used = 0, n = 0, syms = 0;
+        while (n < max_symbols) {
+            u32 e = s_lut.entry[(i << used) & mask], bits = e & 0xFF;
+            if (!(e & HUFF_LEAF) || used + bits > HUFF_LUT_BITS)
+                break;
+            syms |= (e >> 16) << (n * bit_size);
+            n++, used += bits;
+        }
+        s_lut.group[i] = (u64)(n ? used | n * bit_size << 8 : 0xFF) << 32 | syms;
+    }
+    // a code of one bit (the glyph sheets' background: two thirds of their symbols, in runs of 16 or
+    // more): the bits that start with HUFF_RUN_MIN of it are marked
+    u8 root = s_lut.tree[1];
+    for (u32 bit = 0; bit < 2; bit++)
+        if ((root << bit) & 0x80) {
+            u32 sym = s_lut.tree[((root & 0x3F) + 1) * 2 + bit];
+            s_lut.run_flip = bit ? ~0u : 0;
+            s_lut.run_word = bit_size == 8 ? sym * 0x01010101u : (sym & 0xF) * 0x11111111u;
+            u32 first = (bit ? (1u << HUFF_RUN_MIN) - 1 : 0) << (HUFF_LUT_BITS - HUFF_RUN_MIN);
+            for (u32 i = first; i < first + (1u << (HUFF_LUT_BITS - HUFF_RUN_MIN)); i++)
+                s_lut.group[i] |= 1ull << 63;
+            break;
+        }
+}
+
+// The decoder's state while it takes groups of symbols (CXReadUncompHuffman)
+struct HuffRun {
+    const u8* src;
+    u32 len;
+    u32 src_tmp, sbits;  // the current input word's bits not yet used, at the top
+    u32 dest_tmp, dbits;
+    u8* out;  // the output word's place, in host memory
+    s32 dest_count;
+};
+
+// Groups of symbols, across the input's words, from a symbol's start: (hi, lo) holds nb bits at
+// its top, what is left of the current word and, once loaded, the next word. It stops at a
+// symbol's end, where the context can tell the place as the streaming code would have it: the
+// current word's bits left at the top of src_tmp (a next word not begun is given back). It needs
+// the output far enough from its end that the last word's alignment can't come up and at most one
+// word fills per group (8 bytes; a group is at most a word), and codes of at most HUFF_LUT_BITS;
+// the output words are the streaming code's (dest_tmp then holds the last 32 bits of symbols).
+__attribute__((noinline)) void huff_groups(const HuffLut* lut, HuffRun& r, u32 bs) {
+    const u8* src = r.src;
+    u32 words = r.len >> 2;
+    u32 hi = r.src_tmp, lo = 0, nb = r.sbits;
+    u32 acc = r.dest_tmp, dbits = r.dbits;
+    u8* out = r.out;
+    s32 count = r.dest_count;
+    const u64* group = lut->group;
+    for (;;) {
+        if (nb <= 32 && words) {
+            poll_point(32);
+            u32 w = src[0] | src[1] << 8 | src[2] << 16 | (u32)src[3] << 24;
+            src += 4, words--;
+            if (nb < 32)
+                hi |= w >> nb, lo = nb ? w << (32 - nb) : 0;
+            else
+                lo = w;
+            nb += 32;
+        }
+        if (count < 8)
+            break;
+        u64 e = group[hi >> (32 - HUFF_LUT_BITS)];
+        u32 syms = (u32)e, info = (u32)(e >> 32), used = info & 0xFF;
+        if ((s32)info < 0) {
+            // a run of the 1-bit code: as many of its symbols as the current bits hold, as far as
+            // the output can take them with 5 bytes left (the last word's alignment can't come up:
+            // the words to store end at least 8 bytes before the end, the partial one at least 5)
+            u32 n = (u32)__builtin_clz((hi ^ lut->run_flip) | 1);
+            u32 most = (u32)(count - 8) * 8 / bs;
+            n = n < nb ? n : nb;
+            n = n < most ? n : most;
+            if (n >= HUFF_RUN_MIN) {
+                hi = n == 32 ? lo : hi << n | lo >> (32 - n);
+                lo = n == 32 ? 0 : lo << n;
+                nb -= n;
+                const u32 P = lut->run_word;
+                u32 t = n * bs, room = 32 - dbits;
+                if (t < room) {
+                    acc = (acc >> t) | (P << (32 - t));
+                    dbits += t;
+                    continue;
+                }
+                u32 w = room == 32 ? P : (acc >> room) | (P << dbits);
+                ::memcpy(out, &w, 4);
+                out += 4, count -= 4, t -= room;
+                for (; t >= 32; t -= 32, out += 4, count -= 4)
+                    ::memcpy(out, &P, 4), w = P;
+                acc = t ? (w >> t) | (P << (32 - t)) : w;
+                dbits = t;
+                continue;
+            }
+        }
+        if (used > nb)
+            break;
+        hi = hi << used | lo >> (32 - used);
+        lo <<= used;
+        nb -= used;
+        u32 t = (info >> 8) & 0xFF, room = 32 - dbits;  // output bits it makes; until the word is full
+        if (t < room) {
+            acc = (acc >> t) | (syms << (32 - t));
+            dbits += t;
+            continue;
+        }
+        u32 w = room == 32 ? syms : (acc >> room) | (syms << dbits);  // the word, full
+        ::memcpy(out, &w, 4);  // (store32 of its byte swap)
+        out += 4, count -= 4;
+        u32 rest = t - room;
+        acc = rest ? (w >> rest) | ((syms >> room) << (32 - rest)) : w;
+        dbits = rest;
+    }
+    if (nb > 32) {  // the next word, not begun
+        src -= 4, words++, nb -= 32;
+        if (nb < 32)
+            hi &= ~(0xFFFFFFFFu >> nb);
+    }
+    r.len = words * 4 + (r.len & 3);
+    r.src = src;
+    r.src_tmp = hi, r.sbits = nb;
+    r.dest_tmp = acc, r.dbits = dbits;
+    r.out = out;
+    r.dest_count = count;
+}
 
 void lut_fill(const u8* tree, u32 ctx, u32 p, u32 depth, u32 code) {
     u8 node = tree[p - ctx];
@@ -329,13 +468,15 @@ void lut_fill(const u8* tree, u32 ctx, u32 p, u32 depth, u32 code) {
 const HuffLut* huff_lut(u32 ctx, const u8* tree, u8 bit_size) {
     const u8* t = tree + HF_TREE;
     u32 size = (t[0] + 1u) * 2;
-    if (s_lut.ctx == ctx && !::memcmp(s_lut.tree, t, size))
+    if (s_lut.ctx == ctx && s_lut.bit_size == bit_size && !::memcmp(s_lut.tree, t, size))
         return &s_lut;
     s_lut.ctx = 0;
     if (!CXiVerifyHuffmanTable(ctx + HF_TREE, bit_size))
         return nullptr;
     ::memcpy(s_lut.tree, t, size);
     lut_fill(tree, ctx, ctx + HF_TREE + 1, 0, 0);
+    group_fill(bit_size);
+    s_lut.bit_size = bit_size;
     s_lut.ctx = ctx;
     return &s_lut;
 }
@@ -465,10 +606,20 @@ void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
         };
         while (sbits && dest_count > 0) {
             if (lut && tp == root) {
+                u8* out = bytes(dest);
+                if (dest_count >= 8 && len >= 4 && out && bytes(dest + (u32)dest_count - 1) == out + dest_count - 1) {
+                    HuffRun r{src, len, src_tmp, sbits, dest_tmp, dbits, out, dest_count};
+                    huff_groups(lut, r, bs);
+                    src = r.src, len = r.len, src_tmp = r.src_tmp, sbits = r.sbits;
+                    dest_tmp = r.dest_tmp, dbits = r.dbits, dest += (u32)(r.out - out), dest_count = r.dest_count;
+                    if (!sbits || dest_count <= 0)
+                        break;
+                }
                 // whole symbols from the table, until it needs more bits than are left or the
                 // output ends; a code longer than the table goes on from its node, a bit at a time
                 for (;;) {
-                    u32 e = lut->entry[src_tmp >> (32 - HUFF_LUT_BITS)], n = e & 0xFF;
+                    const u32 i = src_tmp >> (32 - HUFF_LUT_BITS);
+                    u32 e = lut->entry[i], n = e & 0xFF;
                     if (n > sbits)
                         break;
                     src_tmp <<= n;

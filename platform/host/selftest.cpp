@@ -526,7 +526,11 @@ static std::vector<u8> lz_random_stream(axref::Rng& rnd, bool ex, u32 n, int kin
 // size byte, the root at +1, each node's children as a pair (offset in pairs from its own pair,
 // bit 7: the left child is a leaf, bit 6: the right). kind 0: valid; 1: random tree bytes; 2:
 // random bits after a valid tree. Returns no stream if the random tree didn't fit the layout.
-static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, int kind, u32* out_size) {
+// Symbols are drawn alike (mode 0), by random bits from the root (1: short codes as common as
+// in real data, a glyph sheet's average about 2 bits), or (2) like a glyph sheet: a symbol with a
+// code of one bit, in long runs, among the others drawn by random bits.
+static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, int kind, u32* out_size,
+                                          int mode = 0) {
     struct Node {
         int child[2] = {-1, -1};
         int sym = -1;
@@ -538,6 +542,13 @@ static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, 
         nodes.push_back(Node{{-1, -1}, (int)(rnd() % (1u << bit_size))});
         pool.push_back((int)i);
     }
+    int background = -1;  // mode 2: the symbol with a code of one bit, joined last
+    if (mode == 2) {
+        background = pool.back();
+        pool.pop_back();
+        if (pool.empty())
+            return {};
+    }
     while (pool.size() > 1) {  // random merges: from balanced to deep, lopsided codes
         size_t a = rnd() % pool.size();
         int na = pool[a];
@@ -548,6 +559,10 @@ static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, 
         nodes.push_back(Node{{na, nb}, -1});
         pool.push_back((int)nodes.size() - 1);
     }
+    if (background >= 0) {
+        nodes.push_back(rnd() & 1 ? Node{{background, pool[0]}, -1} : Node{{pool[0], background}, -1});
+        pool[0] = (int)nodes.size() - 1;
+    }
     // the layout, breadth first: the slot of each node, its children's pair after it
     std::vector<u8> t(2, 0);  // [0] the size byte, [1] the root
     std::vector<std::pair<int, size_t>> queue{{pool[0], 1}};
@@ -557,6 +572,9 @@ static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, 
         const Node& nd = nodes[(size_t)id];
         if (nd.sym >= 0)
             continue;
+        // sometimes a gap before the children (unused bytes, zeros: they pass CXiVerifyHuffmanTable)
+        if (rnd() % 8 == 0 && (t.size() - (slot & ~(size_t)1)) / 2 < 0x3F)
+            t.insert(t.end(), {0, 0});
         size_t pair = t.size();
         u32 off = (u32)((pair - (slot & ~(size_t)1)) / 2 - 1);
         if (off > 0x3F)
@@ -600,15 +618,128 @@ static std::vector<u8> huff_random_stream(axref::Rng& rnd, u32 bit_size, u32 n, 
             put((int)(rnd() & 1));
             continue;
         }
-        for (int b : code[(size_t)leaves[rnd() % leaves.size()]])
+        int leaf = leaves[rnd() % leaves.size()];
+        if (mode == 2) {  // runs of the background (on average 40), single other symbols between
+            static bool s_in_run;
+            s_in_run = s_in_run ? rnd() % 40 != 0 : rnd() % 2 == 0;
+            if (s_in_run)
+                leaf = background;
+        }
+        if (mode && leaf != background)
+            for (leaf = pool[0]; nodes[(size_t)leaf].sym < 0;)
+                leaf = nodes[(size_t)leaf].child[rnd() & 1];
+        for (int b : code[(size_t)leaf])
             put(b);
     }
     return s;
 }
 
+// One compressed stream (LZ or Huffman) decoded by the native and the streaming code in the same
+// random pieces: false at the first return value, context or output byte (or one around the
+// output) that differs
+static bool cx_compare(axref::Rng& rnd, const u8* data, u32 n, const char* name) {
+    const u32 in = 0x90100000, out_ref = 0x90400000, out_nat = 0x90B00000, margin = 0x1000;
+    const u32 ctx_ref = 0x81710000, ctx_nat = 0x81720000;  // (contexts of 0x220 bytes)
+    bool huffman = (data[0] & 0xF0) == 0x20;
+    u32 size = data[1] | data[2] << 8 | data[3] << 16;
+    if (n > 0x600000 || size > 0x600000 || !size)
+        return true;
+    write_g(in, data, n);
+    for (u32 i = 0; i < size + 2 * margin; i += 4) {
+        u32 v = rnd();
+        store32(out_ref - margin + i, v), store32(out_nat - margin + i, v);
+    }
+    for (u32 c : {ctx_ref, ctx_nat}) {
+        for (u32 k = 0; k < 0x220; k += 4)
+            store32(c + k, 0);
+        store32(c, c == ctx_ref ? out_ref : out_nat);
+        if (huffman)  // CXInitUncompContextHuffman (0x802FFBC0)
+            store32(c + 0x0C, c + 0x20), store16(c + 0x18, (u16)-1), store8(c + 0x1D, 8);
+        else  // CXInitUncompContextLZ (0x802FFB80)
+            store8(c + 0x10, 3), store8(c + 0x13, 8);
+    }
+    u32 piece_max = std::vector<u32>{1, 33, 4096, 0x20000, 0x1000000}[rnd() % 5];
+    for (u32 at = 0; at < n;) {
+        u32 len = std::min<u32>(n - at, 1 + rnd() % piece_max);
+        s32 r_ref = 0, r_nat = 0;
+        if (huffman) {
+            cxref::read_uncomp_huffman(ctx_ref, in + at, len);
+            g::CXReadUncompHuffman(ctx_nat, in + at, len);
+        } else {
+            r_ref = (s32)cxref::read_uncomp_lz(ctx_ref, in + at, len);
+            r_nat = (s32)g::CXReadUncompLZ(ctx_nat, in + at, len);
+        }
+        bool same = r_ref == r_nat && load32(ctx_ref) - out_ref == load32(ctx_nat) - out_nat;
+        for (u32 k = 4; k < 0x220 && same; k++)
+            same = huffman && k >= 0x0C && k < 0x10 ? load32(ctx_ref + 0x0C) - ctx_ref == load32(ctx_nat + 0x0C) - ctx_nat
+                                                    : load8(ctx_ref + k) == load8(ctx_nat + k);
+        if (!same) {
+            log("selftest cx: %s: differs after input %u..%u", name, at, at + len);
+            return false;
+        }
+        at += len;
+        if (huffman ? (s32)load32(ctx_ref + 0x04) <= 0 : r_ref <= 0)
+            break;
+    }
+    for (u32 i = 0; i < size + 2 * margin; i += 4)
+        if (load32(out_ref - margin + i) != load32(out_nat - margin + i)) {
+            log("selftest cx: %s: output differs at %d", name, (s32)(i - margin));
+            return false;
+        }
+    return true;
+}
+
+// The game's own compressed data, from the contents in ./content (or NOMA_SELFTEST_DATA/content):
+// every LZ file in their archives and every Huffman glyph sheet of the fonts
+static void selftest_cx_game_data(axref::Rng& rnd) {
+    const char* dir = getenv("NOMA_SELFTEST_DATA");
+    std::string base = std::string(dir ? dir : ".") + "/content/";
+    int lz = 0, sheets = 0, bad = 0;
+    for (u32 index = 0; index < 32 && bad < 3; index++) {
+        char name[32];
+        snprintf(name, sizeof(name), "%08x.app", index);
+        FILE* f = fopen((base + name).c_str(), "rb");
+        if (!f)
+            continue;
+        std::vector<u8> d;
+        u8 buf[65536];
+        for (size_t got; (got = fread(buf, 1, sizeof(buf), f)) > 0;)
+            d.insert(d.end(), buf, buf + got);
+        fclose(f);
+        auto be = [&](size_t at) { return (u32)d[at] << 24 | d[at + 1] << 16 | d[at + 2] << 8 | d[at + 3]; };
+        if (d.size() < 32 || be(0) != 0x55AA382D)
+            continue;
+        u32 root = be(4), nodes = be(root + 8);
+        for (u32 i = 1; i < nodes && bad < 3; i++) {
+            size_t e = root + i * 12;
+            if (d[e] != 0)
+                continue;
+            u32 off = be(e + 4), size = be(e + 8);
+            if ((u64)off + size > d.size() || size < 8)
+                continue;
+            const u8* p = d.data() + off;
+            std::string what = std::string(name) + "@" + std::to_string(off);
+            if ((p[0] == 0x10 || p[0] == 0x11) && p[1] | p[2] | p[3]) {
+                lz++;
+                bad += !cx_compare(rnd, p, size, what.c_str());
+            } else if (size > 0x20 && !memcmp(p, "RFNA", 4)) {
+                for (u32 k = 0; k + 4 <= size && bad < 3; k += 4)  // the sheets: Huffman, 64 KB each
+                    if ((p[k] == 0x28 || p[k] == 0x24) && p[k + 1] == 0 && p[k + 2] == 0 && p[k + 3] == 1) {
+                        sheets++;
+                        bad += !cx_compare(rnd, p + k, size - k, (what + "+" + std::to_string(k)).c_str());
+                    }
+            }
+        }
+    }
+    if (!lz && !sheets)
+        log("selftest cx: no game data in %s (run where content/ is, or set NOMA_SELFTEST_DATA)", base.c_str());
+    else
+        log("selftest cx: game data: %d LZ files, %d Huffman glyph sheets, %s", lz, sheets, bad ? "MISMATCH" : "ok");
+}
+
 // The CX natives' fast paths against the streaming code they started from (cx_reference.h):
 // random streams fed in random pieces, comparing each return value, the context and the output
-// buffer with what lies around it (nothing may be written past the end).
+// buffer with what lies around it (nothing may be written past the end); then the game's own data.
 static void selftest_cx() {
     const u32 in = 0x90100000, ctx_ref = 0x81700000, ctx_nat = 0x81700040;
     const u32 out_ref = 0x90400000, out_nat = 0x90800000, margin = 0x10000;
@@ -667,7 +798,7 @@ static void selftest_cx() {
         u32 bit_size = rnd() & 1 ? 8 : 4, size;
         int kind = t % 10 == 9 ? 2 : t % 10 == 8 ? 1 : 0;
         u32 n = 8 * (1 + rnd() % (t % 50 == 0 ? 0x10000 : rnd() % 4 ? 200 : 4000));
-        std::vector<u8> s = huff_random_stream(rnd, bit_size, n, kind, &size);
+        std::vector<u8> s = huff_random_stream(rnd, bit_size, n, kind, &size, t % 3);
         if (s.empty())
             continue;
         streams++;
@@ -720,6 +851,7 @@ static void selftest_cx() {
     }
     log("selftest cx: %d Huffman streams in %llu pieces, %s", streams, (unsigned long long)calls,
         bad ? "MISMATCH" : "ok");
+    selftest_cx_game_data(rnd);
 
     // speed, on 2 MB of LZ10 like the game's (half literals, 3.5:1), fed in 8 KB pieces as files are read
     u32 size;
