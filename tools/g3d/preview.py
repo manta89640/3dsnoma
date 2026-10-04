@@ -21,8 +21,9 @@ from their GX texels, every stored mip level, bilinear, the level picked per fra
 material's LOD bias. Material animations (texture SRT, colour registers) and node animations are
 evaluated at --frame (60 a second).
 
-Not modelled: indirect texturing (dropped, as the engine drops it), specular, billboards, the
-GX/PICA difference in texture filtering, dithering. Back faces: GX's front faces wind clockwise.
+Not modelled: indirect texturing (dropped, as the engine drops it), specular, billboards (a node is
+drawn as its bind matrix places it), the GX/PICA difference in texture filtering, dithering. Back
+faces: GX's front faces wind clockwise. The background is the colour of the first fog in use.
 Ported from the research renderer (scratchpad wuhu/tools/g3d_preview.py), whose BRRES views it is
 compared with (docs/wuhu.md).
 """
@@ -327,7 +328,17 @@ class Scene:
                 M[:3] = np.array(inst.mtx)
                 if inst.cull_distance and np.linalg.norm(M[:3, 3] - eye) > inst.cull_distance:
                     continue
-                add_model(inst.model, M, inst.anim, frame + inst.anim_offset, group=1)
+                # its model chain, as the engine walks it: the next model from that model's
+                # distance on, the distance from the eye to the centre of its first model's box
+                mi = inst.model
+                bb = pkg.models[mi].bbox
+                d = float(np.linalg.norm(M[:3, :3] @ (np.add(bb[:3], bb[3:]) / 2) + M[:3, 3] - eye))
+                for _ in range(len(pkg.models)):
+                    m = pkg.models[mi]
+                    if m.lod_next == NONE16 or d < m.lod_distance:
+                        break
+                    mi = m.lod_next
+                add_model(mi, M, inst.anim, frame + inst.anim_offset, group=1)
         return items
 
     # ------------------------------------------------------------------ shading
@@ -637,8 +648,11 @@ def render(scene, view, items, fog=True, background=None, progress=False):
     pkg = scene.pkg
     W, H = view.W, view.H
     fog_tab = pkg.fogs
+    # the clear colour: the first fog in use's (the open sea's: the sky dome's lower edge meets the
+    # fogged sea in that colour)
+    used = [f for f in fog_tab if f.type != ng3d.FOG_NONE]
     bg = np.array(background if background is not None else
-                  ([c / 255.0 for c in fog_tab[0].rgba[:3]] if fog_tab else (0.5, 0.7, 0.9)), np.float32)
+                  ([c / 255.0 for c in used[0].rgba[:3]] if used else (0.5, 0.7, 0.9)), np.float32)
     color = np.tile(bg, (H * W, 1))
     depth = np.full(H * W, np.inf, np.float32)
 
@@ -810,6 +824,9 @@ def main(argv=None):
     else:
         pkg = ng3d.Package.read(open(a.package, "rb").read())
         out = a.out
+        if any(not t.flags & ng3d.TEX_GX_RAW for t in pkg.textures):
+            raise SystemExit("%s is baked (PICA texels): this renderer reads GX texels; give it the unbaked "
+                             "package (tools/wuhu/stage_wuhu.py --keep-raw keeps island.unbaked.ng3d)" % a.package)
     if a.camera:
         mk = [m for m in pkg.markers if pkg.string(m.name) == a.camera]
         if not mk:

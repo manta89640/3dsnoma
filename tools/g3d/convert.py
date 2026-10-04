@@ -26,7 +26,7 @@ stated where they are filled in (blend's masked bits; texgen matrices).
 import math
 import os
 import sys
-from collections import Counter
+from collections import Counter, namedtuple
 
 import numpy as np
 
@@ -79,6 +79,10 @@ def _depalette(tex, palette_raw, plt_fmt, lod):
     vals = pal[np.minimum(idx, len(pal) - 1)]
     g = PALETTE_AS_GX[plt_fmt]
     return _tile_gx(vals, w, h, *gxtex.BLOCK[g]), g
+
+
+# a model drawn as a part of another (Converter.model's parts)
+Part = namedtuple("Part", "name brres model matrix hidden tex_override", defaults=(None, (), None))
 
 
 class Converter:
@@ -222,12 +226,18 @@ class Converter:
         return idx
 
     # ---------------------------------------------------------------- models
-    def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None):
+    def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None, parts=()):
         """A Model of `mdl`: its nodes (rest SRT, bind matrix, visibility, billboard) and a batch per
         draw (opaque list, then translucent), vertices in the space of the node they hang from.
         Draws whose visibility node is in `hidden` are left out (the node stays, invisible).
         extra_root: a name for a node put above the model's root (index 0), for a motion the
         model's own nodes don't have (a path, an orbit); the model's nodes follow it.
+        parts: other models drawn as parts of this one ([Part]): each hangs from a node of the
+        part's name under this model's root node, placed by its matrix (uniform scale, rotation,
+        translation; None: as it is), and its draws follow this model's in each list (every part's
+        opaque draws after this model's, then the translucent ones likewise) -- the sun in the sky
+        dome, which the renderer moves with the eye as one model; a stretch of the sea with the
+        island it rings. A part's nodes are in the map as "part/node".
         Returns (model index, {node name: index within the model})."""
         pkg = self.pkg
         shift = 1 if extra_root else 0
@@ -237,30 +247,46 @@ class Converter:
             pkg.add("nodes", name=pkg.str(extra_root), parent=NONE16, flags=ng3d.NODE_VISIBLE,
                     scale=[1.0] * 3, bind=[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]])
             node_map[extra_root] = 0
-        for n in mdl.nodes:
-            fl = ng3d.NODE_VISIBLE if n.name not in hidden and n.flags & 0x100 else 0
-            if n.billboard:
-                fl |= ng3d.NODE_BILLBOARD
-            par = n.parent + shift if n.parent >= 0 else (0 if extra_root else NONE16)
-            pkg.add("nodes", name=pkg.str(n.name), parent=par, flags=fl, scale=list(n.scale),
-                    rotate=list(n.rot), translate=list(n.trans),
-                    bind=[list(map(float, row)) for row in n.mtx], billboard=n.billboard)
-            node_map[n.name] = n.index + shift
-        W = mdl.world_matrices()
-        mats = {m.index: m for m in mdl.materials}
-        shapes = {s.index: s for s in mdl.shapes}
-        draws = [d for d in mdl.draws("DrawOpa")] + [d for d in mdl.draws("DrawXlu")]
+
+        def add_nodes(m, base, root_parent, M, prefix, hide):
+            for n in m.nodes:
+                fl = ng3d.NODE_VISIBLE if n.name not in hide and n.flags & 0x100 else 0
+                if n.billboard:
+                    fl |= ng3d.NODE_BILLBOARD
+                par = n.parent + base if n.parent >= 0 else root_parent
+                bind = n.mtx if M is None else (M @ np.vstack([n.mtx, [0, 0, 0, 1]]))[:3]
+                pkg.add("nodes", name=pkg.str(n.name), parent=par, flags=fl, scale=list(n.scale),
+                        rotate=list(n.rot), translate=list(n.trans),
+                        bind=[list(map(float, row)) for row in bind], billboard=n.billboard)
+                node_map[prefix + n.name] = n.index + base
+        add_nodes(mdl, shift, 0 if extra_root else NONE16, None, "", hidden)
+        # the sources of the batches: the model, then its parts (each under a node of its own)
+        # (a shape on an envelope matrix has its vertices in its model's space: the model's first
+        # node, or the part's own node)
+        sources = [(r, mdl, shift, 0, np.eye(4), hidden, tex_override)]
+        for part in parts:
+            M = np.eye(4) if part.matrix is None else np.asarray(part.matrix, np.float64)
+            k = len(pkg.nodes) - first_node
+            s, rot, t = srt_of(M)
+            pkg.add("nodes", name=pkg.str(part.name), parent=0, flags=ng3d.NODE_VISIBLE, scale=[s] * 3,
+                    rotate=rot, translate=t, bind=[list(map(float, row)) for row in M[:3]])
+            node_map[part.name] = k
+            add_nodes(part.model, k + 1, k, M, part.name + "/", part.hidden)
+            sources.append((part.brres, part.model, k + 1, k, M, part.hidden, part.tex_override))
+        draws = [(src, d) for lst in ("DrawOpa", "DrawXlu") for src in sources for d in src[1].draws(lst)]
         first_batch = len(pkg.batches)
         lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
         per_node = {}
-        for d in draws:
-            vis = mdl.nodes[d.node].name if 0 <= d.node < len(mdl.nodes) else None
-            if vis in hidden:
+        for (sr, sm, base, space, M, hide, tov), d in draws:
+            vis = sm.nodes[d.node].name if 0 <= d.node < len(sm.nodes) else None
+            if vis in hide:
                 self.stats["model draws hidden"] += 1
                 continue
-            mat = mats[d.mat]
-            mi = self.material(r, mdl, mat, tex_override, d.prio)
-            t = mdl.shape_triangles(shapes[d.shape], world=False)
+            W = sm.world_matrices()
+            mat = {m.index: m for m in sm.materials}[d.mat]
+            mi = self.material(sr, sm, mat, tov, d.prio)
+            shape = {s.index: s for s in sm.shapes}[d.shape]
+            t = sm.shape_triangles(shape, world=False)
             if not t or "pos" not in t:
                 continue
             # a batch per matrix the triangles use (rigid multi-bone shapes: a triangle spanning
@@ -270,7 +296,7 @@ class Converter:
             maj = np.where(mtx[:, 1] == mtx[:, 2], mtx[:, 1], mtx[:, 0])
             for mid in np.unique(maj):
                 sel = np.repeat(maj == mid, 3)
-                node = mdl.matrix_node(int(mid))
+                node = sm.matrix_node(int(mid))
                 c = {k: v[sel] for k, v in t.items()}
                 mixed = c["mtx"] != mid
                 if mixed.any():
@@ -278,14 +304,15 @@ class Converter:
                     inv = np.linalg.inv(W[node]) if node >= 0 else np.eye(4)
                     for om in np.unique(c["mtx"][mixed]):
                         s2 = c["mtx"] == om
-                        Mx = inv @ (W[mdl.matrix_node(int(om))] if mdl.matrix_node(int(om)) >= 0 else np.eye(4))
+                        Mx = inv @ (W[sm.matrix_node(int(om))] if sm.matrix_node(int(om)) >= 0 else np.eye(4))
                         c["pos"][s2] = c["pos"][s2] @ Mx[:3, :3].T.astype(np.float32) + Mx[:3, 3].astype(np.float32)
                         if "nrm" in c:
                             c["nrm"][s2] = c["nrm"][s2] @ Mx[:3, :3].T.astype(np.float32)
-                corners = corners_from(c, mdl, shapes[d.shape])
-                b = build_single_batch(self, corners, mi, node + shift if node >= 0 else 0)
-                per_node.setdefault(node + shift, []).append(b)
-                Wn = W[node] if node >= 0 else np.eye(4)
+                corners = corners_from(c, sm, shape)
+                own = node + base if node >= 0 else space
+                b = build_single_batch(self, corners, mi, own)
+                per_node.setdefault(own, []).append(b)
+                Wn = M @ (W[node] if node >= 0 else np.eye(4))
                 P = c["pos"] @ Wn[:3, :3].T + Wn[:3, 3]
                 lo, hi = np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0))
         n_batches = len(pkg.batches) - first_batch
@@ -308,6 +335,17 @@ class Converter:
                 radius=float(np.linalg.norm(hi - lo) / 2), lod_next=NONE16)
         self.stats["models"] += 1
         return len(pkg.models) - 1, node_map
+
+
+def srt_of(M):
+    """A 4x4 of uniform scale, rotation and translation as nw4r's node SRT: (scale, [rx, ry, rz]
+    degrees for T * Rz * Ry * Rx * S, [tx, ty, tz])."""
+    M = np.asarray(M, np.float64)
+    s = float(np.linalg.norm(M[:3, 0]))
+    R = M[:3, :3] / s
+    ry = -math.asin(max(-1.0, min(1.0, R[2, 0])))
+    rx, rz = math.atan2(R[2, 1], R[2, 2]), math.atan2(R[1, 0], R[0, 0])
+    return s, [math.degrees(rx), math.degrees(ry), math.degrees(rz)], [float(x) for x in M[:3, 3]]
 
 
 # ------------------------------------------------------------------------------------- meshes
@@ -615,9 +653,10 @@ def add_clr0(ab, anim, material_of, period=None):
     return n
 
 
-def add_srt0(ab, anim, texmtx_of, period=None):
+def add_srt0(ab, anim, texmtx_of, period=None, time_scale=1.0):
     """SRT0 texture matrices as TT_TEXMTX_* tracks (all five components: nw4r sets the whole
-    matrix while animating it). texmtx_of(material name, matrix number) -> TexMtx index or None."""
+    matrix while animating it). texmtx_of(material name, matrix number) -> TexMtx index or None.
+    time_scale stretches the curves (frames times it), period is the loop's length after that."""
     n = 0
     for mname, mtxs in anim.materials.items():
         for j, x in mtxs.items():
@@ -629,7 +668,7 @@ def add_srt0(ab, anim, texmtx_of, period=None):
             for target, curve in ((ng3d.TT_TEXMTX_SCALE_S, x["scale"][0]), (ng3d.TT_TEXMTX_SCALE_T, x["scale"][1]),
                                   (ng3d.TT_TEXMTX_ROTATE, x["rot"]), (ng3d.TT_TEXMTX_TRANS_S, x["trans"][0]),
                                   (ng3d.TT_TEXMTX_TRANS_T, x["trans"][1])):
-                ab.add_curve(target, ti, curve, reg=j, period=period)
+                ab.add_curve(target, ti, curve, reg=j, period=period, time_scale=time_scale)
                 n += 1
     return n
 

@@ -143,6 +143,7 @@ ENUMS = {
                      CR_KONST0=8, CR_KONST1=9, CR_KONST2=10, CR_KONST3=11),
     "LightKind": dict(LK_DIRECTIONAL=0, LK_POINT=1),
     "FogType": dict(FOG_NONE=0, FOG_LINEAR=2),
+    "MarkerKind": dict(MK_SPAWN=0, MK_LANDMARK=1, MK_CAMERA=2, MK_WARP=3),
 }
 CONSTANTS = dict(MAX_TEV_STAGES=16, MAX_TEX_MAPS=8, MAX_TEXGENS=8, MAX_CELL_LODS=3)
 # every enum value as a module constant (ng3d.TF_ETC1, ng3d.MAT_XLU, ...)
@@ -580,6 +581,8 @@ class Package:
                 bad.append("env grid %dx%d but %d cells" % (e.n_cells_x, e.n_cells_z, len(self.cells)))
         for i, m in enumerate(self.markers):
             s_ok("marker %d" % i, m.name)
+            if m.kind > MK_WARP:
+                bad.append("marker %d: kind %d" % (i, m.kind))
         for i, c in enumerate(self.collisions):
             s_ok("collision %d" % i, c.name)
             in_sec("collision %d" % i, "BLOB", c.data, c.size)
