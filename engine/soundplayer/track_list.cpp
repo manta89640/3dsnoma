@@ -57,17 +57,20 @@ const char* const DOWN_LEX = "layout/Profile/Profile_Down_Btn.lex";
 // them), so the widths inside it are made 1/0.75 as wide (`wide`) to show at these sizes.
 const f32 WINDOW_X = -154, WINDOW_Y = 42;
 const f32 WINDOW_W = 284, WINDOW_H = 292;
-const int VISIBLE = 6;                // rows shown at once
+const int VISIBLE = 5;                // rows shown at once (few and big: legible on the 3DS's screen)
 const int SLOTS = VISIBLE + 2;        // row buttons: the ones shown, one coming in, a spare
-const f32 PITCH = 44;                 // the message list's row pitch
-const f32 FIRST_Y = 110;              // the top row's centre
+const f32 PITCH = 54;                 // the row pitch: the window's height over 5 rows and a margin
+const f32 FIRST_Y = 2 * PITCH;        // the top row's centre (the middle row's at the window's)
 const f32 ROW_W = 252;                // 16 inside the window's sides, as the message list's
-const f32 ROW_H = 41.43f;             // the message list's row height (Message_List_Text's Bound_Btn)
+// the row's height: the message list's proportion of it to its pitch (Message_List_Text's
+// Bound_Btn, 41.43 high at a pitch of 44)
+const f32 ROW_H = PITCH * 41.43f / 44;
+const f32 TEXT_H = 42;                // the name's box (35 in the layout, for the larger text)
 const f32 MARK_X = -112;              // ♪ / ∥ in the playing row
 const f32 TEXT_X = 13, TEXT_W = 222;  // the name: left-aligned from x -98
 const f32 HEADER_X = 0, HEADER_W = 240;
-const f32 FONT_W = 22.08f, FONT_H = 26.22f;  // the dialogs' and balloons' text size
-const f32 HEADER_FONT_W = 17.6f, HEADER_FONT_H = 20.9f;
+const f32 FONT_W = 29, FONT_H = 34.58f;      // the message list's own row text (Message_List_Text)
+const f32 HEADER_FONT_W = 22.08f, HEADER_FONT_H = 26.22f;  // the dialogs' text size
 const f32 TAB_LAYOUT_H = 44;          // the tabs' height in their layout (Profile_Up_Btn's Pic_Btn)
 const f32 TAB_SCALE = 0.8f, TAB_H = TAB_LAYOUT_H * TAB_SCALE;
 const u32 NAME_CHARS = 32;            // room in each text box
@@ -152,6 +155,7 @@ struct RowPanes {
         resize(bar, ROW_W * wide, ROW_H);
         line = find_pane(layout, "B_Line");
         resize(line, ROW_W * wide, load_f32(line + 0x50));
+        move(line, 0, -PITCH / 2);  // at the row's foot (-22 in the layout, for its pitch of 44)
         text = find_pane(layout, "B_TextBox_00");
         text_reserve(text, NAME_CHARS);
         char_space(text, -1);
@@ -160,7 +164,7 @@ struct RowPanes {
     }
     void name_style() {
         move(text, TEXT_X * wide, 0);
-        resize(text, TEXT_W * wide, 35);
+        resize(text, TEXT_W * wide, TEXT_H);
         text_position(text, TEXT_LEFT);
         font_size(text, FONT_W, FONT_H);
     }
@@ -280,7 +284,7 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
     paint(m.bar.text, WHITE);
     show(m.bar.line, false);
     move(m.bar.date, MARK_X * wide, 0);
-    resize(m.bar.date, 28 * wide, 30);
+    resize(m.bar.date, 34 * wide, TEXT_H);
     text_position(m.bar.date, TEXT_CENTRE);
     font_size(m.bar.date, FONT_W, FONT_H);
     text_reserve(m.bar.date, 2);
