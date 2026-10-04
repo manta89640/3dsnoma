@@ -1589,21 +1589,45 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         }
         P.dl_offset = offset;
         e->last_frame = P.frame;
+        // the draw's record: the one for this command with these registers and this recipe (a
+        // list drawn with other registers in the same frame, a second pass, has a record of its
+        // own); one whose arrays changed is made again in its own pool vertices, unless the GPU
+        // still has to read them for a draw earlier this frame
         DlRecord* r = nullptr;
-        for (DlRecord& x : e->recs)
-            if (x.offset == offset) {
-                r = &x;
-                break;
+        DlRecord* oldest = nullptr;
+        u32 variants = 0;
+        for (DlRecord& x : e->recs) {
+            if (x.offset != offset)
+                continue;
+            variants++;
+            if (!oldest || x.slots_frame < oldest->slots_frame)
+                oldest = &x;
+            int stale = x.count ? dl_record_stale(x, vat, plan) : 1;
+            if (stale == 1)
+                continue;
+            r = &x;
+            if (stale == 2) {
+                P.rebuilt_arrays++;
+                u32 keep_first = x.first, keep_count = x.count, drawn = x.slots_frame;
+                x = DlRecord();
+                x.offset = offset;
+                if (keep_count == count && drawn != P.frame)
+                    x.first = keep_first, x.count = ~0u;  // (its vertices are made again in place below)
             }
-        u32 reuse_first = 0, reuse_count = 0;  // a stale record's pool vertices, made again in place
-        if (r && r->count) {
-            int stale = dl_record_stale(*r, vat, plan);
-            if (stale) {
-                (stale == 2 ? P.rebuilt_arrays : P.rebuilt_regs)++;
-                reuse_first = r->first, reuse_count = r->count;
-                *r = DlRecord();
-                r->offset = offset;
-            }
+            break;
+        }
+        u32 reuse_first = 0, reuse_count = 0;
+        if (r && r->count == ~0u)
+            reuse_first = r->first, reuse_count = count, r->count = 0;
+        if (!r && variants >= 4 && oldest) {  // too many passes: the oldest record's place
+            P.rebuilt_regs++;
+            if (oldest->slots_frame != P.frame && oldest->count == count)
+                reuse_first = oldest->first, reuse_count = count;
+            *oldest = DlRecord();
+            oldest->offset = offset;
+            r = oldest;
+        } else if (!r && variants) {
+            P.rebuilt_regs++;  // (a new pass of a list: counted once, when its record is made)
         }
         if (r && r->count == count && r->slots_frame == P.frame)
             P.drawn_twice++;
