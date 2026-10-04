@@ -6,13 +6,18 @@
 //           by one spot light), built into the list cache (with its matrix rows)
 //   kind 2: kind 1 drawn again from the cache: only its fixed slots (a new matrix in the same XF row)
 //   kind 3: a skinned draw from the cache (a matrix index per vertex, three matrices): its slots
+// tex(direct, fmt, w, h, hash) converts a w x h texture of GX format fmt (random bytes and palette) into PICA
+// texture memory: decoded to RGBA8 then tiled (direct 0), or straight from the GX tiles (direct 1,
+// platform/3ds/pica_tex.h), returning a hash of the result (hash 1) or nothing.
 // gx(kind, draws, vertices, flush_every) runs `draws` such draws of `vertices` vertices, the pending
 // batch submitted (the palette's slots freed) every flush_every draws, and returns a hash of what
 // was built (to compare builds of tnl.cpp).
 #include <cstdarg>
 #include <cstring>
 
+#include "platform/3ds/pica_tex.h"
 #include "runtime/hw/gx/regs.h"
+#include "runtime/hw/gx/texture.h"
 #include "runtime/hw/gx/tnl.h"
 
 namespace guest {
@@ -31,6 +36,9 @@ void fatal(const char*, ...) {
 }
 void log(const char*, ...) {}
 void gx_check_transform_draw(u32, u32, const u8*, const GxOutVertex*) {}
+u32 mem_generation(u32, u32) { return 0; }
+u32 mem_mark_written(u32, u32) { return 0; }
+void read_g(void*, u32, u32) {}
 }  // namespace guest
 
 using namespace guest;
@@ -182,4 +190,43 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
             h = hash_out(h, s_out, vertices * sizeof(GxTnlVertex));
     }
     return h;
+}
+
+namespace {
+u8 s_texsrc[256 * 256 * 4];
+u8 s_texout[256 * 256 * 4];
+u32 s_rgba[256 * 256];
+pica_tex::Fmt pica_format(u32 f) {
+    switch (f) {
+    case 0: case 2: return pica_tex::LA4;
+    case 1: case 3: case 8: case 9: return pica_tex::LA8;
+    case 4: return pica_tex::RGB565;
+    case 14: return pica_tex::RGBA5551;
+    default: return pica_tex::RGBA8;
+    }
+}
+}  // namespace
+
+extern "C" u32 tex(u32 direct, u32 fmt, u32 w, u32 h, u32 hash) {
+    static bool filled;
+    if (!filled) {
+        u32 x = 12345;
+        for (u8& b : s_texsrc)
+            b = (u8)((x = x * 1103515245 + 12345) >> 16);
+        u8* tmem = gx_tmem_for_tests();
+        for (u32 i = 0; i < 0x1000; i++)
+            tmem[i] = (u8)((x = x * 1103515245 + 12345) >> 16);
+        filled = true;
+    }
+    u32 W = 8, H = 8;
+    while (W < w) W <<= 1;
+    while (H < h) H <<= 1;
+    pica_tex::Fmt pf = pica_format(fmt);
+    if (direct)
+        pica_tex::from_gx(s_texsrc, fmt, w, h, gx_tmem(), GX_TMEM_MASK, 0, 0, s_texout, W, H, pf);
+    else {
+        gx_decode_texture_tlut(s_texsrc, fmt, w, h, 0, 0, s_rgba);
+        pica_tex::from_rgba(s_rgba, w, h, s_texout, W, H, pf, false);
+    }
+    return hash ? hash_out(2166136261u, s_texout, W * H * pica_tex::texel_bytes(pf)) : 0;
 }

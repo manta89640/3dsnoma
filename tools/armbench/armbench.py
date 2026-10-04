@@ -95,7 +95,10 @@ class Machine:
         self.uc.reg_write(UC_ARM_REG_FPEXC, 0x40000000)
 
     def call(self, fn, *args):
-        self.uc.reg_write(UC_ARM_REG_SP, STACK + 0x100000)
+        sp = STACK + 0x100000 - 64
+        for i, v in enumerate(args[4:]):  # (arguments past the fourth on the stack, as AAPCS has them)
+            self.uc.mem_write(sp + 4 * i, (v & 0xFFFFFFFF).to_bytes(4, "little"))
+        self.uc.reg_write(UC_ARM_REG_SP, sp)
         self.uc.reg_write(UC_ARM_REG_LR, RETURN)
         for reg, v in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3), args):
             self.uc.reg_write(reg, v)
@@ -252,13 +255,16 @@ def bench_snd(counts):
 GX_KINDS = [("layout quad, immediate", 4), ("model draw, into the cache", 8), ("cached draw: fixed slots", 8),
             ("cached draw: skinned slots", 8)]
 GX_SOURCES = ("tools/armbench/gx_bench.cpp", "runtime/hw/gx/tnl.cpp", "runtime/hw/gx/vertex.cpp",
-              "runtime/hw/gx/pica_vsh.cpp")
+              "runtime/hw/gx/pica_vsh.cpp", "runtime/hw/gx/texture.cpp")
+# textures like the room's: GX format, width, height (non-powers of two are padded)
+GX_TEXTURES = [("I4 glyph sheet", 0, 256, 256), ("IA8 layout part", 3, 120, 60), ("RGB5A3 icon", 5, 96, 96),
+               ("RGBA8 picture", 6, 200, 150), ("CMPR model texture", 14, 128, 128), ("C8 (RGB565 palette)", 9, 64, 64)]
 
 
 def bench_gx(funcs_kind=None, draws=64, flush_every=7):
     with tempfile.TemporaryDirectory() as out:
-        elf = build(out, GX_SOURCES, ("gx",))
-        m = Machine(elf, ("gx",))
+        elf = build(out, GX_SOURCES, ("gx", "tex"))
+        m = Machine(elf, ("gx", "tex"))
         if funcs_kind is not None:
             name, verts = GX_KINDS[funcs_kind]
             syms = sorted((s["st_value"] & ~1, s["st_size"], s.name) for s in
@@ -293,6 +299,12 @@ def bench_gx(funcs_kind=None, draws=64, flush_every=7):
             n = (m.instructions("gx", kind, draws, verts, flush_every) - m.instructions("gx", kind, 0, verts, flush_every)) / draws
             print("%-30s %6.0f ARM instructions a draw of %d vertices (%5.0f a vertex)  hash %08x" % (
                 name, n, verts, n / verts, m.call("gx", kind, draws, verts, flush_every)))
+        m.call("tex", 0, 0, 8, 8, 0)  # (fills the input once)
+        for name, fmt, w, h in GX_TEXTURES:
+            old, new = (m.instructions("tex", direct, fmt, w, h, 0) for direct in (0, 1))
+            same = m.call("tex", 0, fmt, w, h, 1) == m.call("tex", 1, fmt, w, h, 1)
+            print("%-22s %4dx%-4d %5.1f -> %5.1f ARM instructions a texel (decode + tile -> direct), %s" % (
+                name, w, h, old / (w * h), new / (w * h), "same texture" if same else "TEXTURE DIFFERS"))
 
 
 def main():
