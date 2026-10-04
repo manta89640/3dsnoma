@@ -94,6 +94,8 @@ set(ENGINE_SOURCES
   engine/system/keyboard.cpp
   engine/system/thread.cpp
   engine/ui/bar_button.cpp
+  engine/ui/caption.cpp
+  engine/ui/confirm.cpp
   engine/ut/font.cpp
 )
 

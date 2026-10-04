@@ -39,12 +39,23 @@ inline void pointer_at(f32& x, f32& y) {
 inline void change_scene_with_wipe(u32 scene, u32 name, u32 wipe_type) { g::scene_LayoutSceneBase_ChangeSceneWithWipe(scene, name, wipe_type); }
 const u32 NAME_LIVING_ROOM_SCENE = GA_scene_sNameLivingRoomScene;
 
-// ---- layout::parts::Wipe: its kinds 0 = the circle, 3 = Fade_White
-enum : u32 { WIPE_FADE_WHITE = 3 };
+// ---- layout::parts::Wipe: its kinds 0 = the circle (the room bar's way into a screen, ending
+// white), 2 = Fade_Black (a black fade, 16 frames each way), 3 = Fade_White (11 frames), 4 =
+// Fade_White_Long (21 frames: the room's fade in, coming back from its screens). Its
+// layouts, one a kind, are at +0x0 + 4 * kind; +0x10C is the kind playing, +0x20 the animation
+// played ("In" or "Out", set by In and Out, cleared by its reset): while it is set, the
+// application draws the kind's layout over the frame, after the scene (posed where the animation
+// is, or where it ended).
+enum : u32 { WIPE_CIRCLE = 0, WIPE_FADE_BLACK = 2, WIPE_FADE_WHITE = 3, WIPE_FADE_WHITE_LONG = 4 };
 inline void wipe_in(u32 type) {
     g::layout_parts_Wipe_In(wipe(), type);
     g::layout_parts_Wipe_Play(wipe());
 }
+inline u32 wipe_layout(u32 kind) { return guest::load32(wipe() + 4 * kind); }
+// The application stops drawing the wipe over the frame (+0x20 cleared; its layouts keep their
+// poses): a scene that comes in under a wipe that has ended (a black screen) draws that layout
+// itself, under parts of its own (the loading rings), until its wipe_in starts the wipe again.
+inline void wipe_hand_over() { guest::store32(wipe() + 0x20, 0); }
 
 // ---- the exclusive button group (0x10 bytes): a button's push locks the group's other buttons
 const u32 GROUP_SIZE = 0x10;
@@ -57,6 +68,10 @@ const u32 CURSOR_SIZE = 0x300;
 inline void cursor_ctor(u32 c) { g::layout_Cursor_ctor(c, 0); }
 inline void cursor_dtor_delete(u32 c) { g::layout_Cursor_dtor(c, 1, 0, 0, 0); }
 inline void cursor_update(u32 c) { g::layout_Cursor_Update(c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
+// a button the cursor knows pushed as if the pointer had pushed it (fn_8013A2C0: its push
+// animation and sound, then its callbacks); false if the cursor didn't take it (the button isn't
+// one of its own, or the cursor is locked)
+inline bool cursor_press(u32 c, u32 button) { return g::fn_8013A2C0(c, button, 0) != 0; }
 // the cursor's layouts, drawn last: its shadow, then the hand
 inline void cursor_draw(u32 c) {
     g::layout_LayoutWrapper_Draw(c + 0x130);
@@ -71,8 +86,9 @@ inline void bottom_ctor(u32 b, u32 cursor) { g::layout_parts_Bottom_ctor(b, BOTT
 inline void bottom_set_mode(u32 b, u32 mode, bool at_once) {
     g::layout_parts_Bottom_SetMode(b, mode, at_once, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }
-// the B button: press the way back of the current mode
-inline void bottom_press_back(u32 b, u32 cursor) { g::layout_parts_Bottom_PressBack(b, cursor); }
+// the B button: press the way back of the current mode (the cursor presses it, fn_8013A2C0: its
+// push animation and sound, then its pushed hook); false if the cursor didn't take the press
+inline bool bottom_press_back(u32 b, u32 cursor) { return g::layout_parts_Bottom_PressBack(b, cursor) != 0; }
 // its window virtuals: +0x8 dtor, +0xC Update, +0x10 Draw
 inline void bottom_update(u32 b) { gcall<u32>(guest::load32(guest::load32(b) + 0xC), b); }
 inline void bottom_draw(u32 b) { gcall<u32>(guest::load32(guest::load32(b) + 0x10), b); }

@@ -20,8 +20,10 @@
 //     4 + 4 * colour + component)
 //   layout::Button (0x69C): +0x4 its exclusive group, +0xC the layout::Cursor it is registered
 //     with, +0x10 u8 focused (the pointer is on it), +0x14 its ButtonLayout (a LayoutWrapper
-//     first: the button's own layout), +0x4A0 its balloon (a tooltip) helper, +0x4BC / +0x4C0 the
-//     labels of its focus and push sounds (pointers that must last), +0x5B8 active, +0x5B9 enabled
+//     first: the button's own layout), +0x4A0 its balloon (a tooltip) helper, +0x4AC its sound
+//     helper (vtable +0x10 plays a sound by its label; +0x10 / +0x14 of it, the button's +0x4BC /
+//     +0x4C0, are the labels of its focus and push sounds: pointers that must last), +0x5B8 active,
+//     +0x5B9 enabled
 //   exclusive group (0x10): a vector of its buttons, +0xC set while one of them is being pushed
 #pragma once
 
@@ -138,6 +140,13 @@ inline void play(u32 w, u32 anim) {
     g::std_tr1_function_dtor(_gframe.sp, (u32)-1, 0, 0, 0);  // the function's destructor
 }
 
+// LayoutWrapper::PlayAnimLoop: the animation plays over and over (its task lives in the wrapper:
+// nothing is allocated), until another is played or posed
+inline void play_loop(u32 w, u32 anim) {
+    if (anim)
+        g::layout_LayoutWrapper_PlayAnimLoop(w, anim, 0, 0, 0);
+}
+
 // LayoutWrapper::GetPlayingAnim: an animation is playing
 inline bool animating(u32 w) { return g::layout_LayoutWrapper_GetPlayingAnim(w) != 0; }
 
@@ -223,6 +232,11 @@ inline void text_reserve(u32 box, u32 chars) {
 inline void set_text(u32 box, const std::u16string& s) {
     gcall<u32>(guest::load32(guest::load32(box) + 0x7C), box, (u32)Text(s), 0u);
 }
+// text already in guest memory (UTF-16, NUL-terminated): one of the channel's messages
+inline void set_text_at(u32 box, u32 text) { gcall<u32>(guest::load32(guest::load32(box) + 0x7C), box, text, 0u); }
+// the channel's message `id` (lib::Message::Get: its text in the message file, the language's);
+// e.g. 1 はい, 2 いいえ
+inline u32 message(u32 id) { return g::lib_Message_Get(0, id); }
 inline void font_size(u32 box, f32 w, f32 h) {
     store_f32(box + 0xE8, w);
     store_f32(box + 0xEC, h);
@@ -325,6 +339,24 @@ inline void set_sounds(u32 b, u32 focus_slot, u32 push_slot) {
     guest::store32(b + 0x4BC, focus_slot ? sound_label(focus_slot) : 0);
     guest::store32(b + 0x4C0, push_slot ? sound_label(push_slot) : 0);
 }
+// WAV_SE_031_CLICK_GENERAL_NO (lbl_8087D78C, beside the others): a refusal's push, the one the
+// channel's dialogs give their いいえ (layout::parts::CommonDialogue's second button)
+const u32 SE_CLICK_GENERAL_NO = GA_lbl_8087D78C;
+// a sound by its label (a C string), through the button's sound helper (the channel's windows
+// play WAV_SE_008_WINDOW_OPEN_B, lbl_8079D880, as they open)
+inline void play_sound(u32 b, u32 label) { gcall<u32>(guest::load32(guest::load32(b + 0x4AC) + 0x10), b + 0x4AC, label); }
+const u32 SE_LABEL_WINDOW_OPEN_B = GA_lbl_8079D880;
+
+// The A and B buttons' marks: a button marked A (or B) is pressed by the remote's A (or B) while
+// the pointer is away from the screen, and then shows the mark (a badge at its Loc_Push_Mark), as
+// the channel's dialogs mark their はい and いいえ (layout::parts::CommonDialogue, fn_80155A14).
+// The cursor keeps the marks (the button's +0x9 A, +0xA B: layout::Cursor finds the marked button
+// that is active, fn_8013AEC8 / fn_8013AF98, and shows or hides the marks as the pointer leaves or
+// comes back). fn_801387E0 / fn_80138834 (button, cursor, the mark's kind 0, shown now as the
+// pointer is) mark it, fn_80138888 (button, cursor) takes both marks away.
+inline void mark_a(u32 b, u32 cursor) { g::fn_801387E0(b, cursor, 0, 1); }
+inline void mark_b(u32 b, u32 cursor) { g::fn_80138834(b, cursor, 0, 1); }
+inline void unmark(u32 b, u32 cursor) { g::fn_80138888(b, cursor); }
 
 // ---- the screen's wipe (layout::parts::Wipe, game::wipe(): +0x10C the kind playing; its layouts
 // per kind at +0, +4, ...: layout_parts_Wipe_GetCurrentLayout gives the one playing)
