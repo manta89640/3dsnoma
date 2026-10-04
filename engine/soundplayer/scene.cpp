@@ -11,11 +11,10 @@
 // and next track, + pauses and resumes, − stops, B goes back to the room.
 #include "engine/soundplayer/sound_player.h"
 
-#include <algorithm>
-
 #include "engine/soundplayer/catalog.h"
 #include "engine/soundplayer/controls.h"
 #include "engine/soundplayer/game.h"
+#include "engine/soundplayer/lyt.h"
 #include "engine/soundplayer/music.h"
 #include "engine/soundplayer/stage.h"
 #include "engine/soundplayer/track_list.h"
@@ -197,9 +196,9 @@ const char* const CLASS_NAME = "scene::SoundPlayerScene";
 void make_lasting() {
     engine::system::host_scene_factory(CLASS_NAME, &make_scene);
     reserve_bar_button();
-    engine::system::hookable_button_class(game::VTABLE_LAYOUT_BUTTON, game::LAYOUT_BUTTON_SLOTS);
-    // layout::movie::PlayButton (the controls' play/pause disc): 21 virtuals, as layout::Button's
-    engine::system::hookable_button_class(GA_lbl_80796B4C, 21);
+    engine::system::hookable_button_class(lyt::VTABLE_LAYOUT_BUTTON, lyt::LAYOUT_BUTTON_SLOTS);
+    // layout::movie::PlayButton (the controls' play/pause disc): as many virtuals as layout::Button
+    engine::system::hookable_button_class(lyt::VTABLE_PLAY_BUTTON, lyt::LAYOUT_BUTTON_SLOTS);
 }
 
 }  // namespace

@@ -61,13 +61,15 @@ const int VISIBLE = 6;                // rows shown at once
 const int SLOTS = VISIBLE + 2;        // row buttons: the ones shown, one coming in, a spare
 const f32 PITCH = 44;                 // the message list's row pitch
 const f32 FIRST_Y = 110;              // the top row's centre
-const f32 ROW_W = 252, ROW_H = 41.43f;  // 16 inside the window's sides, as the message list's
+const f32 ROW_W = 252;                // 16 inside the window's sides, as the message list's
+const f32 ROW_H = 41.43f;             // the message list's row height (Message_List_Text's Bound_Btn)
 const f32 MARK_X = -112;              // ♪ / ∥ in the playing row
 const f32 TEXT_X = 13, TEXT_W = 222;  // the name: left-aligned from x -98
 const f32 HEADER_X = 0, HEADER_W = 240;
 const f32 FONT_W = 22.08f, FONT_H = 26.22f;  // the dialogs' and balloons' text size
 const f32 HEADER_FONT_W = 17.6f, HEADER_FONT_H = 20.9f;
-const f32 TAB_SCALE = 0.8f, TAB_H = 44 * TAB_SCALE;
+const f32 TAB_LAYOUT_H = 44;          // the tabs' height in their layout (Profile_Up_Btn's Pic_Btn)
+const f32 TAB_SCALE = 0.8f, TAB_H = TAB_LAYOUT_H * TAB_SCALE;
 const u32 NAME_CHARS = 32;            // room in each text box
 // widths inside the window: 1 / the location adjust's scale (set as the list is made)
 f32 wide = 1;
@@ -89,7 +91,7 @@ int rhythm(int step) { return RHYTHM[std::min(step, 2)]; }
 // ---- the message board's focus colour in the rows' animations, made the room's cyan
 
 const u32 RLMC = 0x524C4D43;  // a material colour animation
-const f32 REST_GREY = 80, CYAN_F[3] = {52, 190, 237};
+const f32 REST_GREY = 80, CYAN_F[3] = {(f32)CYAN.r, (f32)CYAN.g, (f32)CYAN.b};
 
 // An RLAN's pai1 block (the AnimTransform's +0xC): +0xE the number of contents, +0x10 the offset
 // of their offsets; a content: +0x14 its number of infos, +0x18 their offsets; an info: +0 its
@@ -419,7 +421,7 @@ void TrackList::Impl::follow_music(const Music& music) {
 void TrackList::Impl::input() {
     u32 pressed = game::buttons_triggered(), held = game::buttons_held();
     f32 px, py;
-    pointer_at(px, py);
+    game::pointer_at(px, py);
     if (game::pointer_on_screen() && (std::fabs(px - pointer_x) > 0.002f || std::fabs(py - pointer_y) > 0.002f))
         pad_mode = false;
     pointer_x = px;
@@ -568,7 +570,7 @@ void TrackList::Impl::pose_highlight() {
 void TrackList::update(const Music& music) {
     Impl& m = *impl_;
     m.frames++;
-    if (!m.opened && m.frames > 1 && (!wipe_playing() || m.frames > 90)) {
+    if (!m.opened && screen_may_open(m.frames)) {
         m.opened = true;
         play(m.window, m.fade_in);
     }

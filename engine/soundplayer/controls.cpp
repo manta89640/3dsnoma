@@ -42,12 +42,14 @@ const char* const TITLE_LEX = "layout/Common/Top_Message.lex";
 
 // Geometry (layout units: 608 x 456, the origin at the centre, y up). The row at the room bar's
 // height; the play disc at PLAY_X, the stop button at STOP_X (the row's buttons: previous at -80,
-// next at +83 from the disc, the half-capsules 101 wide, the stop square 84; all scaled by
-// CONTROLS_SCALE), so that the four span the right half's x 8..292, centred on the stage.
+// next at +83 from the disc, the half-capsules 101 wide, the stop square 84, STOP_GAP between the
+// next button and the stop square; all scaled by CONTROLS_SCALE), so that the four span the right
+// half's x 8..292, centred on the stage.
 const f32 CONTROLS_Y = -162;
 const f32 CONTROLS_SCALE = 0.8f;
 const f32 PLAY_X = 113;
-const f32 STOP_X = PLAY_X + (83 + 50.5f + 6 + 42) * CONTROLS_SCALE;
+const f32 STOP_GAP = 6;  // by eye: the row has no place for a stop button (it takes the guide's locator)
+const f32 STOP_X = PLAY_X + (83 + 101 / 2.0f + STOP_GAP + 84 / 2.0f) * CONTROLS_SCALE;
 // the title: over the stage (x 0..300), at the screens' heading height (its text box is at y 169,
 // the rule at 160)
 const f32 TITLE_X = 150, TITLE_W = 290;
@@ -149,7 +151,8 @@ void Controls::Impl::show_playing(bool playing) {
     u32 layout = button_layout(play);
     guest::store8(play + PB_SHOWS_PAUSE, playing ? 1 : 0);
     u32 focus = guest::load32(play + (playing ? PB_FOCUS_STOP : PB_FOCUS_PLAY));
-    // ButtonLayout's map of its standard animations (fn_801244EC: the entry for a name)
+    // ButtonLayout's map of its standard animations (fn_801244EC(map, name, anim): ButtonLayout's
+    // SetAnim, the map's entry for the name set to anim)
     g::fn_801244EC(layout, ANIM_PUSH, guest::load32(play + (playing ? PB_PUSH_PLAY : PB_PUSH_STOP)));
     g::fn_801244EC(layout, ANIM_FOCUS, focus);
     if (focused(play))
@@ -177,7 +180,7 @@ void Controls::Impl::set_title(const Music& music, const Track* playing) {
 void Controls::update(const Music& music, const Track* playing) {
     Impl& m = *impl_;
     m.frames++;
-    if (!m.opened && m.frames > 1 && (!wipe_playing() || m.frames > 90)) {
+    if (!m.opened && screen_may_open(m.frames)) {
         m.opened = true;
         play(m.row, m.row_fade_in);
         play(m.title, m.title_fade_in);

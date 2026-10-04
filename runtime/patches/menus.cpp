@@ -8,8 +8,13 @@
 // hit test and its focus check ask first.
 // Buttons are reached with the pointer only (layout::Cursor asks every listener's hit test; there
 // is no D-pad focus and no default focus), so nothing else has to skip them.
+// The room's bar also gets a sixth button, the Sound Player's (engine/soundplayer), in いろんな間's
+// place, いろんな間 moving into the shop's; the Sound Player's scene factory is made with the
+// application's (fn_80247FC0), and SceneTransit::Go (fn_800706E0) opens the Sound Player for the
+// button's own To.
 
 #include "engine/soundplayer/sound_player.h"
+#include "engine/system/host_scene.h"
 #include "hw/ios/net.h"
 #include "noma_decomp.h"
 
@@ -55,12 +60,12 @@ void move_to(u32 button, u32 other) {
         guest::store32(locator(button) + 0x2C + 4 * i, guest::load32(locator(other) + 0x2C + 4 * i));
 }
 
-// layout::option::Option, the options' top menu: a column of four buttons (Option_Scene.lex,
-// under Loc_Btn_Top), pressed as Option::ButtonType 0..3 (scene_OptionScene_StateTop_OnButton;
-// scene_OptionScene_StateTop_OnClosed then goes to the state)
 // controller::living::SceneTransit::To for the Sound Player (the game's own go up to 8)
 const u32 TO_SOUND_PLAYER = 9;
 
+// layout::option::Option, the options' top menu: a column of four buttons (Option_Scene.lex,
+// under Loc_Btn_Top), pressed as Option::ButtonType 0..3 (scene_OptionScene_StateTop_OnButton;
+// scene_OptionScene_StateTop_OnClosed then goes to the state)
 enum : u32 {
     OPTION_FAMILY = 0x460,   // 0: the family's Miis and profiles (StateFamily)
     OPTION_VIDEO = 0xAFC,    // 1: streaming quality (StateVideo)
@@ -156,7 +161,7 @@ void fn_80247FC0(u32 r3) {
 // has been wiped out. The Sound Player's button asks for its own To.
 u32 fn_800706E0(u32 r3, u32 r4) {
     if (r4 == TO_SOUND_PLAYER) {
-        fn_8018E0C8(guest::load32(GA_lbl_80882CA8), engine::soundplayer::scene_factory());
+        engine::system::change_scene(engine::soundplayer::scene_factory());
         return 0;
     }
     return fn_800706E0_orig(r3, r4);

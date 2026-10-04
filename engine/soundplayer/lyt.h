@@ -27,10 +27,15 @@
 
 #include <string>
 
+#include "engine/math/vecmath.h"
+#include "engine/soundplayer/game.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
 namespace engine::soundplayer::lyt {
+
+using engine::math::load_f32;
+using engine::math::store_f32;
 
 // ---- strings for the game's functions, on the guest stack for the length of one call:
 // f(Name("Focus")) (the temporary lasts until the call returns)
@@ -69,18 +74,6 @@ public:
 private:
     GuestFrame frame_;
 };
-
-inline f32 load_f32(u32 a) {
-    u32 bits = guest::load32(a);
-    f32 f;
-    __builtin_memcpy(&f, &bits, 4);
-    return f;
-}
-inline void store_f32(u32 a, f32 f) {
-    u32 bits;
-    __builtin_memcpy(&bits, &f, 4);
-    guest::store32(a, bits);
-}
 
 // ---- layouts (layout::LayoutWrapper)
 
@@ -198,9 +191,9 @@ inline void location_adjust(u32 pane, bool on) {
 struct Rgb {
     u8 r, g, b;
 };
-const Rgb CYAN = {52, 190, 237};      // the room's focus colour
-const Rgb CYAN_PUSH = {70, 208, 255};  // a pushed button's flash
-const Rgb WHITE = {255, 255, 255};
+constexpr Rgb CYAN = {52, 190, 237};      // the room's focus colour
+constexpr Rgb CYAN_PUSH = {70, 208, 255};  // a pushed button's flash
+constexpr Rgb WHITE = {255, 255, 255};
 
 // a material's tev colour 0 or 1: rgb, alpha
 inline void tev_colour(u32 material, u32 which, Rgb c, u8 a) {
@@ -270,6 +263,10 @@ inline void fit_text(u32 box, const std::u16string& s, f32 width, f32 w, f32 h, 
 // ---- buttons (layout::Button)
 
 const u32 BUTTON_SIZE = 0x69C, PLAY_BUTTON_SIZE = 0x788;
+// the classes' vtables, for engine::system::hookable_button_class: layout::Button has 21
+// virtuals, and layout::movie::PlayButton as many
+const u32 VTABLE_LAYOUT_BUTTON = GA_lbl_80794960, VTABLE_PLAY_BUTTON = GA_lbl_80796B4C;
+const u32 LAYOUT_BUTTON_SLOTS = 21;
 
 // layout::Button::Button(path, parent nw4r::lyt::Layout*, locator name, cursor): hangs from the
 // locator, and the cursor hit-tests it from now on
@@ -329,18 +326,25 @@ inline void set_sounds(u32 b, u32 focus_slot, u32 push_slot) {
     guest::store32(b + 0x4C0, push_slot ? sound_label(push_slot) : 0);
 }
 
-// ---- the screen's wipe (layout::parts::Wipe, lbl_80882C98: +0x10C the kind playing; its
-// layouts per kind at +0, +4, ...: fn_80154FB8 gives the one playing)
+// ---- the screen's wipe (layout::parts::Wipe, game::wipe(): +0x10C the kind playing; its layouts
+// per kind at +0, +4, ...: fn_80154FB8 gives the one playing)
 inline bool wipe_playing() {
-    u32 wipe = guest::load32(GA_lbl_80882C98);
+    u32 wipe = game::wipe();
     return wipe && animating(g::fn_80154FB8(wipe));  // Wipe: the layout of the kind playing
 }
 
-// ---- the pointer (the controller's KPAD status: +0xB60 the position, two f32)
-inline void pointer_at(f32& x, f32& y) {
-    u32 c = guest::load32(GA_lbl_80882C9C);
-    x = load_f32(c + 0xB60);
-    y = load_f32(c + 0xB64);
+// The screen's parts open (their FadeIns start, their buttons become usable) once the white fade
+// into the screen has ended; `frames` counts the parts' updates, this one included. Never on the
+// first update: the application makes the scene and updates it in the same frame, right after the
+// constructor has started the fade (game::wipe_in), and the parts stay shut on that update whatever
+// the wipe reports. (LayoutWrapper::PlayAnim marks the fade's animation task as running at once, so
+// wipe_playing() is already true there: the first-update check only decides anything when no fade
+// was started.) The fade (Fade_White_In) takes 11 frames; WIPE_TIMEOUT_FRAMES, a second and a half,
+// opens the parts anyway should the wipe never report that it has ended, so that a wipe left
+// playing can't keep the screen shut.
+const int WIPE_TIMEOUT_FRAMES = 90;
+inline bool screen_may_open(int frames) {
+    return frames > 1 && (!wipe_playing() || frames > WIPE_TIMEOUT_FRAMES);
 }
 
 }  // namespace engine::soundplayer::lyt

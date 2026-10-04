@@ -57,6 +57,11 @@ u32 host_scene_factory(const char* class_name, HostSceneMaker make);
 // the scene the manager runs now, if it is a HostScene (else nullptr)
 HostScene* current_host_scene();
 
+// lib::SceneManager::ChangeScene (fn_8018E0C8): the manager keeps the factory; its next scene
+// step (once a frame, right before it updates the scene) ends the current scene and makes the
+// factory's, which it then updates
+void change_scene(u32 factory);
+
 // Let the current HostScene hear about a layout::Button's pushes: the button gets a copy of its
 // class's vtable whose push hooks (slots 19 and 20: empty in layout::Button) call the original and
 // then the scene's on_push_start / on_pushed. The class (its vtable, of n_slots virtuals;

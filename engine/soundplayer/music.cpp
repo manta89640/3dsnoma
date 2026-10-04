@@ -16,6 +16,7 @@
 // a tick still to come, +0xEA u8 timebase (ticks a quarter note), +0xEC u16 tempo, +0x160 u32 ticks.
 #include "engine/soundplayer/music.h"
 
+#include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
@@ -39,13 +40,6 @@ u32 sequence_in(s32 s) {
 void play_by_id(u32 id) { g::fn_802A2564(bgm(), id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
 void stop_with_fade(u32 frames) { g::fn_802A2728(bgm(), frames, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
 void stop_now() { g::fn_802A27C8(bgm(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
-
-f32 f32_at(u32 a) {
-    u32 bits = guest::load32(a);
-    f32 f;
-    __builtin_memcpy(&f, &bits, 4);
-    return f;
-}
 
 }  // namespace
 
@@ -112,8 +106,8 @@ Beat Music::beat() const {
     if (!timebase)
         return b;
     b.valid = true;
-    b.bpm = (f32)guest::load16(player + 0xEC) * f32_at(player + 0xD4);
-    f32 to_come = f32_at(player + 0xD8);
+    b.bpm = (f32)guest::load16(player + 0xEC) * engine::math::load_f32(player + 0xD4);
+    f32 to_come = engine::math::load_f32(player + 0xD8);
     if (!(to_come >= 0.0f && to_come <= 1.0f))
         to_come = 1.0f;
     b.beats = ((double)guest::load32(player + 0x160) + (1.0 - to_come)) / timebase;

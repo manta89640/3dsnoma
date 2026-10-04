@@ -27,14 +27,17 @@
 #include <cstring>
 #include <vector>
 
+#include "engine/math/vecmath.h"
+#include "engine/soundplayer/angles.h"
 #include "engine/soundplayer/g3d.h"
+#include "engine/soundplayer/lyt.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
 
 namespace {
 
-const float PI = 3.14159265f;
+using namespace engine::math;
 
 // ---- GX's enums (the SDK's values)
 enum : u32 {
@@ -56,20 +59,20 @@ enum : u32 {
 
 // ---- the amp's measures
 // the cabinet: 58 wide, 46 high (on 3-high feet), 30 deep, edges rounded with a radius of 4
-const float CAB_HX = 29, CAB_Y0 = 3, CAB_Y1 = 49, CAB_HZ = 15, CAB_R = 4;
+const f32 CAB_HX = 29, CAB_Y0 = 3, CAB_Y1 = 49, CAB_HZ = 15, CAB_R = 4;
 // the grille's opening in the front, the speaker's cavity behind it (6 deep), the control strip
-const float GRILLE_HX = 24, GRILLE_Y0 = 8, GRILLE_Y1 = 33, CAVITY_DEPTH = 6;
-const float STRIP_Y0 = 35, STRIP_Y1 = 45;
+const f32 GRILLE_HX = 24, GRILLE_Y0 = 8, GRILLE_Y1 = 33, CAVITY_DEPTH = 6;
+const f32 STRIP_Y0 = 35, STRIP_Y1 = 45;
 // the speaker: its middle and radius on the cavity's back wall
-const float CONE_Y = (GRILLE_Y0 + GRILLE_Y1) / 2, CONE_R = 11.5f;
+const f32 CONE_Y = (GRILLE_Y0 + GRILLE_Y1) / 2, CONE_R = 11.5f;
 // the knobs and the pilot light on the strip
-const float KNOB_Y = (STRIP_Y0 + STRIP_Y1) / 2, KNOB_R = 3.3f, KNOB_DEPTH = 2.4f;
-const float KNOB_X[] = {-15.5f, -6.5f, 2.5f};
-const float PILOT_X = 15.5f, PILOT_R = 2.6f;
+const f32 KNOB_Y = (STRIP_Y0 + STRIP_Y1) / 2, KNOB_R = 3.3f, KNOB_DEPTH = 2.4f;
+const f32 KNOB_X[] = {-15.5f, -6.5f, 2.5f};
+const f32 PILOT_X = 15.5f, PILOT_R = 2.6f;
 
 // colours (the light and the sheen change them per vertex)
 struct Rgb {
-    float r, g, b;
+    f32 r, g, b;
 };
 const Rgb CABINET = {92, 92, 96};
 const Rgb STRIP = {62, 62, 65};
@@ -81,46 +84,41 @@ const Rgb KNOB = {214, 214, 210};
 const Rgb KNOB_MARK = {70, 70, 72};
 const Rgb PILOT_BEZEL = {150, 150, 152};
 const Rgb WHITE = {255, 255, 255};
-// the channel's focus cyan: the pilot light lit, and dimmed between beats and when quiet
-const Rgb CYAN = {52, 190, 237};
+// the room's focus cyan (lyt::CYAN), as floats: the pilot light lit, and dimmed between beats and
+// when quiet
+const Rgb CYAN = {(f32)lyt::CYAN.r, (f32)lyt::CYAN.g, (f32)lyt::CYAN.b};
 
-// ---- vectors
-struct Vec {
-    float x, y, z;
-};
-Vec operator+(Vec a, Vec b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-Vec operator-(Vec a, Vec b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-Vec operator*(Vec a, float s) { return {a.x * s, a.y * s, a.z * s}; }
-float dot(Vec a, Vec b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-Vec normalize(Vec a) {
-    float l = std::sqrt(dot(a, a));
-    return l > 1e-6f ? a * (1.0f / l) : Vec{0, 0, 1};
+// ---- vectors (engine::math's Vec3)
+// a unit vector along a, or +z for a zero one (engine::math's normalize gives NaNs for it)
+Vec3 normalize_or_z(Vec3 a) {
+    f32 l = std::sqrt(dot(a, a));
+    return l > 1e-6f ? a * (1.0f / l) : Vec3{0, 0, 1};
 }
-float axis(const Vec& v, int a) { return a == 0 ? v.x : a == 1 ? v.y : v.z; }
-void set_axis(Vec& v, int a, float f) { (a == 0 ? v.x : a == 1 ? v.y : v.z) = f; }
+f32 axis(const Vec3& v, int a) { return a == 0 ? v.x : a == 1 ? v.y : v.z; }
+void set_axis(Vec3& v, int a, f32 f) { (a == 0 ? v.x : a == 1 ? v.y : v.z) = f; }
 
 // The baked light: a key light from the upper left front, an ambient, and a sheen (a broad
 // highlight toward the camera, which looks at the amp from the front and a little above).
-const Vec LIGHT = normalize({-0.30f, 0.75f, 0.60f});
-const Vec HALF = normalize(LIGHT + normalize({0.0f, 0.15f, 1.0f}));
-u8 clamp8(float v) { return (u8)std::max(0.0f, std::min(255.0f, v + 0.5f)); }
+const Vec3 LIGHT = normalize_or_z({-0.30f, 0.75f, 0.60f});
+const Vec3 HALF = normalize_or_z(LIGHT + normalize_or_z({0.0f, 0.15f, 1.0f}));
+u8 clamp8(f32 v) { return (u8)std::max(0.0f, std::min(255.0f, v + 0.5f)); }
 struct Rgba8 {
     u8 r, g, b, a;
 };
-Rgba8 shade(Rgb c, Vec n, float sheen = 0.18f) {
-    float lit = 0.56f + 0.48f * std::max(0.0f, dot(n, LIGHT));
-    float h = std::max(0.0f, dot(n, HALF));
-    float h2 = h * h, h4 = h2 * h2;
-    float spec = sheen * 255.0f * h4 * h4;
+Rgba8 shade(Rgb c, Vec3 n, f32 sheen = 0.18f) {
+    f32 lit = 0.56f + 0.48f * std::max(0.0f, dot(n, LIGHT));
+    f32 h = std::max(0.0f, dot(n, HALF));
+    f32 h2 = h * h, h4 = h2 * h2;
+    f32 spec = sheen * 255.0f * h4 * h4;
     return {clamp8(c.r * lit + spec), clamp8(c.g * lit + spec), clamp8(c.b * lit + spec), 255};
 }
 Rgba8 flat(Rgb c, u8 a = 255) { return {clamp8(c.r), clamp8(c.g), clamp8(c.b), a}; }
 
 // ---- meshes: quads (a triangle is a quad with its last corner repeated)
 struct Vertex {
-    Vec p;
+    Vec3 p;
     Rgba8 c;
-    float s, t;
+    f32 s, t;
 };
 struct Mesh {
     std::vector<Vertex> v;
@@ -128,7 +126,7 @@ struct Mesh {
         v.push_back(a), v.push_back(b), v.push_back(c), v.push_back(d);
     }
 };
-Vertex vtx(Vec p, Rgba8 c, float s = 0, float t = 0) { return {p, c, s, t}; }
+Vertex vtx(Vec3 p, Rgba8 c, f32 s = 0, f32 t = 0) { return {p, c, s, t}; }
 
 // A box with rounded edges, its faces cut along the lines of each axis (the edge bands at h - r and
 // h on both sides, and the lines a face needs, e.g. an opening's edges: all faces share them, so
@@ -136,31 +134,31 @@ Vertex vtx(Vec p, Rgba8 c, float s = 0, float t = 0) { return {p, c, s, t}; }
 // r, then r further the way it went: that rounds the edges, and the normal is that way (Gouraud
 // shading across the edge bands makes them look round).
 struct RoundedBox {
-    Vec c, h;
-    float r;
-    std::vector<float> lines[3];  // per axis, increasing, from c - h to c + h
+    Vec3 c, h;
+    f32 r;
+    std::vector<f32> lines[3];  // per axis, increasing, from c - h to c + h
 
-    RoundedBox(Vec centre, Vec half, float radius) : c(centre), h(half), r(radius) {
+    RoundedBox(Vec3 centre, Vec3 half, f32 radius) : c(centre), h(half), r(radius) {
         for (int a = 0; a < 3; a++) {
-            float cc = axis(c, a), hh = axis(h, a);
+            f32 cc = axis(c, a), hh = axis(h, a);
             lines[a] = {cc - hh, cc - hh + r, cc + hh - r, cc + hh};
         }
     }
-    void cut(int a, float at) {
+    void cut(int a, f32 at) {
         if (std::find(lines[a].begin(), lines[a].end(), at) != lines[a].end())
             return;
         lines[a].push_back(at);
         std::sort(lines[a].begin(), lines[a].end());
     }
-    void round(Vec q, Vec face_normal, Vec* p, Vec* n) const {
-        Vec inner;
+    void round(Vec3 q, Vec3 face_normal, Vec3* p, Vec3* n) const {
+        Vec3 inner;
         for (int a = 0; a < 3; a++) {
-            float cc = axis(c, a), hh = axis(h, a) - r;
+            f32 cc = axis(c, a), hh = axis(h, a) - r;
             set_axis(inner, a, std::max(cc - hh, std::min(cc + hh, axis(q, a))));
         }
-        Vec d = q - inner;
+        Vec3 d = q - inner;
         // a point of a face's flat part goes nowhere: its normal is the face's
-        *n = dot(d, d) > 1e-6f ? normalize(d) : face_normal;
+        *n = dot(d, d) > 1e-6f ? normalize_or_z(d) : face_normal;
         *p = inner + *n * r;
     }
     // the faces (axis, side) asked for: colour(axis, side, cell middle) gives a cell's colour,
@@ -170,14 +168,14 @@ struct RoundedBox {
         for (const auto& face : faces) {
             int fa = face.first, side = face.second;
             int ua = (fa + 1) % 3, va = (fa + 2) % 3;
-            const std::vector<float>& U = lines[ua];
-            const std::vector<float>& V = lines[va];
-            float plane = axis(c, fa) + side * axis(h, fa);
-            Vec fn = {0, 0, 0};
-            set_axis(fn, fa, (float)side);
+            const std::vector<f32>& U = lines[ua];
+            const std::vector<f32>& V = lines[va];
+            f32 plane = axis(c, fa) + side * axis(h, fa);
+            Vec3 fn = {0, 0, 0};
+            set_axis(fn, fa, (f32)side);
             for (size_t i = 0; i + 1 < U.size(); i++) {
                 for (size_t j = 0; j + 1 < V.size(); j++) {
-                    Vec mid;
+                    Vec3 mid;
                     set_axis(mid, fa, plane);
                     set_axis(mid, ua, (U[i] + U[i + 1]) / 2);
                     set_axis(mid, va, (V[j] + V[j + 1]) / 2);
@@ -185,14 +183,14 @@ struct RoundedBox {
                         continue;
                     Rgb col = colour(fa, side, mid);
                     Vertex q[4];
-                    const float us[4] = {U[i], U[i + 1], U[i + 1], U[i]};
-                    const float vs[4] = {V[j], V[j], V[j + 1], V[j + 1]};
+                    const f32 us[4] = {U[i], U[i + 1], U[i + 1], U[i]};
+                    const f32 vs[4] = {V[j], V[j], V[j + 1], V[j + 1]};
                     for (int k = 0; k < 4; k++) {
-                        Vec pt;
+                        Vec3 pt;
                         set_axis(pt, fa, plane);
                         set_axis(pt, ua, us[k]);
                         set_axis(pt, va, vs[k]);
-                        Vec p, n;
+                        Vec3 p, n;
                         round(pt, fn, &p, &n);
                         q[k] = vtx(p, shade(col, n));
                     }
@@ -205,8 +203,8 @@ struct RoundedBox {
 
 // a plain box's faces but its bottom and back (never seen: the camera looks from the front, above),
 // and its top unless asked for
-void box(Mesh& m, Vec lo, Vec hi, Rgb col, bool top = true) {
-    Vec n = {0, 0, 1};
+void box(Mesh& m, Vec3 lo, Vec3 hi, Rgb col, bool top = true) {
+    Vec3 n = {0, 0, 1};
     m.quad(vtx({lo.x, lo.y, hi.z}, shade(col, n)), vtx({hi.x, lo.y, hi.z}, shade(col, n)),
            vtx({hi.x, hi.y, hi.z}, shade(col, n)), vtx({lo.x, hi.y, hi.z}, shade(col, n)));
     n = {0, 1, 0};
@@ -224,20 +222,20 @@ void box(Mesh& m, Vec lo, Vec hi, Rgb col, bool top = true) {
 // a disc of rings facing +z around `centre`: per ring from the rim inward its radius, its z, its
 // colour and how much its normal leans outward; the last ring's radius is 0 (the middle)
 struct Ring {
-    float r, z;
+    f32 r, z;
     Rgb col;
-    float tilt;
+    f32 tilt;
 };
-void disc(Mesh& m, Vec centre, const std::vector<Ring>& rings, int segs, float sheen) {
+void disc(Mesh& m, Vec3 centre, const std::vector<Ring>& rings, int segs, f32 sheen) {
     for (size_t k = 0; k + 1 < rings.size(); k++) {
         const Ring& o = rings[k];
         const Ring& i = rings[k + 1];
         for (int s = 0; s < segs; s++) {
-            float a0 = 2 * PI * s / segs, a1 = 2 * PI * (s + 1) / segs;
-            Vec d0 = {std::cos(a0), std::sin(a0), 0}, d1 = {std::cos(a1), std::sin(a1), 0};
-            auto at = [&](const Ring& g, Vec d) {
-                Vec n = normalize(d * g.tilt + Vec{0, 0, 1});
-                return vtx(centre + Vec{d.x * g.r, d.y * g.r, g.z}, shade(g.col, n, sheen));
+            f32 a0 = 2 * PI * s / segs, a1 = 2 * PI * (s + 1) / segs;
+            Vec3 d0 = {std::cos(a0), std::sin(a0), 0}, d1 = {std::cos(a1), std::sin(a1), 0};
+            auto at = [&](const Ring& g, Vec3 d) {
+                Vec3 n = normalize_or_z(d * g.tilt + Vec3{0, 0, 1});
+                return vtx(centre + Vec3{d.x * g.r, d.y * g.r, g.z}, shade(g.col, n, sheen));
             };
             m.quad(at(o, d0), at(o, d1), at(i, d1), at(i, d0));
         }
@@ -246,25 +244,25 @@ void disc(Mesh& m, Vec centre, const std::vector<Ring>& rings, int segs, float s
 
 // A round knob facing +z at (x, y) on the plane z: a short cylinder, a slightly domed cap and a
 // dark pointer line at `angle` (radians).
-void knob(Mesh& m, float x, float y, float z, float angle) {
+void knob(Mesh& m, f32 x, f32 y, f32 z, f32 angle) {
     const int SEGS = 7;
     for (int i = 0; i < SEGS; i++) {
-        float a0 = 2 * PI * i / SEGS, a1 = 2 * PI * (i + 1) / SEGS;
-        Vec n0 = {std::cos(a0), std::sin(a0), 0}, n1 = {std::cos(a1), std::sin(a1), 0};
-        Vec p0 = {x + KNOB_R * n0.x, y + KNOB_R * n0.y, z}, p1 = {x + KNOB_R * n1.x, y + KNOB_R * n1.y, z};
-        Vec f0 = p0 + Vec{0, 0, KNOB_DEPTH}, f1 = p1 + Vec{0, 0, KNOB_DEPTH};
+        f32 a0 = 2 * PI * i / SEGS, a1 = 2 * PI * (i + 1) / SEGS;
+        Vec3 n0 = {std::cos(a0), std::sin(a0), 0}, n1 = {std::cos(a1), std::sin(a1), 0};
+        Vec3 p0 = {x + KNOB_R * n0.x, y + KNOB_R * n0.y, z}, p1 = {x + KNOB_R * n1.x, y + KNOB_R * n1.y, z};
+        Vec3 f0 = p0 + Vec3{0, 0, KNOB_DEPTH}, f1 = p1 + Vec3{0, 0, KNOB_DEPTH};
         m.quad(vtx(p0, shade(KNOB, n0, 0.1f)), vtx(p1, shade(KNOB, n1, 0.1f)), vtx(f1, shade(KNOB, n1, 0.1f)),
                vtx(f0, shade(KNOB, n0, 0.1f)));
         // the cap: a fan of degenerate quads, its middle a little forward
-        Vec e0 = normalize(n0 * 0.35f + Vec{0, 0, 1}), e1 = normalize(n1 * 0.35f + Vec{0, 0, 1});
-        Vec top = {x, y, z + KNOB_DEPTH + 0.5f};
+        Vec3 e0 = normalize_or_z(n0 * 0.35f + Vec3{0, 0, 1}), e1 = normalize_or_z(n1 * 0.35f + Vec3{0, 0, 1});
+        Vec3 top = {x, y, z + KNOB_DEPTH + 0.5f};
         Rgba8 tc = shade(KNOB, {0, 0, 1}, 0.25f);
         m.quad(vtx(f0, shade(KNOB, e0, 0.25f)), vtx(f1, shade(KNOB, e1, 0.25f)), vtx(top, tc), vtx(top, tc));
     }
-    Vec d = {std::cos(angle), std::sin(angle), 0}, s = {-d.y * 0.45f, d.x * 0.45f, 0};
-    float zf = z + KNOB_DEPTH + 0.55f;
-    Vec a = {x + d.x * 0.6f, y + d.y * 0.6f, zf};
-    Vec b = {x + d.x * (KNOB_R - 0.4f), y + d.y * (KNOB_R - 0.4f), zf};
+    Vec3 d = {std::cos(angle), std::sin(angle), 0}, s = {-d.y * 0.45f, d.x * 0.45f, 0};
+    f32 zf = z + KNOB_DEPTH + 0.55f;
+    Vec3 a = {x + d.x * 0.6f, y + d.y * 0.6f, zf};
+    Vec3 b = {x + d.x * (KNOB_R - 0.4f), y + d.y * (KNOB_R - 0.4f), zf};
     Rgba8 mark = shade(KNOB_MARK, {0, 0, 1}, 0.0f);
     m.quad(vtx(a - s, mark), vtx(b - s, mark), vtx(b + s, mark), vtx(a + s, mark));
 }
@@ -300,7 +298,7 @@ std::vector<u8> tile_i8(int w, int h, const std::vector<u8>& i8) {
 const int CLOTH_SIZE = 16;
 // the units of the grille a repeat covers (4 threads each way: a thread every 3.5 units, two
 // pixels or more on the screen however far the camera is)
-const float CLOTH_REPEAT = 14.0f;
+const f32 CLOTH_REPEAT = 14.0f;
 std::vector<u8> make_cloth() {
     std::vector<u8> ia(CLOTH_SIZE * CLOTH_SIZE * 2);
     for (int y = 0; y < CLOTH_SIZE; y++)
@@ -328,9 +326,9 @@ std::vector<u8> make_blob() {
     std::vector<u8> i8(BLOB_SIZE * BLOB_SIZE);
     for (int y = 0; y < BLOB_SIZE; y++)
         for (int x = 0; x < BLOB_SIZE; x++) {
-            float dx = (x + 0.5f) / BLOB_SIZE * 2 - 1, dy = (y + 0.5f) / BLOB_SIZE * 2 - 1;
-            float d2 = dx * dx + dy * dy;
-            float v = d2 >= 1 ? 0 : 1 - d2;
+            f32 dx = (x + 0.5f) / BLOB_SIZE * 2 - 1, dy = (y + 0.5f) / BLOB_SIZE * 2 - 1;
+            f32 d2 = dx * dx + dy * dy;
+            f32 v = d2 >= 1 ? 0 : 1 - d2;
             i8[y * BLOB_SIZE + x] = clamp8(255 * v * v);
         }
     return tile_i8(BLOB_SIZE, BLOB_SIZE, i8);
@@ -341,7 +339,7 @@ void put32(std::vector<u8>& out, u32 v) {
     for (int shift = 24; shift >= 0; shift -= 8)
         out.push_back((u8)(v >> shift));
 }
-void putf(std::vector<u8>& out, float f) {
+void putf(std::vector<u8>& out, f32 f) {
     u32 bits;
     std::memcpy(&bits, &f, 4);
     put32(out, bits);
@@ -378,37 +376,17 @@ Block make_list(const Mesh& m, bool textured) {
     return to_guest(dl);
 }
 
-// ---- matrices (3x4, rows)
-struct Mtx {
-    float m[3][4];
-};
-Mtx mul(const Mtx& a, const Mtx& b) {
-    Mtx r;
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 4; j++)
-            r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j] +
-                        (j == 3 ? a.m[i][3] : 0);
-    return r;
-}
+// ---- matrices (engine::math's Mtx34: 3x4, rows)
 // translate(t) x rotate about y (degrees; 0 faces +z, positive turns toward +x) x scale
-Mtx place(Vec t, float yaw_deg, Vec scale = {1, 1, 1}) {
-    float a = yaw_deg * PI / 180, c = std::cos(a), s = std::sin(a);
+Mtx34 place(Vec3 t, f32 yaw_deg, Vec3 scale = {1, 1, 1}) {
+    f32 a = deg_to_rad(yaw_deg), c = std::cos(a), s = std::sin(a);
     return {{{c * scale.x, 0, s * scale.z, t.x}, {0, scale.y, 0, t.y}, {-s * scale.x, 0, c * scale.z, t.z}}};
 }
-Mtx read_mtx(u32 a) {
-    Mtx r;
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 4; j++)
-            r.m[i][j] = g3d::load_f32(a + (u32)(i * 16 + j * 4));
-    return r;
-}
 // GXLoadPosMtxImm into matrix 0 from a copy on the guest stack, and make it the current one
-void load_matrix(const Mtx& mtx) {
+void load_matrix(const Mtx34& mtx) {
     GFRAME(0x40);
     u32 a = (u32)&GS(u32, 0x8);
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 4; j++)
-            g3d::store_f32(a + (u32)(i * 16 + j * 4), mtx.m[i][j]);
+    store(a, mtx);
     g::GXLoadPosMtxImm(a, GX_PNMTX0);
     g::GXSetCurrentMtx(GX_PNMTX0);
 }
@@ -447,7 +425,7 @@ void tev_register(Rgba8 c) {
     g::GXSetTevColor(GX_TEVREG1, a);
 }
 
-Rgba8 mix(Rgb a, Rgb b, float t, float alpha) {
+Rgba8 mix(Rgb a, Rgb b, f32 t, f32 alpha) {
     return {clamp8(a.r + (b.r - a.r) * t), clamp8(a.g + (b.g - a.g) * t), clamp8(a.b + (b.b - a.b) * t),
             clamp8(255 * alpha)};
 }
@@ -471,20 +449,20 @@ Amp::Impl::Impl() {
     RoundedBox cab({0, (CAB_Y0 + CAB_Y1) / 2, 0}, {CAB_HX, (CAB_Y1 - CAB_Y0) / 2, CAB_HZ}, CAB_R);
     cab.cut(0, -GRILLE_HX), cab.cut(0, GRILLE_HX);
     cab.cut(1, GRILLE_Y0), cab.cut(1, GRILLE_Y1), cab.cut(1, STRIP_Y0), cab.cut(1, STRIP_Y1);
-    auto in_front = [](int a, int side, Vec p) {
+    auto in_front = [](int a, int side, Vec3 p) {
         return a == 2 && side == 1 && p.x > -GRILLE_HX && p.x < GRILLE_HX;
     };
     // the front, the top and the sides (the bottom and the back are never seen)
     cab.emit(
         body, {{2, 1}, {1, 1}, {0, -1}, {0, 1}},
-        [&](int a, int side, Vec p) {
+        [&](int a, int side, Vec3 p) {
             return in_front(a, side, p) && p.y > STRIP_Y0 && p.y < STRIP_Y1 ? STRIP : CABINET;
         },
-        [&](int a, int side, Vec p) { return in_front(a, side, p) && p.y > GRILLE_Y0 && p.y < GRILLE_Y1; });
+        [&](int a, int side, Vec3 p) { return in_front(a, side, p) && p.y > GRILLE_Y0 && p.y < GRILLE_Y1; });
     // the cavity: its four walls from the opening back, and its back wall
-    const float zf = CAB_HZ, zb = CAB_HZ - CAVITY_DEPTH;
-    const float x0 = -GRILLE_HX, x1 = GRILLE_HX, y0 = GRILLE_Y0, y1 = GRILLE_Y1;
-    auto wall = [&](Vec a, Vec b, Vec c, Vec d, Vec n) {
+    const f32 zf = CAB_HZ, zb = CAB_HZ - CAVITY_DEPTH;
+    const f32 x0 = -GRILLE_HX, x1 = GRILLE_HX, y0 = GRILLE_Y0, y1 = GRILLE_Y1;
+    auto wall = [&](Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 n) {
         Rgba8 col = shade(CAVITY, n, 0);
         body.quad(vtx(a, col), vtx(b, col), vtx(c, col), vtx(d, col));
     };
@@ -496,14 +474,14 @@ Amp::Impl::Impl() {
     body.quad(vtx({x0, y0, zb}, back), vtx({x1, y0, zb}, back), vtx({x1, y1, zb}, back),
               vtx({x0, y1, zb}, back));
     // four little feet, a strap handle on top
-    for (float fx : {-21.0f, 21.0f})
-        for (float fz : {-9.0f, 9.0f})
+    for (f32 fx : {-21.0f, 21.0f})
+        for (f32 fz : {-9.0f, 9.0f})
             box(body, {fx - 3.5f, 0, fz - 3.5f}, {fx + 3.5f, CAB_Y0 + 0.5f, fz + 3.5f}, FOOT, false);
-    for (float hx : {-13.0f, 13.0f})
+    for (f32 hx : {-13.0f, 13.0f})
         box(body, {hx - 1.5f, CAB_Y1 - 0.5f, -2}, {hx + 1.5f, CAB_Y1 + 3.5f, 2}, HANDLE, false);
     box(body, {-15.5f, CAB_Y1 + 3.5f, -2.4f}, {15.5f, CAB_Y1 + 6, 2.4f}, HANDLE);
     // the knobs, turned this way and that, and the pilot light's bezel
-    const float KNOB_ANGLE[] = {2.2f, 1.2f, 0.4f};
+    const f32 KNOB_ANGLE[] = {2.2f, 1.2f, 0.4f};
     for (int k = 0; k < 3; k++)
         knob(body, KNOB_X[k], KNOB_Y, CAB_HZ, KNOB_ANGLE[k]);
     disc(body, {PILOT_X, KNOB_Y, CAB_HZ},
@@ -536,20 +514,20 @@ Amp::Impl::Impl() {
     // glow around the light
     Rgba8 w = flat(WHITE);
     Mesh floor;
-    const float SX = 44, SZ = 27, SY = 0.3f;
+    const f32 SX = 44, SZ = 27, SY = 0.3f;
     floor.quad(vtx({-SX, SY, SZ}, w, 0, 1), vtx({SX, SY, SZ}, w, 1, 1), vtx({SX, SY, -SZ}, w, 1, 0),
                vtx({-SX, SY, -SZ}, w, 0, 0));
     shadow = make_list(floor, true);
     Mesh cloth_quad;
-    const float zc = CAB_HZ - 0.6f;
+    const f32 zc = CAB_HZ - 0.6f;
     Rgba8 cc = shade(CLOTH, {0, 0, 1}, 0.0f);
-    auto cv = [&](float x, float y) {
+    auto cv = [&](f32 x, f32 y) {
         return vtx({x, y, zc}, cc, (x + GRILLE_HX) / CLOTH_REPEAT, (GRILLE_Y1 - y) / CLOTH_REPEAT);
     };
     cloth_quad.quad(cv(x0, y0), cv(x1, y0), cv(x1, y1), cv(x0, y1));
     grille = make_list(cloth_quad, true);
     Mesh halo;
-    const float G = 9.0f, GZ = CAB_HZ + 2.2f;
+    const f32 G = 9.0f, GZ = CAB_HZ + 2.2f;
     halo.quad(vtx({PILOT_X - G, KNOB_Y - G, GZ}, w, 0, 1), vtx({PILOT_X + G, KNOB_Y - G, GZ}, w, 1, 1),
               vtx({PILOT_X + G, KNOB_Y + G, GZ}, w, 1, 0), vtx({PILOT_X - G, KNOB_Y + G, GZ}, w, 0, 0));
     glow = make_list(halo, true);
@@ -582,12 +560,12 @@ Amp::Amp() : impl_(new Impl) {}
 
 Amp::~Amp() { delete impl_; }
 
-void Amp::draw(u32 view, const float at[3], float yaw, float pulse) {
+void Amp::draw(u32 view, const f32 at[3], f32 yaw, f32 pulse) {
     const Impl& a = *impl_;
     if (!a.ok)
         return;
     pulse = std::max(0.0f, std::min(1.0f, pulse));
-    Mtx model = mul(read_mtx(view), place({at[0], at[1], at[2]}, yaw));
+    Mtx34 model = concat(load<Mtx34>(view), place({at[0], at[1], at[2]}, yaw));
 
     // the state all the lists share: vertex colours unlit, one TEV stage, depth tested
     g::GXSetNumChans(1);
@@ -612,9 +590,9 @@ void Amp::draw(u32 view, const float at[3], float yaw, float pulse) {
     g::GXCallDisplayList(a.cabinet.addr, a.cabinet.size);
 
     // the speaker: swells and brightens on the beat (register 1 scales its colours)
-    float swell = 1.0f + 0.10f * pulse;
-    Vec cone_at = {0, CONE_Y, CAB_HZ - CAVITY_DEPTH + 0.05f};
-    load_matrix(mul(model, place(cone_at, 0, {swell, swell, 1 + 2.0f * pulse})));
+    f32 swell = 1.0f + 0.10f * pulse;
+    Vec3 cone_at = {0, CONE_Y, CAB_HZ - CAVITY_DEPTH + 0.05f};
+    load_matrix(concat(model, place(cone_at, 0, {swell, swell, 1 + 2.0f * pulse})));
     tev_register(mix({205, 205, 205}, WHITE, pulse, 1));
     tev(GX_CC_ZERO, GX_CC_RASC, GX_CC_C1, GX_CC_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA, false);
     g::GXCallDisplayList(a.speaker.addr, a.speaker.size);

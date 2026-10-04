@@ -7,7 +7,9 @@
 // start (the room is built again every time it comes back; see below), and never written again.
 #include "engine/soundplayer/sound_player.h"
 
+#include "engine/soundplayer/angles.h"
 #include "engine/soundplayer/art.h"
+#include "engine/soundplayer/lyt.h"
 #include "engine/system/host_scene.h"
 
 #include <algorithm>
@@ -19,23 +21,6 @@ namespace engine::soundplayer {
 namespace {
 
 using art::Coverage;
-
-// ---- the button's panes
-
-// layout::Button: +0x14 its layout::Layout, whose +0xC is the nw4r::lyt::Layout (+0x10 its root
-// pane). A pane of it by name, or 0: nw4r::lyt::Pane::FindPaneByName on the root pane (its virtual
-// at +0x3C, fn_80458C20; recursive), the name on the guest stack.
-u32 find_pane(u32 button, const char* name) {
-    GFRAME(0x20);
-    u32 s = (u32)&GS(u8, 0x8);
-    for (u32 i = 0; i < 0x17; i++) {
-        guest::store8(s + i, (u8)name[i]);
-        if (!name[i])
-            break;
-    }
-    u32 root = guest::load32(guest::load32(button + 0x14 + 0xC) + 0x10);
-    return gcall<u32>(guest::load32(guest::load32(root) + 0x3C), root, s, 1u);
-}
 
 // ---- the icon
 
@@ -58,7 +43,7 @@ Coverage draw_icon() {
             return u * u + v * v <= 1.0f;
         }
     };
-    const f32 tilt = -22.0f * 3.14159265f / 180.0f;
+    const f32 tilt = deg_to_rad(-22.0f);
     const f32 head_rx = 9.6f, head_ry = 7.2f, stem = 5.5f, beam = 9.5f;
     const Ellipse heads[2] = {{12.0f, 39.0f, head_rx, head_ry, std::cos(tilt), std::sin(tilt)},
                               {37.5f, 35.0f, head_rx, head_ry, std::cos(tilt), std::sin(tilt)}};
@@ -107,7 +92,7 @@ const f32 LABEL_MARGIN = 2.0f;  // the outline's room at each end
 const f32 LABEL_OUTLINE = 1.5f, LABEL_OUTLINE_OPACITY = 0.85f;
 
 // the label's coverage, its width that of the bar's labels of as many characters (wider if its ink
-// and outline need it), the ink centred in it; empty if the font isn't there
+// and outline need it), the ink centred in it (font must be non-zero: dress_bar_button checks)
 Coverage draw_label(u32 font) {
     const art::TextStyle style = {LABEL_EM / FONT_EM, LABEL_ADVANCE, LABEL_WEIGHT};
     f32 left, right;
@@ -136,7 +121,9 @@ void reserve_bar_button() {
 }
 
 void dress_bar_button(u32 button) {
-    u32 icon_pane = find_pane(button, "Pic_Icon"), label_pane = find_pane(button, "Pic_Text");
+    // the panes of the button's own layout (lyt::find_pane: LayoutWrapper::FindPane, recursive)
+    u32 layout = lyt::button_layout(button);
+    u32 icon_pane = lyt::find_pane(layout, "Pic_Icon"), label_pane = lyt::find_pane(layout, "Pic_Text");
     u32 font = art::system_font();
     if (!s_texels || !icon_pane || !label_pane || !font) {
         guest::log("soundplayer: bar button %08X: no textures, icon or label pane, or font (%08X %08X %08X %08X)",
@@ -158,9 +145,9 @@ void dress_bar_button(u32 button) {
                    s_label_w, LABEL_HEIGHT, s_texels);
     }
     art::set_texmap(art::pane_texmap(icon_pane), s_texels, ICON_SIZE, ICON_SIZE, art::GX_TF_IA4);
-    art::set_pane_size(icon_pane, ICON_PANE_SIZE, ICON_PANE_SIZE);
+    lyt::resize(icon_pane, ICON_PANE_SIZE, ICON_PANE_SIZE);
     art::set_texmap(art::pane_texmap(label_pane), label_texels, s_label_w, LABEL_HEIGHT, art::GX_TF_IA4);
-    art::set_pane_size(label_pane, (f32)s_label_w, (f32)LABEL_HEIGHT);
+    lyt::resize(label_pane, (f32)s_label_w, (f32)LABEL_HEIGHT);
 }
 
 }  // namespace engine::soundplayer

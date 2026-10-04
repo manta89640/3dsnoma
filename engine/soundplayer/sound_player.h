@@ -1,5 +1,5 @@
 // The Sound Player: a screen of the room's for listening to the channel's music, with the
-// household's Miis rocking out at the chabudai. Reached from the room's bottom bar
+// household's Miis dancing at the TV studio's table. Reached from the room's bottom bar
 // (runtime/patches/menus.cpp), it is a scene of its own (engine/system/host_scene.h).
 #pragma once
 

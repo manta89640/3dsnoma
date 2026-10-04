@@ -2,18 +2,19 @@
 // (the decompiled functions take the register ABI's full argument list).
 #pragma once
 
+#include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
 namespace engine::soundplayer::game {
 
 // ---- globals
-inline u32 wipe() { return guest::load32(GA_lbl_80882C98); }           // layout::parts::Wipe
-inline u32 scene_manager() { return guest::load32(GA_lbl_80882CA8); }  // lib::SceneManager
-inline u32 controller() { return guest::load32(GA_lbl_80882C9C); }     // the input manager
+inline u32 wipe() { return guest::load32(GA_lbl_80882C98); }        // layout::parts::Wipe
+inline u32 controller() { return guest::load32(GA_lbl_80882C9C); }  // the input manager
 
-// the controller's KPAD status: buttons newly pressed this frame (KPAD bits: B 0x400, A 0x800,
-// D-pad LEFT 0x1, RIGHT 0x2, DOWN 0x4, UP 0x8)
+// the controller's KPAD status: +0xB40 the buttons held, +0xB44 those newly pressed this frame
+// (KPAD bits: B 0x400, A 0x800, D-pad LEFT 0x1, RIGHT 0x2, DOWN 0x4, UP 0x8), +0xB60 the pointer's
+// position (two f32), +0xB9E whether the pointer is on the screen
 inline u32 buttons_triggered() { return guest::load32(controller() + 0xB44); }
 inline u32 buttons_held() { return guest::load32(controller() + 0xB40); }
 enum : u32 {
@@ -23,23 +24,25 @@ enum : u32 {
 // the pointer is on the screen (KPADStatus dpd_valid_fg, s8): on the 3DS, while the touch screen or
 // the circle pad was used in the last three seconds
 inline bool pointer_on_screen() { return (s8)guest::load8(controller() + 0xB9E) > 0; }
+// where the pointer is (KPADStatus pos: -1..1 across the screen)
+inline void pointer_at(f32& x, f32& y) {
+    u32 c = controller();
+    x = engine::math::load_f32(c + 0xB60);
+    y = engine::math::load_f32(c + 0xB64);
+}
 
-// ---- lib::SceneManager
-inline void change_scene(u32 factory) { g::fn_8018E0C8(scene_manager(), factory); }
+// ---- leaving the scene
 // LayoutSceneBase::ChangeSceneWithWipe: lock the scene's cursor (its GetCursor), play the wipe's
 // "Out", then change to the scene of that name ("LivingRoomScene")
 inline void change_scene_with_wipe(u32 scene, u32 name, u32 wipe_type) { g::fn_8027F978(scene, name, wipe_type); }
 const u32 NAME_LIVING_ROOM_SCENE = GA_lbl_80805B68;
 
-// ---- layout::parts::Wipe: 3 = Fade_White
-enum : u32 { WIPE_CIRCLE = 0, WIPE_FADE_WHITE = 3 };
+// ---- layout::parts::Wipe: its kinds 0 = the circle, 3 = Fade_White
+enum : u32 { WIPE_FADE_WHITE = 3 };
 inline void wipe_in(u32 type) {
     g::fn_80154D3C(wipe(), type);
     g::fn_80154DE0(wipe());
 }
-
-// ---- layout::Button (0x69C bytes)
-const u32 VTABLE_LAYOUT_BUTTON = GA_lbl_80794960, LAYOUT_BUTTON_SLOTS = 21;
 
 // ---- the exclusive button group (0x10 bytes): a button's push locks the group's other buttons
 const u32 GROUP_SIZE = 0x10;
@@ -57,8 +60,6 @@ inline void cursor_draw(u32 c) {
     g::fn_8013BECC(c + 0x130);
     g::fn_8013BECC(c + 0x8);
 }
-// press a listener as the A button would (its Push animation, sound and callbacks)
-inline void cursor_press(u32 c, u32 listener) { g::fn_8013A2C0(c, listener, 0); }
 
 // ---- layout::parts::Bottom (0x2460 bytes): the screens' bottom-left way back
 const u32 BOTTOM_SIZE = 0x2460;

@@ -7,8 +7,7 @@
 // (the stage's camera is written directly every frame).
 #pragma once
 
-#include <cstring>
-
+#include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
@@ -16,17 +15,8 @@ namespace engine::soundplayer::g3d {
 
 // ---- guest memory
 
-inline f32 load_f32(u32 a) {
-    u32 bits = guest::load32(a);
-    f32 f;
-    std::memcpy(&f, &bits, 4);
-    return f;
-}
-inline void store_f32(u32 a, f32 f) {
-    u32 bits;
-    std::memcpy(&bits, &f, 4);
-    guest::store32(a, bits);
-}
+using engine::math::load_f32;
+using engine::math::store_f32;
 
 // The current heap (lib::allocator::HeapBase::sRoot +0x1C) set to `heap` while it lives: what the
 // game's ScopedHeap does (fn_80189164 sets it and locks the root's mutex, fn_801891B8 puts the last
@@ -42,13 +32,14 @@ private:
     GuestFrame frame_;
 };
 
-// 32-byte blocks for what the GPU reads (textures, display lists): lib::allocator's
-// ScopedAlignment over the current heap while the block is allocated.
+// A 32-byte aligned block of the current heap, its size rounded up to 32 bytes, for what the GPU
+// reads (textures, display lists): lib::allocator's ScopedAlignment over the heap while the block
+// is allocated. 0 if the heap has no room; freed with operator_delete.
 inline u32 new_aligned(u32 size) {
     GFRAME(0x10);
     u32 scope = (u32)&GS(u32, 0x8);
     g::lib_allocator_ScopedAlignment_ctor(scope, 0x20);
-    u32 p = g::operator_new_array((size + 31) & ~31u);
+    u32 p = g::operator_new((size + 31) & ~31u);
     g::lib_allocator_ScopedAlignment_dtor(scope, (u32)-1);
     return p;
 }
@@ -149,11 +140,6 @@ inline void actors_dtor(u32 m) { g::fn_8006108C(m, (u32)-1, 0, 0, 0); }
 inline void actors_update(u32 m) { g::fn_801D96F4(m, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
 inline u32 actor_slot_size(u32 m) { return guest::load32(m + 0xC); }
 
-// ---- model::Family (0x10 bytes): the household from the channel's save. fn_801A4904 ctor,
-// fn_801A4B1C count, fn_801A4B24 person i (0x48 bytes: +0 the Mii's RFLCreateID, 8 bytes),
-// fn_801A4A7C dtor.
-const u32 FAMILY_SIZE = 0x10;
-
 // fn_80209B34: make the actor of the Mii of this RFLCreateID (8 guest bytes) in the current actor
 // manager (its age from the household's birth years); 0 if the Mii isn't in the database
 inline u32 spawn_mii(u32 create_id) { return g::fn_80209B34(0, create_id); }
@@ -165,7 +151,6 @@ inline u32 spawn_mii(u32 create_id) { return g::fn_80209B34(0, create_id); }
 inline u32 actor_heap(u32 a) { return guest::load32(a + 0x8); }
 inline u32 actor_face(u32 a) { return a + 0x44; }
 inline u32 actor_body(u32 a) { return a + 0x118; }
-inline bool actor_female(u32 a) { return (guest::load32(actor_face(a) + 0xC8) >> 31) != 0; }
 inline u32 actor_age(u32 a) { return guest::load32(a + 0x210 + 0x10 + 0x8); }
 inline void actor_place(u32 a, f32 x, f32 z, f32 yaw) {
     u32 body = actor_body(a);
@@ -202,6 +187,5 @@ inline void anim_set_frame(u32 obj, f32 frame) {
 inline void anim_set_rate(u32 obj, f32 rate) {
     gcall<u32>(guest::load32(guest::load32(obj) + 0x28), obj, (f64)rate);
 }
-inline f32 anim_frame(u32 obj) { return load_f32(obj + 0x18); }
 
 }  // namespace engine::soundplayer::g3d

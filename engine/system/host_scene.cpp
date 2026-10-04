@@ -29,8 +29,10 @@ namespace {
 const u32 TYPEINFO_LIB_SCENE = GA_lbl_80880958;          // lib::Scene
 const u32 TYPEINFO_LIB_SCENE_FACTORY = GA_lbl_8087B040;  // lib::Scene::Factory
 const u32 TYPEINFO_AUTOLIST_FACTORY = GA_lbl_8087B048;   // lib::Autolist<lib::Scene::Factory>
-// the scene manager (lib::SceneManager*): +0xC the current scene
+// the scene manager (lib::SceneManager*): +0x0 the factory of the scene asked for, +0xC the
+// current scene
 const u32 SCENE_MANAGER = GA_lbl_80882CA8;
+u32 scene_manager() { return guest::load32(SCENE_MANAGER); }
 
 struct SceneClass {
     u32 factory;
@@ -231,11 +233,13 @@ void host_scene_boot(void (*make_lasting)()) {
 }
 
 HostScene* current_host_scene() {
-    u32 mgr = guest::load32(SCENE_MANAGER);
+    u32 mgr = scene_manager();
     if (!mgr)
         return nullptr;
     auto it = s_scenes.find(guest::load32(mgr + 0xC));
     return it == s_scenes.end() ? nullptr : it->second;
 }
+
+void change_scene(u32 factory) { g::fn_8018E0C8(scene_manager(), factory); }
 
 }  // namespace engine::system

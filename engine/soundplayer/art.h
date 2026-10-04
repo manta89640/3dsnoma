@@ -1,16 +1,15 @@
 // Pictures made at run time for the Sound Player's 2D parts, in the channel's own texture style:
 // a coverage image drawn on the host, the two-tone IA4 textures of the room bar made from it, text
-// set from the channel's font, and the guest side (the texels in the game's heap, a layout
-// picture's texture map and size). Header-only: the bar button (bar_button.cpp) and the screen's
-// parts use it.
+// set from the channel's font, and the guest side (the texels in guest memory, a layout picture's
+// texture map). Header-only: the bar button (bar_button.cpp) uses it.
 #pragma once
 
+#include "engine/soundplayer/lyt.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <vector>
 
 namespace engine::soundplayer::art {
@@ -248,34 +247,14 @@ inline bool draw_text(Coverage& img, u32 font, const u16* text, u32 n, f32 x, f3
 
 // ---- the guest side
 
-// A block of the current heap, 32-byte aligned as GX wants textures (lib_allocator_ScopedAlignment
-// sets the heap's alignment for its scope); 0 if the heap has no room.
-inline u32 alloc_texels(u32 size) {
-    GFRAME(0x10);
-    u32 scope = (u32)&GS(u32, 0x8);
-    g::lib_allocator_ScopedAlignment_ctor(scope, 32);
-    u32 p = g::operator_new(size);
-    g::lib_allocator_ScopedAlignment_dtor(scope, (u32)-1);
-    return p;
-}
-
 // texels into guest memory, flushed (DCFlushRange: GX's texture caches go by it)
 inline void write_texels(u32 at, const std::vector<u8>& texels) {
     guest::write_g(at, texels.data(), (u32)texels.size());
     g::DCFlushRange(at, (u32)texels.size());
 }
 
-// nw4r::lyt::Pane: +0x28 its material, whose +0x40 points at its texture maps (TexMap[0] first);
-// +0x4C its size (two floats)
-inline u32 pane_texmap(u32 pane) { return guest::load32(guest::load32(pane + 0x28) + 0x40); }
-
-inline void set_pane_size(u32 pane, f32 w, f32 h) {
-    u32 bits[2];
-    std::memcpy(&bits[0], &w, 4);
-    std::memcpy(&bits[1], &h, 4);
-    guest::store32(pane + 0x4C, bits[0]);
-    guest::store32(pane + 0x50, bits[1]);
-}
+// a picture's first texture map: its material's +0x40 points at its texture maps (TexMap[0] first)
+inline u32 pane_texmap(u32 pane) { return guest::load32(lyt::material_of(pane) + 0x40); }
 
 // nw4r::lyt::TexMap (0x1C bytes; what nw4r_lyt_TexMap_Set fills from a TPL): +0x0 the texels,
 // +0x4 the palette, +0x8/+0xA width and height (u16), +0x16 the palette's entries, +0x18 the format

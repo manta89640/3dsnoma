@@ -10,10 +10,8 @@ namespace engine::soundplayer {
 
 struct Track {
     u32 sound_id;        // the nw4r::snd sound ID (its index in the archive's sound table)
-    u32 label;           // guest address of its label in the archive ("SEQ_BGM_MAIN_01")
     std::u16string name; // the name the list shows
     bool jingle;         // a short piece (a logo, a Mii's feeling), not background music
-    bool loops;          // plays until stopped (else it ends by itself)
 };
 
 // The archive (snd/douga.brsar, in memory from the start) holds 156 sounds: music, jingles and

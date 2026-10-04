@@ -16,7 +16,7 @@ enum class PlayState {
 // where the music is, read once a frame from the sequencer of the piece playing
 struct Beat {
     bool valid = false;   // a sequence plays (a wave jingle has no sequencer: no beat)
-    float bpm = 0;        // quarter notes a minute now (the sequence can change it as it plays)
+    f32 bpm = 0;          // quarter notes a minute now (the sequence can change it as it plays)
     double beats = 0;     // quarter notes since the piece started, with the fraction
 };
 
