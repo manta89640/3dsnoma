@@ -3,7 +3,8 @@
 //
 // The PICA keeps a W x H texture (powers of two) in 8x8 tiles, the texels of a tile in Z order, the
 // image upside down (its t runs from the last row up: row y is at H-1-y), little-endian: RGBA8 as
-// 0xRRGGBBAA, LA8 0xLLAA, LA4 0xLA, RGB565, RGBA5551 (R in the top bits). An image smaller than W x H
+// 0xRRGGBBAA, LA8 0xLLAA, LA4 0xLA, RGB565, RGBA5551 (R in the top bits), L8, and L4 two texels to a
+// byte (the first in the low nibble). An image smaller than W x H
 // is padded with its edge texels (what GX's clamp samples beyond the edge); a repeating one is
 // resampled to W x H instead.
 //
@@ -18,9 +19,29 @@
 
 namespace guest::pica_tex {
 
-enum Fmt : u8 { LA4, LA8, RGB565, RGBA5551, RGBA8 };
+enum Fmt : u8 { LA4, LA8, RGB565, RGBA5551, RGBA8, L8, L4 };
 
-inline u32 texel_bytes(Fmt f) { return f == LA4 ? 1 : f == RGBA8 ? 4 : 2; }
+inline u32 texel_bits(Fmt f) { return f == L4 ? 4 : f == LA4 || f == L8 ? 8 : f == RGBA8 ? 32 : 16; }
+
+// a 4-bit texel's store: two to a byte
+struct Nib {};
+template <class T>
+inline void put(u8* out, u32 i, u32 v) {
+    ((T*)out)[i] = (T)v;
+}
+template <>
+inline void put<Nib>(u8* out, u32 i, u32 v) {
+    u8& b = out[i >> 1];
+    b = (i & 1) ? (u8)((b & 0x0F) | (v << 4)) : (u8)((b & 0xF0) | (v & 0xF));
+}
+template <class T>
+inline u32 get(const u8* out, u32 i) {
+    return ((const T*)out)[i];
+}
+template <>
+inline u32 get<Nib>(const u8* out, u32 i) {
+    return (i & 1) ? out[i >> 1] >> 4 : out[i >> 1] & 0xF;
+}
 
 // a texel's place: column part + row part (the row part of image row y, stored upside down);
 // textures are at most 1024 x 1024
@@ -40,16 +61,13 @@ struct Places {
 inline u32 pack(Fmt f, u32 c) {
     switch (f) {
     case LA4: return (c & 0xF0) | (c >> 28);
+    case L8: return c & 0xFF;
+    case L4: return (c & 0xF0) >> 4;
     case LA8: return (c & 0xFF) << 8 | c >> 24;
     case RGB565: return (c & 0xF8) << 8 | (c >> 5 & 0x7E0) | (c >> 19 & 0x1F);
     case RGBA5551: return (c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 18 & 0x3E) | c >> 31;
     default: return __builtin_bswap32(c);
     }
-}
-
-template <class T>
-inline void put(u8* out, u32 i, u32 v) {
-    ((T*)out)[i] = (T)v;
 }
 
 inline void from_rgba(const u32* rgba, u32 w, u32 h, u8* out, u32 W, u32 H, Fmt fmt, bool repeat) {
@@ -66,9 +84,10 @@ inline void from_rgba(const u32* rgba, u32 w, u32 h, u8* out, u32 W, u32 H, Fmt 
                 store(pl.row[y] + pl.col[x], pack(fmt, src[col_src[x]]));
         }
     };
-    switch (texel_bytes(fmt)) {
-    case 1: rows([&](u32 i, u32 v) { put<u8>(out, i, v); }); break;
-    case 2: rows([&](u32 i, u32 v) { put<u16>(out, i, v); }); break;
+    switch (texel_bits(fmt)) {
+    case 4: rows([&](u32 i, u32 v) { put<Nib>(out, i, v); }); break;
+    case 8: rows([&](u32 i, u32 v) { put<u8>(out, i, v); }); break;
+    case 16: rows([&](u32 i, u32 v) { put<u16>(out, i, v); }); break;
     default: rows([&](u32 i, u32 v) { put<u32>(out, i, v); }); break;
     }
 }
@@ -103,23 +122,22 @@ inline void block(u8* out, const Places& pl, u32 x0, u32 y0, u32 bw, u32 bh, u32
         const u32 r = pl.row[y0 + j];
         const u32* c = &pl.col[x0];
         for (u32 i = 0; i < nx; i++)
-            ((T*)out)[r + c[i]] = (T)value(j * bw + i);
+            put<T>(out, r + c[i], value(j * bw + i));
     }
 }
 
 // the padding: x >= w gets the row's last texel, y >= h the last row
 template <class T>
 inline void pad(u8* out, const Places& pl, u32 w, u32 h, u32 W, u32 H) {
-    T* o = (T*)out;
     if (w < W)
         for (u32 y = 0; y < h; y++) {
-            const T v = o[pl.row[y] + pl.col[w - 1]];
+            const u32 v = get<T>(out, pl.row[y] + pl.col[w - 1]);
             for (u32 x = w; x < W; x++)
-                o[pl.row[y] + pl.col[x]] = v;
+                put<T>(out, pl.row[y] + pl.col[x], v);
         }
     for (u32 y = h; y < H; y++)
         for (u32 x = 0; x < W; x++)
-            o[pl.row[y] + pl.col[x]] = o[pl.row[h - 1] + pl.col[x]];
+            put<T>(out, pl.row[y] + pl.col[x], get<T>(out, pl.row[h - 1] + pl.col[x]));
 }
 
 }  // namespace detail
@@ -154,14 +172,20 @@ inline bool from_gx(const u8* src, u32 gxfmt, u32 w, u32 h, const u8* tmem, u32 
             const u32 x0 = bx * bw, y0 = by * bh;
             const u8* s = src;
             switch (gxfmt) {
-            case 0:  // I4 -> LA4
-                block<u8>(out, pl, x0, y0, 8, 8, w, h, [&](u32 i) {
-                    u32 n = (s[i >> 1] >> ((i & 1) ? 0 : 4)) & 15;
-                    return n << 4 | n;
-                });
+            case 0:  // I4 -> L4 (the combiners read its alpha from red) or LA4
+                if (fmt == L4)
+                    block<Nib>(out, pl, x0, y0, 8, 8, w, h, [&](u32 i) { return (u32)(s[i >> 1] >> ((i & 1) ? 0 : 4)) & 15; });
+                else
+                    block<u8>(out, pl, x0, y0, 8, 8, w, h, [&](u32 i) {
+                        u32 n = (s[i >> 1] >> ((i & 1) ? 0 : 4)) & 15;
+                        return n << 4 | n;
+                    });
                 break;
-            case 1:  // I8 -> LA8
-                block<u16>(out, pl, x0, y0, 8, 4, w, h, [&](u32 i) { return (u32)s[i] << 8 | s[i]; });
+            case 1:  // I8 -> L8 or LA8
+                if (fmt == L8)
+                    block<u8>(out, pl, x0, y0, 8, 4, w, h, [&](u32 i) { return (u32)s[i]; });
+                else
+                    block<u16>(out, pl, x0, y0, 8, 4, w, h, [&](u32 i) { return (u32)s[i] << 8 | s[i]; });
                 break;
             case 2:  // IA4 -> LA4 (GX: alpha in the high nibble)
                 block<u8>(out, pl, x0, y0, 8, 4, w, h, [&](u32 i) { return (u32)((s[i] << 4) | (s[i] >> 4)) & 0xFF; });
@@ -222,9 +246,10 @@ inline bool from_gx(const u8* src, u32 gxfmt, u32 w, u32 h, const u8* tmem, u32 
             }
         }
     }
-    switch (texel_bytes(fmt)) {
-    case 1: pad<u8>(out, pl, w, h, W, H); break;
-    case 2: pad<u16>(out, pl, w, h, W, H); break;
+    switch (texel_bits(fmt)) {
+    case 4: pad<Nib>(out, pl, w, h, W, H); break;
+    case 8: pad<u8>(out, pl, w, h, W, H); break;
+    case 16: pad<u16>(out, pl, w, h, W, H); break;
     default: pad<u32>(out, pl, w, h, W, H); break;
     }
     return true;

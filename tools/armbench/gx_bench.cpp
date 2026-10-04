@@ -218,8 +218,10 @@ u8 s_texout[256 * 256 * 4];
 u32 s_rgba[256 * 256];
 pica_tex::Fmt pica_format(u32 f) {
     switch (f) {
-    case 0: case 2: return pica_tex::LA4;
-    case 1: case 3: case 8: case 9: return pica_tex::LA8;
+    case 0: return pica_tex::L4;
+    case 1: return pica_tex::L8;
+    case 2: return pica_tex::LA4;
+    case 3: case 8: case 9: return pica_tex::LA8;
     case 4: return pica_tex::RGB565;
     case 14: return pica_tex::RGBA5551;
     default: return pica_tex::RGBA8;
@@ -248,5 +250,5 @@ extern "C" u32 tex(u32 direct, u32 fmt, u32 w, u32 h, u32 hash) {
         gx_decode_texture_tlut(s_texsrc, fmt, w, h, 0, 0, s_rgba);
         pica_tex::from_rgba(s_rgba, w, h, s_texout, W, H, pf, false);
     }
-    return hash ? hash_out(2166136261u, s_texout, W * H * pica_tex::texel_bytes(pf)) : 0;
+    return hash ? hash_out(2166136261u, s_texout, W * H * pica_tex::texel_bits(pf) / 8) : 0;
 }

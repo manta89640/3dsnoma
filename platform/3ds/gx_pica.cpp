@@ -717,25 +717,25 @@ GPU_TEXCOLOR pica_format(const GxTexture* gt) {
     if (f == 8 || f == 9 || f == 10)  // paletted: the palette's format (IA8, RGB565, RGB5A3)
         return gt->tlut_fmt == 0 ? GPU_LA8 : gt->tlut_fmt == 1 ? GPU_RGB565 : GPU_RGBA8;
     switch (f) {
-    case 0:  // I4
-    case 2:  // IA4
-        return GPU_LA4;
-    case 1:  // I8
-    case 3:  // IA8
-        return GPU_LA8;
+    case 0: return GPU_L4;  // I4, I8: luminance only, the combiners read their alpha from red
+    case 1: return GPU_L8;
+    case 2: return GPU_LA4;  // IA4, IA8
+    case 3: return GPU_LA8;
     case 4: return GPU_RGB565;
     case 14: return GPU_RGBA5551;  // CMPR
     default: return GPU_RGBA8;
     }
 }
 
-u32 texel_bytes(GPU_TEXCOLOR f) {
+u32 texel_bits(GPU_TEXCOLOR f) {
     switch (f) {
-    case GPU_LA4: return 1;
+    case GPU_L4: return 4;
+    case GPU_LA4:
+    case GPU_L8: return 8;
     case GPU_LA8:
     case GPU_RGB565:
-    case GPU_RGBA5551: return 2;
-    default: return 4;
+    case GPU_RGBA5551: return 16;
+    default: return 32;
     }
 }
 
@@ -759,7 +759,7 @@ bool evict_texture() {
 // older textures make room
 bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     const u32 MARGIN = 512 << 10;
-    u32 need = w * h * texel_bytes(f);
+    u32 need = w * h * texel_bits(f) / 8;
     for (;;) {
         if (linearSpaceFree() >= need + MARGIN && C3D_TexInit(t, w, h, f))
             return true;
@@ -775,6 +775,8 @@ pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f) {
     case GPU_LA8: return pica_tex::LA8;
     case GPU_RGB565: return pica_tex::RGB565;
     case GPU_RGBA5551: return pica_tex::RGBA5551;
+    case GPU_L8: return pica_tex::L8;
+    case GPU_L4: return pica_tex::L4;
     default: return pica_tex::RGBA8;
     }
 }
@@ -1378,6 +1380,38 @@ const TevSetup& tev_setup() {
     return e;
 }
 
+// The combiners as a draw's textures need them: a texture kept as luminance only (L4, L8: GX's I4
+// and I8) samples with alpha 1, where GX's intensity texture has alpha = intensity: what reads its
+// alpha reads its red instead
+void remap_luminance(const C3D_TexEnv in[6], C3D_Tex* const tex[3], C3D_TexEnv out[6]) {
+    memcpy(out, in, sizeof(C3D_TexEnv) * 6);
+    u32 lum = 0;  // units with a luminance texture
+    for (int u = 0; u < 3; u++)
+        if (tex[u] && (tex[u]->fmt == GPU_L4 || tex[u]->fmt == GPU_L8))
+            lum |= 1u << u;
+    if (!lum)
+        return;
+    for (int i = 0; i < 6; i++) {
+        C3D_TexEnv& e = out[i];
+        u32 op_rgb = e.opRgb, op_a = e.opAlpha;
+        for (int k = 0; k < 3; k++) {
+            u32 src = (e.srcRgb >> (4 * k)) & 0xF;
+            if (src >= GPU_TEXTURE0 && src <= GPU_TEXTURE2 && (lum >> (src - GPU_TEXTURE0) & 1)) {
+                u32 op = (op_rgb >> (4 * k)) & 0xF;
+                if (op == GPU_TEVOP_RGB_SRC_ALPHA || op == GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA)
+                    op_rgb = (op_rgb & ~(0xFu << (4 * k))) | ((op + 2) << (4 * k));  // -> SRC_R, ONE_MINUS_SRC_R
+            }
+            src = (e.srcAlpha >> (4 * k)) & 0xF;
+            if (src >= GPU_TEXTURE0 && src <= GPU_TEXTURE2 && (lum >> (src - GPU_TEXTURE0) & 1)) {
+                u32 op = (op_a >> (4 * k)) & 0xF;
+                if (op == GPU_TEVOP_A_SRC_ALPHA || op == GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA)
+                    op_a = (op_a & ~(0xFu << (4 * k))) | ((op + 2) << (4 * k));  // -> SRC_R, ONE_MINUS_SRC_R
+            }
+        }
+        e.opRgb = op_rgb, e.opAlpha = op_a;
+    }
+}
+
 // ---------------------------------------------------------------- pixel state
 GPU_TESTFUNC test_func(u32 f) {
     static const GPU_TESTFUNC map[8] = {GPU_NEVER, GPU_LESS, GPU_EQUAL, GPU_LEQUAL,
@@ -1705,7 +1739,9 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                     su.texgen[u] = (s8)e.units[u].coord;
                 }
             }
-            bool same = P.env_valid && memcmp(P.env, e.env, sizeof(P.env)) == 0 && P.buf_rgb == e.buf_rgb &&
+            C3D_TexEnv env[6];
+            remap_luminance(e.env, tex, env);
+            bool same = P.env_valid && memcmp(P.env, env, sizeof(P.env)) == 0 && P.buf_rgb == e.buf_rgb &&
                         P.buf_a == e.buf_a;
             for (int u = 0; u < 3 && same; u++)  // (units the combiners don't read don't matter)
                 same = e.units[u].map < 0 ||
@@ -1717,8 +1753,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 Timed timed(Timers::BIND);
                 P.setups++;
                 for (int i = 0; i < 6; i++)
-                    if (!P.env_valid || memcmp(&P.env[i], &e.env[i], sizeof(C3D_TexEnv)) != 0) {
-                        P.env[i] = e.env[i];
+                    if (!P.env_valid || memcmp(&P.env[i], &env[i], sizeof(C3D_TexEnv)) != 0) {
+                        P.env[i] = env[i];
                         st_texenv(i, &P.env[i]);
                     }
                 if (!P.env_valid || P.buf_rgb != e.buf_rgb || P.buf_a != e.buf_a)
@@ -2289,7 +2325,7 @@ void PicaRenderer::efb_copy(u32 value) {
         NOMA_PROF_SCOPE("(gx copy convert)");
         Timed timed(Timers::COPY);
         T.copies++;
-        gx_copy_to_texture(c, readback_rgba);
+        gx_copy_to_texture_lookup(c, s_readback, s_rb_col, s_rb_row);
     }
     if (c.clear && P.resume)
         begin_frame();
