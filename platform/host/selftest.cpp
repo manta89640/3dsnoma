@@ -381,7 +381,7 @@ namespace axref = engine::audio::reference;
 
 static void selftest_ax() {
     // the samples straddle a 16 MB page boundary (the renderer reads RAM a page at a time)
-    const u32 data = 0x90FF8000, data_size = 0x10000, pb_ref = 0x81700000, pb_nat = 0x81700400;
+    const u32 data = 0x90FF8000, data_size = 0x10000, pb_ref = 0x81700000, pb_nat4 = 0x81700400;
     axref::Rng rnd{12345};
     axref::test_data(rnd, data, data_size);
     int bad = 0, frames = 0;
@@ -390,6 +390,8 @@ static void selftest_ax() {
         if (!axref::edge_voice(t, w, data))
             axref::random_voice(rnd, w, data, data_size);
         u16 fmt = w[0x70 / 2];
+        // (every fourth voice's PB 2-byte aligned only: rendered from an aligned copy)
+        const u32 pb_nat = t % 4 == 3 ? pb_nat4 + 0x202 : pb_nat4;
         for (u32 k = 0; k < 0xD6 / 2; k++)
             store16(pb_ref + 2 * k, w[k]), store16(pb_nat + 2 * k, w[k]);
         for (int f = 0; f < 4 && bad < 5; f++, frames++) {
@@ -426,6 +428,7 @@ static void selftest_ax() {
             store16(pb + 0x7E + 2 * k, (u16)(k & 1 ? -1200 : 2400));
         store32(pb + 0xA6, 0x11EF0);
     };
+    const u32 pb_nat = pb_nat4;
     room_voice(pb_ref), room_voice(pb_nat);
     const int FRAMES = 20000;
     static s32 bus[12][axref::SPF];

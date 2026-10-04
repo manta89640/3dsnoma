@@ -76,11 +76,16 @@ inline u32 load32(const void* p) {
     return v;
 }
 inline void store32(void* p, u32 v) { memcpy(p, &v, 4); }
-// two 16-bit samples as one word (the first in the low half)
+// two 16-bit samples as one word (the first in the low half): p 4-byte aligned
 inline u32 pair(const s16* p) { return load32(p); }
+// ... p only 2-byte aligned
+inline u32 pair2(const s16* p) { return (u16)p[0] | (u32)(u16)p[1] << 16; }
 
 // the PB in guest memory, read and written in place: big-endian u16 words, 32-bit values as two
-// of them (high first)
+// of them (high first). The PB is 4-byte aligned (as the SDK lays PBs out; ax_render_voice copies
+// one that isn't), so a pair of words at an offset that keeps that alignment is one access, and
+// one that doesn't is two halves: about what an unaligned word access costs the ARM11 anyway (an
+// extra memory cycle and a cycle more latency, ARM DDI 0360F 15.10), without depending on it
 struct Pb {
     u8* p;
     u16 get(u32 off) const {
@@ -92,12 +97,24 @@ struct Pb {
         v = __builtin_bswap16(v);
         memcpy(p + off, &v, 2);
     }
-    u32 get32(u32 off) const { return __builtin_bswap32(load32(p + off)); }
-    void set32(u32 off, u32 v) const { store32(p + off, __builtin_bswap32(v)); }
     // the words at off and off + 2, the first in the low half
-    u32 pair(u32 off) const { return rev16(load32(p + off)); }
-    void set_pair(u32 off, u32 v) const { store32(p + off, rev16(v)); }
+    u32 pair(u32 off) const {
+        if ((off & 3) == 0)
+            return rev16(load32(p + off));
+        return (u32)get(off) | (u32)get(off + 2) << 16;
+    }
+    void set_pair(u32 off, u32 v) const {
+        if ((off & 3) == 0)
+            return store32(p + off, rev16(v));
+        set(off, (u16)v), set(off + 2, (u16)(v >> 16));
+    }
+    u32 get32(u32 off) const {
+        u32 v = pair(off);
+        return v << 16 | v >> 16;
+    }
+    void set32(u32 off, u32 v) const { set_pair(off, v << 16 | v >> 16); }
 };
+const u32 PB_SIZE = 0xD6;  // what the renderer reads and writes (through the biquad)
 
 // sample memory: the accelerator's addresses are physical (nibbles for ADPCM, 16-bit samples for
 // PCM16, bytes for PCM8); RAM is read in place, a page at a time
@@ -186,11 +203,11 @@ struct Accel {
             case FMT_PCM16: {
                 if (!src)
                     src = fetch(cur * 2, 2 * cnt, tmp);
-                u32 i = 0;
-                for (; i + 2 <= cnt; i += 2)  // (two samples a word)
-                    store32(out + i, rev16(load32(src + 2 * i)));
-                if (i < cnt)
-                    out[i] = (s16)(src[2 * i] << 8 | src[2 * i + 1]);
+                for (u32 i = 0; i < cnt; i++) {  // (big-endian samples, 2-byte aligned)
+                    u16 v;
+                    memcpy(&v, src + 2 * i, 2);
+                    out[i] = (s16)__builtin_bswap16(v);
+                }
                 break;
             }
             case FMT_PCM8:
@@ -381,7 +398,7 @@ bool convert(Pb pb, s16* out) {
         else
             interpolate<ENV_RAMP>(out, i, j, buf, c, pos, ratio, ve, ved);
     };
-    s16 buf[4 + BLOCK];  // the last four samples, then the samples read
+    alignas(4) s16 buf[4 + BLOCK];  // the last four samples, then the samples read
     store32(buf, pb.pair(PB_LAST)), store32(buf + 2, pb.pair(PB_LAST + 4));
     u32 pos = pb.get(PB_FRAC);
     if (pb.get(PB_SRC_TYPE) == 2) {  // no conversion: one input sample per output sample (the
@@ -581,7 +598,7 @@ bool render_main_lr(Pb pb, AxBuses& bus) {
     ax_paths[env == ENV_ONE ? AXP_ONE : env == ENV_FIXED ? AXP_FIXED : env == ENV_RAMP ? AXP_RAMP : AXP_LOUD]++;
     Accel acc(pb);
     u32 n = (u32)(all >> 16);
-    s16 buf[4 + BLOCK];  // the last four samples, then the samples read
+    alignas(4) s16 buf[4 + BLOCK];  // the last four samples, then the samples read
     store32(buf, pb.pair(PB_LAST)), store32(buf + 2, pb.pair(PB_LAST + 4));
     acc.read(buf + 4, n);
     s32 *out_l = bus[AX_MAIN_L], *out_r = bus[AX_MAIN_R];
@@ -602,7 +619,7 @@ bool render_main_lr(Pb pb, AxBuses& bus) {
     }
 #endif
     pb.set(PB_FRAC, (u16)all);
-    pb.set_pair(PB_LAST, pair(buf + n)), pb.set_pair(PB_LAST + 4, pair(buf + n + 2));
+    pb.set_pair(PB_LAST, pair2(buf + n)), pb.set_pair(PB_LAST + 4, pair2(buf + n + 2));
     if (env == ENV_RAMP)
         pb.set(PB_VE, (u16)(ve + AX_SPF * ved));
     acc.save();
@@ -730,6 +747,13 @@ bool ax_render_voice(u32 pb_addr, AxBuses& bus) {
     u8* p = guest::host_ptr(pb_addr);
     if (!p || (p[PB_RUNNING] << 8 | p[PB_RUNNING + 1]) != 1)
         return false;
+    if ((uintptr_t)p & 3) {  // (not as the SDK lays PBs out: rendered from an aligned copy)
+        alignas(4) u8 copy[PB_SIZE];
+        memcpy(copy, p, PB_SIZE);
+        render(Pb{copy}, bus);
+        memcpy(p, copy, PB_SIZE);
+        return true;
+    }
     render(Pb{p}, bus);
     return true;
 }

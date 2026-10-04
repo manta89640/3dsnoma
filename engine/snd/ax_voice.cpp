@@ -139,14 +139,27 @@ void ax_set_ve(GuestObj ax, f32 volume, f32 init_volume) {
 
 // big-endian 16-bit words in pairs: a word's bytes swapped in each half (REV16)
 static inline u32 rev16(u32 v) { return (v & 0x00FF00FFu) << 8 | (v >> 8 & 0x00FF00FFu); }
+// (one word access where p is 4-byte aligned, two halves where it isn't: about what an unaligned
+// word access costs the ARM11 anyway, without depending on it)
 static inline u32 load_pair(const u8* p) {
     u32 v;
-    memcpy(&v, p, 4);
+    if (((uintptr_t)p & 3) == 0) {
+        memcpy(&v, p, 4);
+    } else {
+        u16 a, b;
+        memcpy(&a, p, 2), memcpy(&b, p + 2, 2);
+        v = (u32)a | (u32)b << 16;
+    }
     return rev16(v);  // (the first word in the low half)
 }
 static inline void store_pair(u8* p, u32 lo, u32 hi) {
     u32 v = rev16((lo & 0xFFFF) | hi << 16);
-    memcpy(p, &v, 4);
+    if (((uintptr_t)p & 3) == 0) {
+        memcpy(p, &v, 4);
+    } else {
+        u16 a = (u16)v, b = (u16)(v >> 16);
+        memcpy(p, &a, 2), memcpy(p + 2, &b, 2);
+    }
 }
 
 // the mix volumes: each ramps toward its target over AX frames, by whole steps per sample. (Its

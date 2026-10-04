@@ -93,7 +93,7 @@ u32 g_first_bad;  // the first frame that differed, as voice * 4 + frame, plus 1
 extern "C" u32 exact(u32 voices) {
     g_first_bad = 0;
     map();
-    const u32 pb_ref = 0x80000100, pb_nat = 0x80000400;
+    const u32 pb_ref = 0x80000100, pb_nat4 = 0x80000400;
     ref::Rng rnd{12345};
     ref::test_data(rnd, DATA, DATA_SIZE);
     u32 bad = 0;
@@ -101,6 +101,8 @@ extern "C" u32 exact(u32 voices) {
         u16 w[0xD6 / 2];
         if (!ref::edge_voice(t, w, DATA))
             ref::random_voice(rnd, w, DATA, DATA_SIZE);
+        // (every fourth voice's PB 2-byte aligned only: rendered from an aligned copy)
+        const u32 pb_nat = t % 4 == 3 ? pb_nat4 + 0x202 : pb_nat4;
         for (u32 k = 0; k < 0xD6 / 2; k++)
             st16(pb_ref + 2 * k, w[k]), st16(pb_nat + 2 * k, w[k]);
         for (u32 f = 0; f < 4; f++) {
