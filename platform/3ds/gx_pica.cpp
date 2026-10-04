@@ -2279,9 +2279,12 @@ void PicaRenderer::draw_done() {
             log("pica: %u TEV configurations and %u draws' lighting or texgens approximated", s_unsupported,
                 gx_tnl_approximated());
         if (P.frame % 600 == 1) {
-            u32 kb = 0;
+            u32 kb = 0, kb_fmt[16] = {};
             for (auto& kv : P.textures)
-                kb += kv.second.tex.size >> 10;
+                kb += kv.second.tex.size >> 10, kb_fmt[kv.second.tex.fmt & 15] += kv.second.tex.size >> 10;
+            log("pica: texture KB by format: RGBA8 %u, RGB565 %u, RGBA5551 %u (CMPR), LA8 %u, LA4 %u, L8 %u, L4 %u, ETC1 %u, "
+                "ETC1A4 %u", kb_fmt[GPU_RGBA8], kb_fmt[GPU_RGB565], kb_fmt[GPU_RGBA5551], kb_fmt[GPU_LA8], kb_fmt[GPU_LA4],
+                kb_fmt[GPU_L8], kb_fmt[GPU_L4], kb_fmt[GPU_ETC1], kb_fmt[GPU_ETC1A4]);
             log("pica: %zu textures (%u KB), %u dropped for memory, %u not made; %u KB linear heap free, "
                 "heap %u KB used of %u KB; at most %u immediate vertices and %u indices a frame; last frame %u draws "
                 "in %u batches, %u state setups, %u draws (%u vertices) from the list cache, %u vertices built "
