@@ -1317,11 +1317,21 @@ void test_real_package(const std::string& path) {
     const auto t1 = std::chrono::steady_clock::now();
     g3::World w(*pkg);
     const double world_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
-    u32 approximated = 0;
-    for (const g3::Material& m : w.materials())
-        approximated += m.approximated != 0;
-    log("selftest g3d: world made in %.1f ms; %u of %u materials approximate something; k = %g", world_ms, approximated,
-        (u32)w.materials().size(), (double)w.world_scale());
+    u32 approximated = 0, indirect = 0;
+    std::string which;
+    for (const g3::Material& m : w.materials()) {
+        indirect += m.indirect;
+        if (!m.approximated)
+            continue;
+        if (approximated++ < 12)
+            which += std::string(approximated > 1 ? ", " : "") + pkg->str(pkg->materials()[m.index].name) + " (" +
+                     std::to_string(m.comb.unsupported) + " in the combiners, " + std::to_string(m.comb.n_stages) +
+                     " stages)";
+    }
+    log("selftest g3d: world made in %.1f ms; k = %g; %u of %u materials approximate something%s%s; %u had indirect "
+        "stages (dropped)",
+        world_ms, (double)w.world_scale(), approximated, (u32)w.materials().size(), approximated ? ": " : "",
+        which.c_str(), indirect);
     u32 views = 0;
     for (const fm::Marker& m : pkg->markers()) {
         const char* name = pkg->str(m.name);

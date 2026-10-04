@@ -146,7 +146,6 @@ struct World::Impl {
     struct Dyn {
         MatDynamic d;
         f32 srt[3][5];   // the first three texture matrices' scale s, t, rotation, translation s, t
-        bool tev_animated = false;
     };
     std::vector<Dyn> dyn;
     std::vector<int> dyn_of;                    // per material: index into dyn, -1
@@ -273,9 +272,8 @@ void World::Impl::init() {
                         mats[user >> 8].animated_tex_mtx |= 1u << (user & 255);
                     }
             } else if (tr.target >= fmt::TT_MAT_REG_R && tr.target <= fmt::TT_MAT_REG_A) {
-                Dyn& d = dyn_for(tr.index);
+                dyn_for(tr.index);
                 mats[tr.index].animated_color = true;
-                d.tev_animated |= tr.reg >= fmt::CR_TEV0;
             }
         }
     }
