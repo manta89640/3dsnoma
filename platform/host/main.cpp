@@ -21,6 +21,7 @@
 
 #include "runtime/hw/gx/raster.h"
 #include "engine/g3d/native_draw.h"
+#include "engine/g3d/soft_backend.h"
 #include "engine/input/remote.h"
 #include "runtime/runtime.h"
 
@@ -220,6 +221,8 @@ struct HostRenderer : SoftRenderer {
     }
 };
 static HostRenderer s_renderer;
+// native draws (the native g3d's World) into the same EFB, at their place in the GX stream
+static engine::g3d::SoftBackend s_native_backend;
 
 // NOMA_DUMP_FRAMES=N: every Nth displayed frame goes to frames/NNNNN.png
 void platform_present(u32 xfb) {
@@ -305,8 +308,10 @@ int main(int argc, char** argv) {
         return guest::run_selftest(t) ? 0 : 2;
     guest::ios_init(data + "/nand", data + "/content");
     guest::hw_init();
-    if (!getenv("NOMA_NO_RENDER"))
+    if (!getenv("NOMA_NO_RENDER")) {
         guest::gx_set_renderer(&guest::s_renderer);
+        engine::g3d::native_draw_set_backend(&guest::s_native_backend);
+    }
     guest::threads_init();
     guest::profile_start();
     noma_start_guest();
