@@ -46,10 +46,12 @@
 #include "engine/math/vecmath.h"
 #include "engine/soundplayer/amp.h"
 #include "engine/soundplayer/angles.h"
-#include "engine/soundplayer/g3d.h"
+#include "engine/ui/g3d.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
+
+namespace g3d = engine::ui::g3d;
 
 namespace {
 

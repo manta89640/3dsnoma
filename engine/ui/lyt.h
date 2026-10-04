@@ -1,4 +1,4 @@
-// The channel's layout objects as the Sound Player's screen uses them: its layout::LayoutWrapper
+// The channel's layout objects as the native scenes' screens use them: its layout::LayoutWrapper
 // (a .lex built into an nw4r::lyt::Layout, with its animations), layout::Button, and the nw4r::lyt
 // panes, text boxes and materials inside them. The functions here are the game's own; the
 // objects they make are guest objects, made while the screen is built and deleted with it.
@@ -28,11 +28,11 @@
 #include <string>
 
 #include "engine/math/vecmath.h"
-#include "engine/soundplayer/game.h"
+#include "engine/ui/game.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
-namespace engine::soundplayer::lyt {
+namespace engine::ui::lyt {
 
 using engine::math::load_f32;
 using engine::math::store_f32;
@@ -83,7 +83,7 @@ const u32 LAYOUT_SIZE = 0x128;
 inline u32 layout_new(const char* path) {
     u32 w = g::operator_new(LAYOUT_SIZE);
     if (!w)
-        guest::fatal("soundplayer: out of guest memory for %s", path);
+        guest::fatal("ui: out of guest memory for %s", path);
     g::layout_LayoutWrapper_ctor(w, Name(path), 0);  // LayoutWrapper::LayoutWrapper(path, flags)
     return w;
 }
@@ -92,7 +92,7 @@ inline u32 layout_new(const char* path) {
 inline u32 layout_new_in(const char* path, u32 parent, const char* locator) {
     u32 w = g::operator_new(LAYOUT_SIZE);
     if (!w)
-        guest::fatal("soundplayer: out of guest memory for %s", path);
+        guest::fatal("ui: out of guest memory for %s", path);
     // LayoutWrapper::LayoutWrapper(path, parent nw4r::lyt::Layout*, locator name, flags)
     g::layout_LayoutWrapper_ctorAttached(w, Name(path), guest::load32(parent + 0xC), Name(locator), 0);
     return w;
@@ -273,7 +273,7 @@ const u32 LAYOUT_BUTTON_SLOTS = 21;
 inline u32 button_new(const char* path, u32 parent, const char* locator, u32 cursor) {
     u32 b = g::operator_new(BUTTON_SIZE);
     if (!b)
-        guest::fatal("soundplayer: out of guest memory for %s", path);
+        guest::fatal("ui: out of guest memory for %s", path);
     g::layout_Button_ctor(b, Name(path), guest::load32(parent + 0xC), Name(locator), cursor);
     return b;
 }
@@ -284,7 +284,7 @@ inline u32 button_new(const char* path, u32 parent, const char* locator, u32 cur
 inline u32 play_button_new(const char* path, u32 parent, const char* locator, u32 cursor) {
     u32 b = g::operator_new(PLAY_BUTTON_SIZE);
     if (!b)
-        guest::fatal("soundplayer: out of guest memory for %s", path);
+        guest::fatal("ui: out of guest memory for %s", path);
     g::layout_movie_PlayButton_ctor(b, Name(path), guest::load32(parent + 0xC), Name(locator), cursor);
     return b;
 }
@@ -347,4 +347,4 @@ inline bool screen_may_open(int frames) {
     return frames > 1 && (!wipe_playing() || frames > WIPE_TIMEOUT_FRAMES);
 }
 
-}  // namespace engine::soundplayer::lyt
+}  // namespace engine::ui::lyt

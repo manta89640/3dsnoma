@@ -1,6 +1,6 @@
-// The channel's 3D pieces the Sound Player's stage is made of, with their arguments spelt out: the
-// studio set (g3d::Stage), the Miis (the room's actor manager, behaviours, bodies, faces), the
-// camera, and the guest memory and GX helpers the native amp needs.
+// The channel's 3D pieces the native scenes' stages are made of (first the Sound Player's), with
+// their arguments spelt out: the studio set (g3d::Stage), the Miis (the room's actor manager,
+// behaviours, bodies, faces), the camera, and the guest memory and GX helpers the native amp needs.
 //
 // Built as the channel's TV programme screen (scene::TvScene, ctor scene_TvScene_ctor, Update scene_TvScene_Update,
 // Draw scene_TvScene_Draw, dtor scene_TvScene_dtor) builds its studio and its caster, without its camera manager
@@ -11,7 +11,7 @@
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
-namespace engine::soundplayer::g3d {
+namespace engine::ui::g3d {
 
 // ---- guest memory
 
@@ -188,4 +188,4 @@ inline void anim_set_rate(u32 obj, f32 rate) {
     gcall<u32>(guest::load32(guest::load32(obj) + 0x28), obj, (f64)rate);
 }
 
-}  // namespace engine::soundplayer::g3d
+}  // namespace engine::ui::g3d

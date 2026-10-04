@@ -8,15 +8,18 @@
 #include "engine/soundplayer/sound_player.h"
 
 #include "engine/soundplayer/angles.h"
-#include "engine/soundplayer/art.h"
-#include "engine/soundplayer/lyt.h"
 #include "engine/system/host_scene.h"
+#include "engine/ui/art.h"
+#include "engine/ui/lyt.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
 namespace engine::soundplayer {
+
+namespace art = engine::ui::art;
+namespace lyt = engine::ui::lyt;
 
 namespace {
 

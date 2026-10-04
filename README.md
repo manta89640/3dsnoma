@@ -203,7 +203,9 @@ what each Mii plays, every frame.
 - `engine/` — native 3DS code in place of the program's SDK functions (the base of the engine
   the port is becoming): `os/` (interrupts, clock), `cw/` (compiler runtime helpers), `input/`
   (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out,
-  scenes written in native code), `soundplayer/` (the Sound Player).
+  scenes written in native code), `ui/` (what the native scenes share: the channel's layouts,
+  buttons, wipes and 3D pieces as they use them, pictures made at run time), `soundplayer/` (the
+  Sound Player).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what

@@ -1,12 +1,14 @@
-// The channel's own functions and objects the Sound Player uses, with their arguments spelt out
-// (the decompiled functions take the register ABI's full argument list).
+// The channel's own functions and objects the native scenes use (the Sound Player, Wuhu Island),
+// with their arguments spelt out (the decompiled functions take the register ABI's full argument
+// list). engine/ui holds what those scenes share: these, the layouts (lyt.h), the run-time pictures
+// (art.h) and the 3D pieces (g3d.h), first written for the Sound Player.
 #pragma once
 
 #include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
-namespace engine::soundplayer::game {
+namespace engine::ui::game {
 
 // ---- globals
 inline u32 wipe() { return guest::load32(GA_layout_parts_Wipe_sInstance); }        // layout::parts::Wipe
@@ -76,4 +78,4 @@ inline void bottom_update(u32 b) { gcall<u32>(guest::load32(guest::load32(b) + 0
 inline void bottom_draw(u32 b) { gcall<u32>(guest::load32(guest::load32(b) + 0x10), b); }
 inline void bottom_dtor_delete(u32 b) { gcall<u32>(guest::load32(guest::load32(b) + 0x8), b, 1u); }
 
-}  // namespace engine::soundplayer::game
+}  // namespace engine::ui::game

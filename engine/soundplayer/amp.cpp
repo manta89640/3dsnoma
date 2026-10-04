@@ -29,11 +29,14 @@
 
 #include "engine/math/vecmath.h"
 #include "engine/soundplayer/angles.h"
-#include "engine/soundplayer/g3d.h"
-#include "engine/soundplayer/lyt.h"
+#include "engine/ui/g3d.h"
+#include "engine/ui/lyt.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
+
+namespace g3d = engine::ui::g3d;
+namespace lyt = engine::ui::lyt;
 
 namespace {
 

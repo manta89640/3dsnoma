@@ -1,10 +1,10 @@
-// Pictures made at run time for the Sound Player's 2D parts, in the channel's own texture style:
+// Pictures made at run time for the native scenes' 2D parts, in the channel's own texture style:
 // a coverage image drawn on the host, the two-tone IA4 textures of the room bar made from it, text
 // set from the channel's font, and the guest side (the texels in guest memory, a layout picture's
-// texture map). Header-only: the bar button (bar_button.cpp) uses it.
+// texture map). Header-only: the room bar's buttons made by the port use it.
 #pragma once
 
-#include "engine/soundplayer/lyt.h"
+#include "engine/ui/lyt.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
@@ -12,7 +12,7 @@
 #include <cmath>
 #include <vector>
 
-namespace engine::soundplayer::art {
+namespace engine::ui::art {
 
 // How much of each pixel a shape covers, 0 to 1, rows from the top.
 struct Coverage {
@@ -268,4 +268,4 @@ inline void set_texmap(u32 texmap, u32 texels, u32 w, u32 h, u32 format) {
     guest::store32(texmap + 0x18, (guest::load32(texmap + 0x18) & 0x0FFF9FFFu) | format << 28);
 }
 
-}  // namespace engine::soundplayer::art
+}  // namespace engine::ui::art
