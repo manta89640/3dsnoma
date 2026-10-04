@@ -24,7 +24,7 @@
 //
 // The dances. Each Mii plays one of the channel's own dances and cheers (the TV caster's dances,
 // the DSi relay's clapping and jumping, the messages' celebration and birthday jumps), not the one
-// of its neighbours, and they change every 32 beats and with every new piece. The clips don't
+// of its neighbours, and they change every 8 bars and with every new piece. The clips don't
 // play at their own pace: each one's frame is set every frame (its update rate is 0) from the
 // music's position, Music::beat(), through the clip's beat map (the frames where its bounces land,
 // read from its CHR0 keys), so its bounces land on the beats whatever the frame rate; a clip takes
@@ -100,8 +100,8 @@ const char* const ANIM_FILES[] = {
     "g3d/Mii/Animation/Tv_Mii_Caster.lex", "g3d/Mii/Animation/Color_Anim.lex",
 };
 const u32 N_ANIM_FILES = sizeof(ANIM_FILES) / sizeof(ANIM_FILES[0]);
-// the dances change every so many beats
-const int PHRASE_BEATS = 32;
+// the dances change every so many bars (32 beats in 4/4, 24 in 3/4: a phrase either way)
+const int PHRASE_BARS = 8;
 // the tempo of a piece without a sequence (a wave jingle), and the frames a piece plays without
 // one before it is taken for such a piece (it then gets that tempo, and its dances)
 const f32 DEFAULT_BPM = 120;
@@ -215,11 +215,12 @@ struct Stage::Impl {
     u32 without_beat = 0;   // frames a piece has played without a sequence
     f32 bpm = DEFAULT_BPM;        // the tempo last heard
     f32 paced_bpm = DEFAULT_BPM;  // the tempo the clips' paces go by
+    u32 bar = 4;            // quarter notes a bar, last heard
     u32 sound = ~0u;        // the piece current
     bool new_piece = false; // its dances aren't chosen yet
     u32 new_piece_wait = 0;
     int phrase = 0;         // dances chosen so far
-    int phrase_index = 0;   // the music's phrase (beats / PHRASE_BEATS) they were chosen in
+    int phrase_index = 0;   // the music's phrase (bars / PHRASE_BARS) they were chosen in
     f32 pulse = 0;
     u32 frame = 0;
 
@@ -624,7 +625,7 @@ void Stage::Impl::groove(const Music& music) {
     last_tb = now;
     bool playing = state == PlayState::PLAYING || state == PlayState::SWITCHING;
     if (playing && b.valid) {
-        beats = b.beats, without_beat = 0;
+        beats = b.beats, bar = b.bar, without_beat = 0;
         if (b.bpm > 30 && b.bpm < 400)
             bpm = b.bpm;
     } else if (playing) {
@@ -639,11 +640,11 @@ void Stage::Impl::groove(const Music& music) {
         paced_bpm = bpm;
 
     // new dances with a new piece (once it plays: the crossfade hides the jump to its first beat)
-    // and every PHRASE_BEATS beats
+    // and every PHRASE_BARS bars
     u32 now_sound = music.current();
     if (now_sound != sound)
         sound = now_sound, new_piece = true, new_piece_wait = 0;
-    int now_phrase = (int)std::floor(beats / PHRASE_BEATS);
+    int now_phrase = (int)std::floor(beats / (PHRASE_BARS * bar));
     if (new_piece) {
         if (state == PlayState::PLAYING && (b.valid || ++new_piece_wait > NO_SEQUENCE_WAIT_FRAMES)) {
             new_piece = false, phrase_index = now_phrase;
@@ -666,7 +667,7 @@ void Stage::Impl::groove(const Music& music) {
     static const bool trace = std::getenv("NOMA_SP_BEATS") != nullptr;
     if (trace) {
         char line[256];
-        int at = std::snprintf(line, sizeof(line), "beat %.3f bpm %.1f %s", beats, bpm,
+        int at = std::snprintf(line, sizeof(line), "beat %.3f (%u a bar) bpm %.1f %s", beats, (unsigned)bar, bpm,
                                dancing ? (b.valid ? "sync" : "free") : "calm");
         for (const Mii& m : miis) {
             if (m.clip < 0 || at >= (int)sizeof(line) - 40)
@@ -695,9 +696,10 @@ void Stage::Impl::drive(Mii& m) {
         set(m.clip);
         if (m.previous >= 0 && frame < m.previous_until)
             set(m.previous);
-        // a smile; the mouth opens on the Mii's accent (every beat for a jumper, else every 4th)
+        // a smile; the mouth opens on the Mii's accent (every beat for a jumper, else once a bar,
+        // each Mii on its own beat of it)
         long long beat = (long long)std::floor(beats) + (&m - miis.data());
-        bool accent = DANCES[m.clip].jumps ? frac < 0.4 : beat % 4 == 0 && frac < 0.5;
+        bool accent = DANCES[m.clip].jumps ? frac < 0.4 : beat % bar == 0 && frac < 0.5;
         face = accent ? g3d::FACE_OPEN_MOUTH : g3d::FACE_SMILE;
     } else {
         // waiting: a plain face, blinking every 3.5 seconds or so, each Mii at its own moment

@@ -20,6 +20,7 @@
 #include "engine/soundplayer/music.h"
 
 #include "engine/math/vecmath.h"
+#include "engine/wuhu/music.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
@@ -120,6 +121,7 @@ Beat Music::beat() const {
     if (!(to_come >= 0.0f && to_come <= 1.0f))
         to_come = 1.0f;
     b.beats = ((double)guest::load32(player + 0x160) + (1.0 - to_come)) / timebase;
+    b.bar = engine::wuhu::music_bar_beats(current());
     return b;
 }
 

@@ -189,7 +189,8 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
 - The household's Miis dance at a table in the TV programme's white studio, an amp beside them,
   every family member (one to eight) placed so that none hides another. The dances are the
   channel's own (the TV caster's, the DSi relay's, the messages' cheers), their frames set from
-  the music's sequencer every frame, so the moves land on the beat at any frame rate; paused or
+  the music's sequencer every frame, so the moves land on the beat at any frame rate, and change
+  every 8 bars (of 3 beats in the island's waltz, of 4 in the channel's pieces); paused or
   stopped, the Miis wait calmly. The amp is drawn by the port (no such model exists in the
   channel), its speaker and light pulsing on the beat.
 - Buttons: the pointer and A as everywhere; the D-pad's up and down move the list's highlight
@@ -221,10 +222,11 @@ what each Mii plays, every frame.
 - `platform/host`, `platform/3ds` — entry points, presentation, input; `gx_pica.cpp` is the GX
   renderer on the 3DS GPU.
 - `tools/` — WAD extraction, signature inference, the decompilation driver.
-- `tools/music/` — the port's own music: the island's score (`hiroi_sekai.py`), an RSEQ assembler,
-  disassembler and score compiler (`rseq.py`; `rseq.py header` makes `engine/wuhu/hiroi_sekai_seq.h`),
-  a reader of the channel's sound archive and a model of its sequencer (`brsar.py`), a preview
-  renderer with the channel's own instruments (`sndrender.py`), checks of a score and of a
-  recording of the port playing it (`check.py`, `dump_check.py`). They read the channel's
-  `snd/douga.brsar` from your own extraction.
+- `tools/music/` — the port's own music: the island's score (`hiroi_sekai.py`: 「広い世界へ」, a
+  stately 3/4 at 108 bpm on the channel's orchestral instruments, D major rising to E), an RSEQ
+  assembler, disassembler and score compiler (`rseq.py`; `rseq.py header` makes
+  `engine/wuhu/hiroi_sekai_seq.h`), a reader of the channel's sound archive and a model of its
+  sequencer (`brsar.py`), a preview renderer with the channel's own instruments (`sndrender.py`),
+  checks of a score and of a recording of the port playing it (`check.py`, `dump_check.py`). They
+  read the channel's `snd/douga.brsar` from your own extraction.
 - `config/HCIJ` — dtk configuration and symbols.
