@@ -111,6 +111,7 @@ set(ENGINE_SOURCES
   engine/wuhu/content_placeholder.cpp
   engine/wuhu/follow_camera.cpp
   engine/wuhu/music.cpp
+  engine/wuhu/places.cpp
   engine/wuhu/player.cpp
   engine/wuhu/scene.cpp
 )

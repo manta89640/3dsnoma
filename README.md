@@ -146,6 +146,7 @@ Useful environment variables:
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
 | `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, a ledge, a slope too steep to stand on, the suspension bridge) and 20 minutes of random walking at two Mii sizes, every tick checked (on the ground, in no wall, no deep water, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale, `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
+| `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (until the island's own): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
@@ -211,7 +212,7 @@ what each Mii plays, every frame.
   scenes written in native code), `ui/` (what the native scenes share: the channel's layouts,
   buttons, wipes and 3D pieces as they use them, pictures made at run time), `soundplayer/` (the
   Sound Player), `wuhu/` (walkable Wuhu Island, in progress: `docs/wuhu_design.md`; so far the
-  bar's 出発 button and the scene's shell).
+  bar's 出発 button and the scene's shell with its exploration menu).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what

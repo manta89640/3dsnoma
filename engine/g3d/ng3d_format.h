@@ -343,9 +343,10 @@ static_assert(sizeof(Fog) == 16, "Fog");
 
 struct Marker {
     u32 name;            // STRS (e.g. "spawn", or a landmark's name)
-    u32 kind;            // 0 spawn point, 1 landmark, 2 camera preset (position = eye, target in dir)
+    u32 kind;            // 0 spawn point, 1 landmark, 2 camera preset (position = eye, target in dir),
+                         // 3 warp place (a place the island's menu offers; its name in Japanese)
     f32 position[3];
-    f32 dir[3];          // spawn: facing (unit); camera: target point
+    f32 dir[3];          // spawn, warp place: facing (unit); camera: target point
 };
 static_assert(sizeof(Marker) == 32, "Marker");
 
