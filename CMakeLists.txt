@@ -60,12 +60,19 @@ set(ENGINE_SOURCES
   engine/audio/ax_render.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
+  engine/g3d/anim.cpp
   engine/g3d/g3d.cpp
+  engine/g3d/material.cpp
+  engine/g3d/native_draw.cpp
+  engine/g3d/package.cpp
+  engine/g3d/texture.cpp
+  engine/g3d/world.cpp
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
   engine/lyt/quad.cpp
   engine/lyt/material.cpp
   engine/gx/gx_sdk.cpp
+  engine/gx/tev_combiner.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
   engine/math/mtx.cpp
@@ -174,7 +181,11 @@ if(NINTENDO_3DS)
   target_link_libraries(noma noma_decomp citro3d ctru m)
 else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
-                           platform/host/selftest.cpp)
+                           platform/host/selftest.cpp platform/host/selftest_g3d.cpp engine/g3d/package_writer.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
   target_link_libraries(noma-host noma_decomp)
+  # ng3d-bake: a package's GX textures in their PICA formats, offline (tools/ng3d_bake.cpp)
+  add_executable(ng3d-bake tools/ng3d_bake.cpp engine/g3d/package.cpp engine/g3d/texture.cpp
+                           engine/g3d/package_writer.cpp)
+  target_include_directories(ng3d-bake PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime)
 endif()

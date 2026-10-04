@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 
 #include "runtime/hw/gx/raster.h"
+#include "engine/g3d/native_draw.h"
 #include "engine/input/remote.h"
 #include "runtime/runtime.h"
 
@@ -205,6 +206,8 @@ struct HostRenderer : SoftRenderer {
         if (drawing)
             SoftRenderer::draw(prim, vat, count, data);
     }
+    // (a native draw in a frame not drawn is only retired)
+    void native(u32 id) override { engine::g3d::native_draw_execute(id, drawing); }
     void efb_copy(u32 value) override {
         if (!(value & 0x4000) && !texture_copies) {  // (bit 14: a copy to the frame buffer)
             texture_copies = true;

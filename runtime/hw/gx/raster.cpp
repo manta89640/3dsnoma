@@ -19,6 +19,7 @@
 #include "regs.h"
 #include "texture.h"
 #include "vertex.h"
+#include "engine/g3d/native_draw.h"
 
 namespace guest {
 
@@ -1099,6 +1100,24 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             point(out[i]);
         break;
     }
+}
+
+void SoftRenderer::native(u32 id) { engine::g3d::native_draw_execute(id); }
+
+HostEfb gx_host_efb() {
+    const u32* bp = g_gx.bp;
+    HostEfb e;
+    e.color = s_color.data(), e.depth = s_depth.data();
+    e.width = EFB_W, e.height = EFB_H;
+    // (as load_state)
+    s32 sox = (s32)bits(bp[BP_SCISSOR_OFFSET], 0, 10) * 2, soy = (s32)bits(bp[BP_SCISSOR_OFFSET], 10, 10) * 2;
+    e.scissor_left = std::max<s32>((s32)bits(bp[BP_SCISSOR_TL], 12, 11) - sox, 0);
+    e.scissor_top = std::max<s32>((s32)bits(bp[BP_SCISSOR_TL], 0, 11) - soy, 0);
+    e.scissor_right = std::min<s32>((s32)bits(bp[BP_SCISSOR_BR], 12, 11) - sox, EFB_W - 1);
+    e.scissor_bottom = std::min<s32>((s32)bits(bp[BP_SCISSOR_BR], 0, 11) - soy, EFB_H - 1);
+    e.x_offset = (f32)sox, e.y_offset = (f32)soy;
+    e.pixel_format = bits(bp[BP_ZCONTROL], 0, 3);
+    return e;
 }
 
 // NOMA_DUMP_TEX_COPIES=N: log the first N EFB copies to textures and save each as it lands in
