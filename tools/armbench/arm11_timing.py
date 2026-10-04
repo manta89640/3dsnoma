@@ -107,15 +107,13 @@ def cond_passes(cc, cpsr):
             A.ARM_CC_LE: z or n != v}.get(cc, True)
 
 
-class _Regs:
-    """the registers before the instruction, read from Unicorn only when asked for"""
-    __slots__ = ("uc", "pc")
+class _Plan:
+    """what an instruction needs and makes, worked out once per address"""
+    __slots__ = ("cond", "flags_in", "sets_flags", "srcs", "dests", "issue", "kind", "mem", "lsu", "target",
+                 "links", "is_return", "mul_fail", "ldm", "pc_write")
 
-    def __init__(self, uc, addr):
-        self.uc, self.pc = uc, addr + 8
 
-    def __getitem__(self, r):
-        return self.pc if r == 15 else self.uc.reg_read(UC_REGS[r])
+K_PLAIN, K_MEM, K_MEMD, K_LDM, K_B, K_BX = range(6)
 
 
 class Arm11Timing:
@@ -124,7 +122,7 @@ class Arm11Timing:
     def __init__(self):
         self.md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
         self.md.detail = True
-        self.cache = {}
+        self.plans = {}
         self.reset()
 
     def reset(self):
@@ -137,205 +135,224 @@ class Arm11Timing:
         self.rstack = []
         self.cycles = 0
 
-    def decode(self, uc, addr):
-        insn = self.cache.get(addr)
-        if insn is None:
-            insn = next(self.md.disasm(bytes(uc.mem_read(addr, 4)), addr))
-            self.cache[addr] = insn
-        return insn
-
-    def _need(self, start, r, kind=0, acc=False):
-        """the earliest start for an instruction that reads register r (kind 1 early, -1 late)"""
-        if r is None or r == 15:
-            return start
-        ready = self.mac_ready[r] if acc else self.ready[r]
-        return max(start, ready + kind)
-
-    def _write(self, r, at, mac=False):
-        if r is None or r == 15:
-            return
-        self.ready[r] = at
-        self.mac_ready[r] = at - 1 if mac else at
-
-    def step(self, uc, addr):
-        insn = self.decode(uc, addr)
-        regs = _Regs(uc, addr)
+    def plan(self, uc, addr):
+        insn = next(self.md.disasm(bytes(uc.mem_read(addr, 4)), addr))
         iid, ops = insn.id, insn.operands
-        passes = insn.cc in (A.ARM_CC_AL, A.ARM_CC_INVALID) or cond_passes(insn.cc, uc.reg_read(UC_ARM_REG_CPSR))
-        start = self.t
-        if insn.cc not in (A.ARM_CC_AL, A.ARM_CC_INVALID) or iid in CARRY_IN:
-            start = max(start, self.ready[FLAGS])
-        issue, dests, lsu_cycles = 1, [], 0
-        sets_flags = insn.update_flags and iid not in CARRY_IN or iid in COMPARE
         regs_of = [REG.get(o.reg) if o.type == A.ARM_OP_REG else None for o in ops]
-
+        P = _Plan()
+        P.cond = insn.cc if insn.cc not in (A.ARM_CC_AL, A.ARM_CC_INVALID) else None
+        P.flags_in = P.cond is not None or iid in CARRY_IN
+        P.sets_flags = bool(insn.update_flags and iid not in CARRY_IN or iid in COMPARE)
+        P.srcs, P.dests, P.issue, P.kind, P.mem, P.lsu = [], [], 1, K_PLAIN, None, 0
+        P.target, P.links, P.is_return, P.mul_fail, P.ldm, P.pc_write = None, False, False, False, None, 0
+        srcs, dests = P.srcs, P.dests  # srcs: (reg, kind, acc); dests: (reg, latency, mac)
         if iid in DP or iid in MEDIA1 or iid in MEDIA2 or iid in SAD:
             lat = 2 if iid in MEDIA2 else 3 if iid in SAD else 1
             first_src = 0 if iid in COMPARE else 1
             if iid in _ids("SSAT", "USAT", "SSAT16", "USAT16"):
                 first_src = 2  # (rd, #sat, rm)
-            srcs = []
+            sl = []
             for k, o in enumerate(ops[first_src:], first_src):
                 if o.type != A.ARM_OP_REG:
                     continue
                 r = REG.get(o.reg)
                 last = k == len(ops) - 1
                 if o.shift.type in SFT_REG:
-                    issue, lat = 2, max(lat, 2)
-                    srcs.append((REG.get(o.shift.value), 1))
-                    srcs.append((r, 0))
+                    P.issue, lat = 2, max(lat, 2)
+                    sl.append((REG.get(o.shift.value), 1))
+                    sl.append((r, 0))
                 elif o.shift.type or (last and (iid in MEDIA1_EARLY_M or iid in MEDIA2_EARLY_M or iid in SAD)):
-                    srcs.append((r, 1))
+                    sl.append((r, 1))
                 else:
-                    srcs.append((r, 0))
-            if issue == 2:  # register-controlled shift: the unshifted operand is a Late Reg
-                srcs = [(r, -1) if kind == 0 and k == 0 and len(srcs) > 2 else (r, kind) for k, (r, kind) in enumerate(srcs)]
+                    sl.append((r, 0))
+            if P.issue == 2:  # register-controlled shift: the unshifted operand is a Late Reg
+                sl = [(r, -1) if kind == 0 and k == 0 and len(sl) > 2 else (r, kind) for k, (r, kind) in enumerate(sl)]
             if iid in SAD:
-                srcs = [(r, 1) for r, _ in srcs[:2]] + srcs[2:]
-            for r, kind in srcs:
-                start = self._need(start, r, kind)
+                sl = [(r, 1) for r, _ in sl[:2]] + sl[2:]
+            srcs += [(r, kind, False) for r, kind in sl]
             if iid not in COMPARE:
                 dests.append((regs_of[0], lat, False))
-            if regs_of[0] == 15 and iid not in COMPARE and passes:
-                issue += 6  # a data-processing write to the PC: an unpredicted branch
+                if regs_of[0] == 15:
+                    P.pc_write = 6  # a data-processing write to the PC: an unpredicted branch
         elif iid in MUL:
-            issue, lats, late = MUL[iid]
+            P.issue, lats, late = MUL[iid]
+            P.mul_fail = True
             n_dst = 2 if len(lats) == 2 else 1
-            srcs = regs_of[n_dst:]
+            ms = regs_of[n_dst:]
             accumulates = iid in MUL_ACC
-            for k, r in enumerate(srcs):
-                is_acc = accumulates and k == len(srcs) - 1 and n_dst == 1
+            for k, r in enumerate(ms):
+                is_acc = accumulates and k == len(ms) - 1 and n_dst == 1
                 if k < 2:
-                    start = self._need(start, r, 1)
+                    srcs.append((r, 1, False))
                 elif is_acc:
-                    start = self._need(start, r, -1 if late is not None else 0, acc=True)
+                    srcs.append((r, -1 if late is not None else 0, True))
                 else:
-                    start = self._need(start, r, 0)
+                    srcs.append((r, 0, False))
             if n_dst == 2 and accumulates:  # the 64-bit accumulators are the destinations
-                start = self._need(start, regs_of[0], -1, acc=True)
-                start = self._need(start, regs_of[1], 0, acc=True)
+                srcs.append((regs_of[0], -1, True))
+                srcs.append((regs_of[1], 0, True))
             for k in range(n_dst):
                 dests.append((regs_of[k], lats[k], True))
-            if not passes:
-                issue = min(issue, max(5 - (start - self.flags_set - 1), 3))
         elif iid in LOAD or iid in STORE or iid in PLD or iid in LDRD or iid in STRD:
             size = LOAD.get(iid) or STORE.get(iid) or 1
             if iid in LDRD or iid in STRD:
                 size = 8
-            mem = next(o for o in ops if o.type == A.ARM_OP_MEM)
-            mem_k = ops.index(mem) if False else [k for k, o in enumerate(ops) if o.type == A.ARM_OP_MEM][0]
+            mem_k = [k for k, o in enumerate(ops) if o.type == A.ARM_OP_MEM][0]
+            mem = ops[mem_k]
             base = REG.get(mem.mem.base)
             post = mem_k + 1 < len(ops)  # an operand after the address: post-indexed
-            index = REG.get(mem.mem.index) if mem.mem.index else None
-            off_reg = None
+            off_reg, neg, sh_t, sh_v, imm = None, False, 0, 0, 0
             if post:
                 o = ops[mem_k + 1]
                 if o.type == A.ARM_OP_REG:
-                    off_reg = REG.get(o.reg)
-                    neg, shift = o.subtracted, o.shift
-            elif index is not None:
-                off_reg, neg, shift = index, mem.subtracted, mem.shift
-            two_issue = off_reg is not None and (neg or (shift.type and not (shift.type == A.ARM_SFT_LSL and shift.value == 2)))
-            issue = 2 if two_issue else 1
-            # the address
-            ea = regs[base] if base is not None else 0
-            off = 0
-            if off_reg is not None:
-                off = regs[off_reg]
-                if shift.type == A.ARM_SFT_LSL:
-                    off = off << shift.value
-                elif shift.type == A.ARM_SFT_LSR:
-                    off = off >> shift.value
-                elif shift.type == A.ARM_SFT_ASR:
-                    off = (off - (1 << 32) if off >> 31 else off) >> shift.value
-                off = -off if neg else off
-            elif not post:
-                off = mem.mem.disp if not mem.subtracted else -mem.mem.disp
-            if not post:
-                ea = (ea + off) & 0xFFFFFFFF
-            align = 8 if size == 8 else size
-            unaligned = size in (2, 4) and ea % size != 0
-            potentially = size in (2, 4) and ((regs[base] if base is not None else 0) % size or off % size)
-            if size == 8:
-                lsu_cycles = 1 if ea % 8 == 0 else 2
+                    off_reg, neg, sh_t, sh_v = REG.get(o.reg), o.subtracted, o.shift.type, o.shift.value
+            elif mem.mem.index:
+                off_reg, neg, sh_t, sh_v = REG.get(mem.mem.index), mem.subtracted, mem.shift.type, mem.shift.value
             else:
-                lsu_cycles = 2 if potentially else 1
-            start = self._need(start, base, 0 if two_issue else 1)
-            start = self._need(start, off_reg, 1)
-            start = max(start, self.lsu)
+                imm = mem.mem.disp if not mem.subtracted else -mem.mem.disp
+            two = off_reg is not None and (neg or (sh_t and not (sh_t == A.ARM_SFT_LSL and sh_v == 2)))
+            P.issue = 2 if two else 1
+            P.kind = K_MEMD if size == 8 else K_MEM
+            P.mem = (base, off_reg, neg, sh_t, sh_v, imm, post, size, two,
+                     iid in LOAD or iid in LDRD, iid in LDRD, regs_of[0], regs_of[1] if size == 8 else None,
+                     bool(insn.writeback or post))
+            srcs.append((base, 0 if two else 1, False))
+            if off_reg is not None:
+                srcs.append((off_reg, 1, False))
             if iid in STORE or iid in STRD:
                 for r in regs_of[:2 if iid in STRD else 1]:
-                    start = self._need(start, r, 0)
-            lat = (4 if two_issue else 3) + (1 if unaligned else 0)
-            if iid in LOAD:
-                dests.append((regs_of[0], lat, False))
-            elif iid in LDRD:
-                dests.append((regs_of[0], lat, False))
-                dests.append((regs_of[1], lat + (0 if ea % 8 == 0 else 1), False))
-            if insn.writeback or post:
-                dests.append((base, 1, False))
-            if iid in LOAD and regs_of[0] == 15 and passes:
-                issue += 7
+                    srcs.append((r, 0, False))
+            if iid in LOAD and regs_of[0] == 15:
+                P.pc_write = 7
         elif iid in LDM or iid in STM:
             if iid in _ids("PUSH", "POP"):
                 base, lst = 13, regs_of
             else:
                 base, lst = regs_of[0], regs_of[1:]
-            sp = regs[base]
-            n = len(lst)
+            mode = 0  # first address: base (IA), base + 4 (IB), base - 4n (DB/PUSH), base - 4n + 4 (DA)
             if iid in _ids("PUSH", "STMDB", "LDMDB"):
-                first = sp - 4 * n
+                mode = 2
             elif iid in _ids("STMIB", "LDMIB"):
-                first = sp + 4
+                mode = 1
             elif iid in _ids("STMDA", "LDMDA"):
-                first = sp - 4 * n + 4
-            else:
-                first = sp
-            aligned = first % 8 == 0
-            lsu_cycles = (n + 1) // 2 if aligned else (n + 2) // 2
-            start = self._need(start, base, 1)
-            start = max(start, self.lsu)
+                mode = 3
+            P.kind = K_LDM
+            P.ldm = (base, tuple(lst), mode, iid in LDM, bool(insn.writeback or iid in _ids("PUSH", "POP")))
+            srcs.append((base, 1, False))
             if iid in STM:
                 for r in lst:
-                    start = self._need(start, r, 0)
-            else:
-                for k, r in enumerate(lst):
-                    dests.append((r, 3 + (k // 2 if aligned else (k + 1) // 2), False))
-            if insn.writeback or iid in _ids("PUSH", "POP"):
-                dests.append((base, 1, False))
-            if iid in LDM and 15 in lst and passes:
-                ret = (lst[-1] == 15 and base == 13)
-                issue += self._return(regs, uc, addr, insn) if ret else 8
+                    srcs.append((r, 0, False))
+            if iid in LDM and 15 in lst:
+                P.is_return = lst[-1] == 15 and base == 13
+                P.pc_write = 1
         elif iid in B or iid in BL:
-            target = ops[0].imm
-            issue = self._branch(addr, target, passes, start)
-            if iid in BL and passes:
-                self.rstack = ([addr + 4] + self.rstack)[:3]
-                dests.append((14, 1, False))
+            P.kind, P.target, P.links = K_B, ops[0].imm, iid in BL
         elif iid in BX or iid in BLX:
             r = regs_of[0]
-            start = self._need(start, r, 0)
             if r is None:  # BLX #imm
-                issue = self._branch(addr, ops[0].imm, passes, start)
-            elif not passes:
-                issue = 1
-            elif iid in BX and r == 14:
-                issue = self._return(regs, uc, addr, insn)
+                P.kind, P.target, P.links = K_B, ops[0].imm, True
             else:
-                issue = 6
-            if iid in BLX and passes:
-                self.rstack = ([addr + 4] + self.rstack)[:3]
-                dests.append((14, 1, False))
+                P.kind, P.links = K_BX, iid in BLX
+                P.is_return = iid in BX and r == 14
+                srcs.append((r, 0, False))
         else:
             for r in regs_of:
-                start = self._need(start, r, 0)
+                srcs.append((r, 0, False))
             dests.append((regs_of[0] if regs_of else None, 1, False))
+        srcs[:] = [x for x in srcs if x[0] is not None and x[0] != 15]
+        dests[:] = [x for x in dests if x[0] is not None and x[0] != 15]
+        self.plans[addr] = P
+        return P
 
+    def step(self, uc, addr):
+        P = self.plans.get(addr) or self.plan(uc, addr)
+        passes = P.cond is None or cond_passes(P.cond, uc.reg_read(UC_ARM_REG_CPSR))
+        ready, mac_ready = self.ready, self.mac_ready
+        start = self.t
+        if P.flags_in and ready[FLAGS] > start:
+            start = ready[FLAGS]
+        for r, kind, acc in P.srcs:
+            v = (mac_ready[r] if acc else ready[r]) + kind
+            if v > start:
+                start = v
+        issue, lsu_cycles, extra = P.issue, P.lsu, []
+        k = P.kind
+        if k == K_MEM or k == K_MEMD:
+            (base, off_reg, neg, sh_t, sh_v, imm, post, size, two, is_load, is_ldrd, rt, rt2, wb) = P.mem
+            breg = uc.reg_read(UC_REGS[base]) if base != 15 else addr + 8
+            if off_reg is not None:
+                off = uc.reg_read(UC_REGS[off_reg]) if off_reg != 15 else addr + 8
+                if sh_t == A.ARM_SFT_LSL:
+                    off = off << sh_v
+                elif sh_t == A.ARM_SFT_LSR:
+                    off = off >> sh_v
+                elif sh_t == A.ARM_SFT_ASR:
+                    off = (off - (1 << 32) if off >> 31 else off) >> sh_v
+                off = -off if neg else off
+            else:
+                off = imm
+            ea = breg if post else (breg + off) & 0xFFFFFFFF
+            if size == 8:
+                lsu_cycles = 1 if ea % 8 == 0 else 2
+            else:
+                lsu_cycles = 2 if size > 1 and (breg % size or off % size) else 1
+            if self.lsu > start:
+                start = self.lsu
+            lat = (4 if two else 3) + (1 if size in (2, 4) and ea % size else 0)
+            if is_load and rt is not None and rt != 15:
+                extra.append((rt, lat, False))
+                if is_ldrd and rt2 is not None:
+                    extra.append((rt2, lat + (0 if ea % 8 == 0 else 1), False))
+            if wb:
+                extra.append((base, 1, False))
+            if P.pc_write and passes:
+                issue += P.pc_write
+        elif k == K_LDM:
+            base, lst, mode, is_load, wb = P.ldm
+            sp = uc.reg_read(UC_REGS[base])
+            n = len(lst)
+            first = sp - 4 * n if mode == 2 else sp + 4 if mode == 1 else sp - 4 * n + 4 if mode == 3 else sp
+            aligned = first % 8 == 0
+            lsu_cycles = (n + 1) // 2 if aligned else (n + 2) // 2
+            if self.lsu > start:
+                start = self.lsu
+            if is_load:
+                for j, r in enumerate(lst):
+                    if r is not None and r != 15:
+                        extra.append((r, 3 + (j // 2 if aligned else (j + 1) // 2), False))
+            if wb:
+                extra.append((base, 1, False))
+            if P.pc_write and passes:
+                issue += self._return() if P.is_return else 8
+        elif k == K_B:
+            issue = self._branch(addr, P.target, passes, start)
+            if P.links and passes:
+                self.rstack = ([addr + 4] + self.rstack)[:3]
+                extra.append((14, 1, False))
+        elif k == K_BX:
+            if not passes:
+                issue = 1
+            elif P.is_return:
+                issue = self._return()
+            else:
+                issue = 6
+            if P.links and passes:
+                self.rstack = ([addr + 4] + self.rstack)[:3]
+                extra.append((14, 1, False))
+        else:
+            if P.pc_write and passes:
+                issue += P.pc_write
+            if P.mul_fail and not passes:
+                issue = min(issue, max(5 - (start - self.flags_set - 1), 3))
         if passes:
-            for r, lat, mac in dests:
-                self._write(r, start + lat, mac)
-        if sets_flags and passes:
-            self.ready[FLAGS] = start + 1
+            for r, lat, mac in P.dests:
+                ready[r] = start + lat
+                mac_ready[r] = start + lat - 1 if mac else start + lat
+            for r, lat, mac in extra:
+                ready[r] = start + lat
+                mac_ready[r] = start + lat
+        if P.sets_flags and passes:
+            ready[FLAGS] = start + 1
             self.flags_set = start
         if lsu_cycles:
             self.lsu = start + lsu_cycles
@@ -362,9 +379,9 @@ class Arm11Timing:
             e[1] = max(0, e[1] - 1)
         return cost
 
-    def _return(self, regs, uc, addr, insn):
-        # the real return address is what the instruction loads/branches to; the return stack holds
-        # BL's return addresses
+    def _return(self):
+        # the return stack holds BL's return addresses (whether the one popped is the one returned
+        # to isn't checked: the code measured returns where it was called from)
         if not self.rstack:
             return 5
         self.rstack = self.rstack[1:]

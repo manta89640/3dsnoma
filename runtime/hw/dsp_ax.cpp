@@ -221,7 +221,7 @@ void dsp_ax_command_list(u32 list_addr, u32 words) {
         case 0x03: add_sub_to_lr(mem(next32())); break;
         case 0x04: {
             u32 pbs = mem(next32());
-            s32 before = peak_lr();
+            s32 before = s_debug ? peak_lr() : 0;
             int running = process_pbs(pbs);
             // how many voices the game plays at once (the 3DS's DSP has 24 channels)
             static int s_most, s_frames;
@@ -229,6 +229,14 @@ void dsp_ax_command_list(u32 list_addr, u32 words) {
             if (++s_frames == 2000) {
                 log("ax: at most %d voices in a frame (last 2000 frames)", s_most);
                 s_most = s_frames = 0;
+                if (s_debug) {
+                    using namespace engine::audio;
+                    const u32* n = ax_paths;
+                    log("ax: voice frames so far: one pass %u (envelope 1.0 %u, fixed %u, ramping %u, above 1.0 %u); "
+                        "muted %u; other buses, filters or SRC %u; levels or input %u",
+                        n[AXP_ONE] + n[AXP_FIXED] + n[AXP_RAMP] + n[AXP_LOUD], n[AXP_ONE], n[AXP_FIXED], n[AXP_RAMP],
+                        n[AXP_LOUD], n[AXP_MUTED], n[AXP_MIX], n[AXP_LEVELS]);
+                }
             }
             if (s_debug && running && s_frames_logged < 4) {
                 dbg = true;

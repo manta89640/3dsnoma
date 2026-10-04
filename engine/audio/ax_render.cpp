@@ -559,25 +559,26 @@ asm(".section .text.ax_mix_lr_fixed,\"ax\",%progbits\n"
 // that stays within 0 .. 1.0 if it ramps: false (and nothing done) for any other voice
 bool render_main_lr(Pb pb, AxBuses& bus) {
     if (pb.get32(PB_MIXCTRL) != 3 || pb.get(PB_LPF) || pb.get(PB_BIQUAD) || pb.get(PB_SRC_TYPE) == 2)
-        return false;
+        return ax_paths[AXP_MIX]++, false;
     u32 vol_l = pb.get(0x14), vol_r = pb.get(0x18);
     u32 ratio = pb.get32(PB_RATIO), pos = pb.get(PB_FRAC);
     u64 all = pos + (u64)ratio * AX_SPF;
     if (vol_l > 0x8000 || vol_r > 0x8000 || ratio > 0xFFFF0000u || all >> 16 > BLOCK)
-        return false;
+        return ax_paths[AXP_LEVELS]++, false;
     u32 ve = pb.get(PB_VE);
     s32 ved = (s16)pb.get(PB_VE + 2);
     Env env;
     if (ved == 0) {
         if (ve == 0)
-            return false;  // (muted: only the input is read, convert does that)
+            return ax_paths[AXP_MUTED]++, false;  // (muted: only the input is read, convert does that)
         env = ve == 0x8000 ? ENV_ONE : ve < 0x8000 ? ENV_FIXED : ENV_LOUD;
     } else {
         s32 last = (s32)ve + (s32)(AX_SPF - 1) * ved;  // (every step's volume within 0 .. 1.0)
         if (ve > 0x8000 || last < 0 || last > 0x8000)
-            return false;
+            return ax_paths[AXP_LEVELS]++, false;
         env = ENV_RAMP;
     }
+    ax_paths[env == ENV_ONE ? AXP_ONE : env == ENV_FIXED ? AXP_FIXED : env == ENV_RAMP ? AXP_RAMP : AXP_LOUD]++;
     Accel acc(pb);
     u32 n = (u32)(all >> 16);
     s16 buf[4 + BLOCK];  // the last four samples, then the samples read
@@ -722,6 +723,8 @@ void render(Pb pb, AxBuses& bus) {
 }
 
 }  // namespace
+
+u32 ax_paths[AXP_COUNT];
 
 bool ax_render_voice(u32 pb_addr, AxBuses& bus) {
     u8* p = guest::host_ptr(pb_addr);

@@ -21,6 +21,13 @@ void log(const char*, ...) {}
 void dsp_ax_command_list(u32 list_addr, u32 words);
 }  // namespace guest
 
+// no environment, and static locals' guards for one thread (newlib's and libstdc++'s take locks
+// that only the 3DS's libctru provides; the guards' every-call check is the same)
+extern "C" char* getenv(const char*) { return nullptr; }
+extern "C" int __cxa_guard_acquire(int* g) { return !*(char*)g; }
+extern "C" void __cxa_guard_release(int* g) { *(char*)g = 1; }
+extern "C" void __cxa_guard_abort(int*) {}
+
 namespace {
 
 // MEM1's first page: the command list, the set-up and output buffers, the PBs; the samples in MEM2
@@ -34,14 +41,19 @@ void st32(u32 a, u32 v) { guest::store32(a, v); }
 
 }  // namespace
 
-// `frames` frames with `voices` voices: looped ADPCM resampled by 1.0-1.3 into main L and R at
-// fixed volumes, envelopes fixed (one in five ramping), the master volume at 1.0
-extern "C" u32 frame(u32 voices, u32 frames) {
+// the voices' samples (random bytes): once, before anything is counted
+extern "C" void frame_init() {
     guest::g_page[0x80000000u >> guest::PAGE_BITS] = (uintptr_t)s_mem1 - 0x80000000u;
     guest::g_page[DATA >> guest::PAGE_BITS] = (uintptr_t)s_mem2 - DATA;
     u32 seed = 1;
     for (u32 i = 0; i < sizeof(s_mem2); i++)
         seed = seed * 1103515245u + 12345u, s_mem2[i] = (u8)(seed >> 16);
+}
+
+// `frames` frames with `voices` voices: looped ADPCM resampled by 1.0-1.3 into main L and R at
+// fixed volumes, envelopes fixed (one in five ramping), the master volume at 1.0; with `hash`, an
+// FNV-1a hash of the output
+extern "C" u32 frame(u32 voices, u32 frames, u32 hash) {
     for (u32 v = 0; v < voices; v++) {
         u32 pb = PBS + 0x140 * v;
         for (u32 k = 0; k < 0x140; k += 2)
@@ -72,7 +84,7 @@ extern "C" u32 frame(u32 voices, u32 frames) {
     u32 h = 2166136261u;
     for (u32 f = 0; f < frames; f++) {
         guest::dsp_ax_command_list(LIST, (a - LIST) / 2);
-        for (u32 i = 0; i < 96 * 4; i++)
+        for (u32 i = 0; hash && i < 96 * 4; i++)
             h = (h ^ s_mem1[(LR - 0x80000000u) + i]) * 16777619u;
     }
     return h;

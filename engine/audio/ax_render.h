@@ -26,4 +26,15 @@ typedef s32 AxBuses[AX_BUSES][AX_SPF];
 // voice (its PB's running word is 1) plays; false otherwise.
 bool ax_render_voice(u32 pb, AxBuses& bus);
 
+// voice frames rendered so far by the way they went (NOMA_DEBUG_AX logs them): the one-pass path
+// for main L and R by envelope, then the others by what kept them from it
+enum AxPath {
+    AXP_ONE, AXP_FIXED, AXP_RAMP, AXP_LOUD,  // one pass: the envelope at 1.0, fixed, ramping, above 1.0
+    AXP_MUTED,                               // the envelope at 0
+    AXP_MIX,                                 // other buses, a ramp or one side; filters; SRC type 2
+    AXP_LEVELS,                              // volumes above 1.0, a ramp leaving 0 .. 1.0, too much input
+    AXP_COUNT
+};
+extern u32 ax_paths[AXP_COUNT];
+
 }  // namespace engine::audio

@@ -4,6 +4,7 @@
     tools/armbench/armbench.py [--lines KIND] [--voices N]
     tools/armbench/armbench.py --cx [FILE...]
     tools/armbench/armbench.py --frame [VOICES...]
+    tools/armbench/armbench.py --snd [VOICES...]
 
 Builds tools/armbench/ax_bench.cpp and engine/audio/ax_render.cpp with devkitARM and the 3DS
 build's code generation flags, then
@@ -14,6 +15,8 @@ build's code generation flags, then
 --lines KIND: instead, where voice KIND's instructions go, per source line.
 --frame: whole AX frames (tools/armbench/frame_bench.cpp: runtime/hw/dsp_ax.cpp's command list,
 SETUP, the voices, OUTPUT) with that many voices like the room's, instructions and cycles.
+--snd: nw4r::snd's voice update (tools/armbench/snd_bench.cpp: engine/snd/voice.cpp's
+UpdateAllVoices over that many voices, each recalculated every frame as the game makes it).
 --cycles: with the instruction counts, an estimate of ARM11 cycles (tools/armbench/arm11_timing.py:
 the ARM11 MPCore TRM's issue cycles, result latencies and interlocks, the branch predictor; every
 access an L1 hit), with --lines per source line too.
@@ -190,13 +193,27 @@ def bench_frame(counts):
     voices like the room's): instructions and estimated ARM11 cycles a frame, by voice count"""
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out, ("tools/armbench/frame_bench.cpp", "runtime/hw/dsp_ax.cpp", "engine/audio/ax_render.cpp"),
-                          ("frame",)), ("frame",))
-        frames = 8
+                          ("frame", "frame_init")), ("frame", "frame_init"))
+        m.call("frame_init")
         for n in counts:
-            ins = (m.instructions("frame", n, frames) - m.instructions("frame", n, 0)) / frames
-            cyc = (m.cycles("frame", n, frames) - m.cycles("frame", n, 0)) / frames
+            ins = (m.instructions("frame", n, 8, 0) - m.instructions("frame", n, 0, 0)) / 8
+            cyc = (m.cycles("frame", n, 2, 0) - m.cycles("frame", n, 0, 0)) / 2  # (the cycle model is slow)
             print("%3d voices: %7.0f ARM instructions, %7.0f estimated ARM11 cycles a frame (%.0f us of the 3 ms "
-                  "at 268 MHz, %.0f at 804)" % (n, ins, cyc, cyc / 268.0, cyc / 804.0), flush=True)
+                  "at 268 MHz, %.0f at 804); output hash %08X" % (n, ins, cyc, cyc / 268.0, cyc / 804.0,
+                                                                m.call("frame", n, 4, 1)), flush=True)
+
+
+def bench_snd(counts):
+    """nw4r::snd's voice update (tools/armbench/snd_bench.cpp: engine/snd's UpdateAllVoices, every
+    voice recalculated as the game's player makes it each frame): per voice, by voice count"""
+    with tempfile.TemporaryDirectory() as out:
+        m = Machine(build(out, ("tools/armbench/snd_bench.cpp", "engine/snd/voice.cpp", "engine/snd/ax_voice.cpp",
+                                "engine/snd/tables.cpp"), ("snd",)), ("snd",))
+        for n in counts:
+            ins = (m.instructions("snd", n, 8, 0) - m.instructions("snd", n, 0, 0)) / 8
+            cyc = (m.cycles("snd", n, 4, 0) - m.cycles("snd", n, 0, 0)) / 4
+            print("%3d voices: %7.0f ARM instructions, %7.0f estimated ARM11 cycles a frame (%.0f a voice); "
+                  "state hash %08X" % (n, ins, cyc, cyc / n, m.call("snd", n, 6, 1)), flush=True)
 
 
 def main():
@@ -206,11 +223,14 @@ def main():
     ap.add_argument("--cx", nargs="*", metavar="FILE")
     ap.add_argument("--cycles", action="store_true")
     ap.add_argument("--frame", type=int, nargs="*", metavar="VOICES")
+    ap.add_argument("--snd", type=int, nargs="*", metavar="VOICES")
     args = ap.parse_args()
     if args.cx is not None:
         return bench_cx(args.cx)
     if args.frame is not None:
         return bench_frame(args.frame or [0, 1, 8, 24, 37])
+    if args.snd is not None:
+        return bench_snd(args.snd or [1, 8, 20])
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out))
         if args.lines is not None:
