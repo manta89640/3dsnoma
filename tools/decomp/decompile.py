@@ -116,8 +116,8 @@ NATIVE_NAMES = {
     "nw4r_lyt_CalcLineRectImpl",
     # engine/g3d: nw4r::g3d's block copies and light settings
     "nw4r_g3d_detail_Copy32ByteBlocks", "nw4r_g3d_LightSetting_Import",
-    # engine/system: the game's thread class (its stack-use check)
-    "wii_Thread_GetUnusedStackSize",
+    # engine/system: the game's thread class (its stack-use check); the heaps' NaN fill of new blocks
+    "wii_Thread_GetUnusedStackSize", "lib_allocator_Fill",
     # engine/input: the Wii Remote is the 3DS's controls; WPAD's Bluetooth stack never starts (remote.cpp)
     "KPADInitEx", "KPADReadEx", "KPADSetPosParam", "KPADSetConnectCallback", "WPADRegisterAllocator",
     "WPADProbe", "WPADDisconnect", "WPADControlMotor", "WPADIsSpeakerEnabled", "WPADSendStreamData",

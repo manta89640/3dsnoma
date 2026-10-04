@@ -76,6 +76,7 @@ set(ENGINE_SOURCES
   engine/snd/seq.cpp
   engine/snd/tables.cpp
   engine/snd/voice.cpp
+  engine/system/allocator.cpp
   engine/system/home_button.cpp
   engine/system/keyboard.cpp
   engine/system/thread.cpp

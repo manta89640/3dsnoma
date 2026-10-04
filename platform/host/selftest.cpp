@@ -880,6 +880,41 @@ static void selftest_cx() {
         (double)size / s.size());
 }
 
+// lib_allocator_Fill (engine/system/allocator.cpp) against the loop it replaces (0x8018A13C): the
+// fill value's bits in every word, 0xFF in the last size & 3 bytes, nothing around touched, the end
+// returned; any fill value, sizes from 0 to 1 MB, aligned and unaligned blocks
+static void selftest_fill() {
+    axref::Rng rnd{4242};
+    const u32 base = 0x90200000, margin = 64;
+    std::vector<u8> want;
+    int bad = 0, cases = 0;
+    for (int t = 0; t < 3000 && bad < 5; t++, cases++) {
+        u32 value = t % 3 == 0 ? 0x7FFFFFFF : rnd();
+        u32 size = t % 100 == 0 ? rnd() % 0x100000 : t % 7 == 0 ? rnd() % 8 : rnd() % 70000;
+        u32 dst = base + margin + (t % 5 == 0 ? rnd() % 4 : (rnd() % 64) * 4);
+        store32(GA_lib_allocator_sFillValue, value);
+        want.resize(size + 2 * margin);
+        for (u32 i = 0; i < want.size(); i++)
+            want[i] = (u8)rnd();
+        write_g(dst - margin, want.data(), (u32)want.size());
+        for (u32 i = 0; i + 4 <= (size & ~3u); i += 4)  // the loop: a word at a time, then bytes
+            want[margin + i] = (u8)(value >> 24), want[margin + i + 1] = (u8)(value >> 16),
+            want[margin + i + 2] = (u8)(value >> 8), want[margin + i + 3] = (u8)value;
+        for (u32 i = size & ~3u; i < size; i++)
+            want[margin + i] = 0xFF;
+        u32 end = g::lib_allocator_Fill(dst, size);
+        std::vector<u8> got(want.size());
+        read_g(got.data(), dst - margin, (u32)got.size());
+        if (end != dst + size || got != want) {
+            bad++;
+            size_t at = std::mismatch(got.begin(), got.end(), want.begin()).first - got.begin();
+            log("selftest fill: %u bytes at %08X (value %08X): returns %08X, first difference at %d", size, dst,
+                value, end, (int)at - (int)margin);
+        }
+    }
+    log("selftest fill: %d fills, %s", cases, bad ? "MISMATCH" : "ok");
+}
+
 bool run_selftest(const std::string& name) {
     g_sp = 0x81710000;
     if (name == "aes")
@@ -902,6 +937,8 @@ bool run_selftest(const std::string& name) {
         selftest_ax();
     else if (name == "cx")
         selftest_cx();
+    else if (name == "fill")
+        selftest_fill();
     else if (name == "all") {
         selftest_rfl();
         selftest_time();
@@ -913,6 +950,7 @@ bool run_selftest(const std::string& name) {
         selftest_mtx();
         selftest_ax();
         selftest_cx();
+        selftest_fill();
     }
     else
         return false;
