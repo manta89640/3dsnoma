@@ -113,6 +113,15 @@ a guest load at a variable address is ~7 ARM instructions (page lookup, MMIO che
 write-gather byte ~12, against one PowerPC instruction (`GXSetTevAlphaIn`: 16 PowerPC
 instructions, ~55 ARM on its fast path).
 
+Done in this round (wip/gfx-03, 751e11b..58eb08d; host-checked, one Azahar profile mid-way: core 0 idle 6% -> 13.4%,
+the layouts' share 27.7% -> 17.3%): the stack scan without memcmp calls (NOMA_SELFTEST=stack); the heap search
+native, the delegate heaps' Contains in place; nw4r::lyt Material::SetupGX native (NOMA_CHECK_LYT_MATERIAL=1:
+240K room setups identical); memcmp native; 22 GX library calls native and patched (armbench --gxsdk, 3000 random
+states each, identical); .sdata2 constant reads folded into the code; MEM1 a static array (globals at constant
+host addresses); no entry poll in the 4,875 functions that call nothing; g3d Camera getters and Fog::CopyTo native;
+NOMA_AX_THREAD=2 (mixing on core 2, opt-in, unmeasured); the audio queue grows a buffer per underrun (3 to 6).
+Not done: Layout::Animate skipping hidden panes (a pane made visible after Animate would draw one frame stale).
+
 | What | Where | Expected (core 0) | Effort | Exact? |
 |---|---|---|---|---|
 | nw4r::lyt's draw path native (Layout::Draw, Pane::Draw, Material::SetupGX, the DrawSelf functions), sending only the GX state that differs from the last pane's; later straight to the PICA, past the GX FIFO (also less decoding on the GPU thread) | `engine/lyt` | est. 15–20% of the frame (of 26.8%) | 1–2 weeks | The FIFO's effect, not its bytes, once state is skipped (the GPU thread's state is the reference) |
