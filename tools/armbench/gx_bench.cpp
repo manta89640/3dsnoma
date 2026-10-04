@@ -6,6 +6,8 @@
 //           by one spot light), built into the list cache (with its matrix rows)
 //   kind 2: kind 1 drawn again from the cache: only its fixed slots (a new matrix in the same XF row)
 //   kind 3: a skinned draw from the cache (a matrix index per vertex, three matrices): its slots
+//   kind 4: kind 2 in frames as the renderer has them: 28 draws a frame in batches of 7, the palette
+//           empty at each frame's start, each draw hinted with the slots it had the frame before
 // tex(direct, fmt, w, h, hash) converts a w x h texture of GX format fmt (random bytes and palette) into PICA
 // texture memory: decoded to RGBA8 then tiled (direct 0), or straight from the GX tiles (direct 1,
 // platform/3ds/pica_tex.h), returning a hash of the result (hash 1) or nothing.
@@ -159,13 +161,31 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
     static const f32 clip[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
     u32 h = 2166136261u;
     // kinds 2 and 3 draw vertices built before: built once here
-    if (kind >= 2) {
+    if (kind >= 2 && kind != 4) {
         const GxTnlPlan& plan = gx_tnl_plan(0, su, 1, clip, 1);
         gx_tnl_vertices(plan, s_stream, 0, vertices, s_pal, s_out, s_slots, s_rows);
         s_pal.flushed();
     }
     GxTnlSlots fixed = {};
-    for (u32 d = 0; d < draws; d++) {
+    static GxTnlSlots hints[28];
+    static bool hinted[28];
+    for (u32 d = 0; d < draws && kind == 4; d++) {
+        const u32 i = d % 28;
+        if (i == 0)
+            s_pal = GxTnlPalette();
+        if (i % 7 == 0)
+            s_pal.flushed();
+        load_matrix(0, d);
+        const GxTnlPlan& plan = gx_tnl_plan(0, su, 1, clip, 1);
+        GxTnlSlots got;
+        if (!gx_tnl_fixed_slots(plan, s_pal, hinted[i] ? &hints[i] : nullptr, &got)) {
+            s_pal.flushed();
+            continue;
+        }
+        hints[i] = got, hinted[i] = true;
+        h = hash_out(h, &got, sizeof(got));
+    }
+    for (u32 d = 0; d < draws && kind != 4; d++) {
         load_matrix(0, d);
         if (kind == 3)
             load_matrix(3, d + 1), load_matrix(6, d + 2);
