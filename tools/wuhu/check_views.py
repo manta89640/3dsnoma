@@ -52,9 +52,9 @@ def main(argv=None):
     suffix = ("_terrain" if a.terrain else "") + ("_like" if a.like_research else "")
     like = dict(material_anims=False, sky_follows=False, fog_index=0, point_as_directional=True) \
         if a.like_research else {}
-    print("%-9s %8s %8s %10s %7s" % ("view", "PSNR dB", ">16 lvl", "items", "secs"))
     if any(not t.flags & ng3d.TEX_GX_RAW for t in pkg.textures):
         raise SystemExit("%s is baked: give the unbaked package (stage_wuhu.py --keep-raw)" % a.package)
+    print("%-9s %8s %8s %10s %7s" % ("view", "PSNR dB", ">16 lvl", "items", "secs"))
     for name in a.views.split(","):
         mk = [m for m in pkg.markers if pkg.string(m.name) == "view_" + name]
         if not mk:

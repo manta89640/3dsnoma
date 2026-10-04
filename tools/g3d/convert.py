@@ -233,20 +233,26 @@ class Converter:
         extra_root: a name for a node put above the model's root (index 0), for a motion the
         model's own nodes don't have (a path, an orbit); the model's nodes follow it.
         parts: other models drawn as parts of this one ([Part]): each hangs from a node of the
-        part's name under this model's root node, placed by its matrix (uniform scale, rotation,
-        translation; None: as it is), and its draws follow this model's in each list (every part's
-        opaque draws after this model's, then the translucent ones likewise) -- the sun in the sky
-        dome, which the renderer moves with the eye as one model; a stretch of the sea with the
-        island it rings. A part's nodes are in the map as "part/node".
+        part's name under the model's first node (its root, or extra_root), placed in the model's
+        space by its matrix (uniform scale, rotation, translation; None: as it is), and its draws
+        follow this model's in each list (every part's opaque draws after this model's, then the
+        translucent ones likewise) -- the sun in the sky dome, which the renderer moves with the
+        eye as one model; a stretch of the sea with the island it rings. A part's nodes are in the
+        map as "part/node"; a name the map already has is an error.
         Returns (model index, {node name: index within the model})."""
         pkg = self.pkg
         shift = 1 if extra_root else 0
         node_map = {}
         first_node = len(pkg.nodes)
+
+        def name_node(key, k):
+            if key in node_map:
+                raise ValueError("model %s: two nodes named %s" % (name or mdl.name, key))
+            node_map[key] = k
         if extra_root:
             pkg.add("nodes", name=pkg.str(extra_root), parent=NONE16, flags=ng3d.NODE_VISIBLE,
                     scale=[1.0] * 3, bind=[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]])
-            node_map[extra_root] = 0
+            name_node(extra_root, 0)
 
         def add_nodes(m, base, root_parent, M, prefix, hide):
             for n in m.nodes:
@@ -258,22 +264,29 @@ class Converter:
                 pkg.add("nodes", name=pkg.str(n.name), parent=par, flags=fl, scale=list(n.scale),
                         rotate=list(n.rot), translate=list(n.trans),
                         bind=[list(map(float, row)) for row in bind], billboard=n.billboard)
-                node_map[prefix + n.name] = n.index + base
+                name_node(prefix + n.name, n.index + base)
         add_nodes(mdl, shift, 0 if extra_root else NONE16, None, "", hidden)
         # the sources of the batches: the model, then its parts (each under a node of its own)
         # (a shape on an envelope matrix has its vertices in its model's space: the model's first
         # node, or the part's own node)
         sources = [(r, mdl, shift, 0, np.eye(4), hidden, tex_override)]
+        # the first node's bind matrix: a part node's rest SRT is relative to it (posed under an
+        # animated parent, the part lands where its bind matrix puts it at rest)
+        B0 = np.eye(4) if extra_root or not mdl.nodes else np.vstack([mdl.nodes[0].mtx, [0, 0, 0, 1]])
         for part in parts:
             M = np.eye(4) if part.matrix is None else np.asarray(part.matrix, np.float64)
             k = len(pkg.nodes) - first_node
-            s, rot, t = srt_of(M)
+            s, rot, t = srt_of(np.linalg.inv(B0) @ M)
             pkg.add("nodes", name=pkg.str(part.name), parent=0, flags=ng3d.NODE_VISIBLE, scale=[s] * 3,
                     rotate=rot, translate=t, bind=[list(map(float, row)) for row in M[:3]])
-            node_map[part.name] = k
+            name_node(part.name, k)
             add_nodes(part.model, k + 1, k, M, part.name + "/", part.hidden)
             sources.append((part.brres, part.model, k + 1, k, M, part.hidden, part.tex_override))
+        n_nodes = len(pkg.nodes) - first_node
         draws = [(src, d) for lst in ("DrawOpa", "DrawXlu") for src in sources for d in src[1].draws(lst)]
+        # each source's rest pose, materials and shapes, looked up by index
+        rest = {id(src[1]): (src[1].world_matrices(), {m.index: m for m in src[1].materials},
+                             {s.index: s for s in src[1].shapes}) for src in sources}
         first_batch = len(pkg.batches)
         lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
         per_node = {}
@@ -282,10 +295,9 @@ class Converter:
             if vis in hide:
                 self.stats["model draws hidden"] += 1
                 continue
-            W = sm.world_matrices()
-            mat = {m.index: m for m in sm.materials}[d.mat]
-            mi = self.material(sr, sm, mat, tov, d.prio)
-            shape = {s.index: s for s in sm.shapes}[d.shape]
+            W, mats, shapes = rest[id(sm)]
+            mi = self.material(sr, sm, mats[d.mat], tov, d.prio)
+            shape = shapes[d.shape]
             t = sm.shape_triangles(shape, world=False)
             if not t or "pos" not in t:
                 continue
@@ -318,7 +330,7 @@ class Converter:
         n_batches = len(pkg.batches) - first_batch
         # a node's batches, when they are one run in the model's draw order (else none: the
         # renderer goes by Batch.node)
-        for k in range(len(node_map)):
+        for k in range(n_nodes):
             idx = sorted(per_node.get(k, []))
             nd = pkg.nodes[first_node + k]
             if idx and idx[-1] - idx[0] + 1 == len(idx):
@@ -330,7 +342,7 @@ class Converter:
         if not np.isfinite(lo).all():
             lo = hi = np.zeros(3)
         bbox = [float(x) for x in list(lo) + list(hi)]
-        pkg.add("models", name=pkg.str(name or mdl.name), first_node=first_node, n_nodes=len(node_map),
+        pkg.add("models", name=pkg.str(name or mdl.name), first_node=first_node, n_nodes=n_nodes,
                 first_batch=first_batch, n_batches=n_batches, bbox=bbox,
                 radius=float(np.linalg.norm(hi - lo) / 2), lod_next=NONE16)
         self.stats["models"] += 1

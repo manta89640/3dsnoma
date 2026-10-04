@@ -93,14 +93,15 @@ SPAWN_DIR = (0.0, 0.0, -1.0)
 # matched to a Mii: both games hang the same RFL head (RFL_Res.dat, byte for byte the same in both)
 # from a body node, its origin at the chin. WSR's player body (Common/Kokeshi/common.carc
 # G3D/WS2_avaA1.brres, every Kokeshi body alike) has head_set 9.70 above the feet, and the head is
-# drawn at scale 0.08 (main.dol's KokeshiManager, fn_80246F70); Wii no Ma's (g3d/Mii/Model.lex) has
-# its Head node at 108.86 and the head at scale 0.69 (fn_80191368), at height scale 1. With the
-# typical hairstyle's top 69.2 RFL units above the chin, a Mii is 9.70 + 0.08 * 69.2 = 15.24 island
-# units and 108.86 + 0.69 * 69.2 = 156.6 Wii no Ma units tall: 10.3. Feature by feature k is 9.6-11
-# (the neck 10.1-11.2, the shoulders 10.0-11.1, the channel's default Mii 9.55), and the island's
-# own measures agree (a doubles tennis court is 236.3 units long, 23.77 m: 10.1 cm a unit, taking a
-# Wii no Ma unit as a centimetre). Rounded: 10. (Stage 1's 9.2 came from the spectators' body, whose
-# head_set sits at 9.86 times their placement scale 1.2.)
+# drawn at scale 0.08 (WSR main.dol's KokeshiManager, fn_80246F70); Wii no Ma's (g3d/Mii/Model.lex)
+# has its Head node at 108.86 and the head at scale 0.69 (Wii no Ma's mii_ModelRes_ctor,
+# 0x80191368), at height scale 1. With the typical hairstyle's top 69.2 RFL units above the chin, a
+# Mii is 9.70 + 0.08 * 69.2 = 15.24 island units and 108.86 + 0.69 * 69.2 = 156.6 Wii no Ma units
+# tall: 10.3. Feature by feature k is 9.6-11 (the neck 10.1-11.2, the shoulders 10.0-11.1, the
+# channel's default Mii 9.55), and the island's own measures agree (a doubles tennis court is 236.3
+# units long, 23.77 m: 10.1 cm a unit, taking a Wii no Ma unit as a centimetre). Rounded: 10. (Stage
+# 1's 9.2 came from the spectators' body, whose head_set sits at 9.86 times their placement scale
+# 1.2.)
 MII_UNITS_PER_ISLAND_UNIT = 10.0
 NOMA_MII_HEIGHT = 158.0          # Wii no Ma units, height scale 1 (engine/wuhu/player.h)
 NOMA_HEAD_Y, NOMA_HEAD_SCALE = 108.86, 0.69

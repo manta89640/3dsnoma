@@ -187,7 +187,7 @@ models don't have: here the route drives the model's root node, retimed to frame
 clock. An airship placed at the origin with the default `flight` CHR0 would fly a 2,500-unit
 circle at sea level through the island: the Flyover must place it by code not traced, so the title
 sequence's flight is used instead. (The fn_ addresses in this file are Wii Sports Resort's
-main.dol, not Wii no Ma's.)
+main.dol, not Wii no Ma's; Wii no Ma's functions go by their names.)
 
 A moving model's box (`Model.bbox`, `radius`, model space) holds every pose its instances'
 animations give it, not only its rest pose: the cars, cruisers, liner and airship run world routes
@@ -310,16 +310,17 @@ ground-level day (research env_choice/env.md, its set (f), decoded from the file
   sun is on the screen and a read of the depth buffer (GXPeekZ, fn_802A89C4).
 - **k = 10.0** Wii no Ma Mii units per island unit (research k.md, design section 8). Both games
   hang the same RFL head (`RFL_Res.dat`, byte for byte the same in both) from a body node, its
-  origin at the chin. WSR's player body (`WS2_avaA1.brres`, every Kokeshi body alike) has
-  `head_set` 9.70 above the feet (measured by the stager) and draws the head at scale 0.08 (the
-  KokeshiManager, fn_80246F70); Wii no Ma's (`g3d/Mii/Model.lex`) has its Head node at 108.86 and
-  the head at 0.69 (fn_80191368) at height scale 1. With the typical hairstyle's top 69.2 RFL units
-  above the chin, a Mii is 9.70 + 0.08 x 69.2 = 15.24 island units and 108.86 + 0.69 x 69.2 = 156.6
-  Wii no Ma units tall: 10.3. Feature by feature the ratio is 9.6-11 (the neck 10.1-11.2, the
-  shoulders 10.0-11.1, the channel's default Mii 9.55), and the island's own measures agree: a
-  doubles tennis court is 236.3 units long, 23.77 m, so 10.1 cm a unit, taking a Wii no Ma unit as
-  a centimetre. Rounded to 10: a 158-tall Mii is 15.8 island units, about 1.6 m. (Stage 1's 9.2
-  came from the spectators' body, whose `head_set` sits at 9.86 times their placement scale 1.2.)
+  origin at the chin. WSR's player body (`WS2_avaA1.brres`, every Kokeshi body alike) has `head_set`
+  9.70 above the feet (measured by the stager) and draws the head at scale 0.08 (the KokeshiManager,
+  fn_80246F70); Wii no Ma's (`g3d/Mii/Model.lex`) has its Head node at 108.86 and the head at 0.69
+  (Wii no Ma's `mii_ModelRes_ctor`, 0x80191368) at height scale 1. With the typical hairstyle's top
+  69.2 RFL units above the chin, a Mii is 9.70 + 0.08 x 69.2 = 15.24 island units and 108.86 + 0.69
+  x 69.2 = 156.6 Wii no Ma units tall: 10.3. Feature by feature the ratio is 9.6-11 (the neck
+  10.1-11.2, the shoulders 10.0-11.1, the channel's default Mii 9.55), and the island's own measures
+  agree: a doubles tennis court is 236.3 units long, 23.77 m, so 10.1 cm a unit, taking a Wii no Ma
+  unit as a centimetre. Rounded to 10: a 158-tall Mii is 15.8 island units, about 1.6 m. (Stage 1's
+  9.2 came from the spectators' body, whose `head_set` sits at 9.86 times their placement scale
+  1.2.)
 - World box (cells): x -35,120..10,985, y -217..4,639, z -14,693..20,651. The sea model reaches
   +-114,000 and the sky dome 70,000.
 
