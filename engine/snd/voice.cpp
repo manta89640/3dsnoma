@@ -133,7 +133,9 @@ void calc_mix_param_now(const Voice& vo, s32 ch, s32 out, MixParam& mix, RemoteM
 
 // calc_mix_param's results, kept per voice, channel and output with the bits of every input they
 // came from: the game's player hands every voice its parameters each frame, flagging its mix to be
-// made again, though they rarely change. The same inputs give the same results.
+// made again, though they rarely change. The same inputs give the same results. (Two entries a set,
+// the one used last kept: in the room the inputs of a voice never changed between two frames, and
+// a table with one entry a set lost most entries to other voices.)
 struct MixMemo {
     u32 voice;  // (0: empty)
     s32 ch, out;
@@ -141,7 +143,8 @@ struct MixMemo {
     MixParam mix;
     RemoteMixParam rmt;
 };
-MixMemo s_mix_memo[64];
+MixMemo s_mix_memo[64][2];
+u8 s_mix_memo_last[64];  // the way each set used last
 
 void mix_inputs(const Voice& vo, s32 out, u32 (&in)[19]) {
     const u8* p = vo.v.p;
@@ -163,7 +166,18 @@ inline bool same_words(const u32* a, const u32* b, u32 n) {
 void calc_mix_param(const Voice& vo, s32 ch, s32 out, MixParam& mix, RemoteMixParam& rmt) {
     u32 in[19];
     mix_inputs(vo, out, in);
-    MixMemo& m = s_mix_memo[(vo.v.addr >> 4 ^ vo.v.addr >> 10 ^ (u32)ch * 5 ^ (u32)out * 3) & 63];
+    u32 set = ((vo.v.addr + (u32)ch * 0x40 + (u32)out * 0x20) * 0x9E3779B1u) >> 26;
+    MixMemo* ways = s_mix_memo[set];
+    u32 w = 0;
+    for (; w < 2; w++) {
+        MixMemo& m = ways[w];
+        if (m.voice == vo.v.addr && m.ch == ch && m.out == out)
+            break;
+    }
+    if (w == 2)  // (not kept: in the way not used last)
+        w = s_mix_memo_last[set] ^ 1;
+    MixMemo& m = ways[w];
+    s_mix_memo_last[set] = (u8)w;
     if (m.voice != vo.v.addr || m.ch != ch || m.out != out || !same_words(m.in, in, 19)) {
         calc_mix_param_now(vo, ch, out, m.mix, m.rmt);
         m.voice = vo.v.addr, m.ch = ch, m.out = out;
