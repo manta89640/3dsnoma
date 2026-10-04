@@ -43,8 +43,8 @@ void gx_fifo_write(u32, u32 value, int size) {
 }  // namespace guest
 
 namespace g {
-u32 dec_fn_80464570(u32, u32, u32, u32, u32);
-u32 dec_fn_80464AD0(u32, u32, u32, u32, u32, u32);
+u32 dec_nw4r_lyt_detail_DrawQuad_orig(u32, u32, u32, u32, u32);
+u32 dec_nw4r_lyt_detail_DrawQuad_Alpha_orig(u32, u32, u32, u32, u32, u32);
 u32 nw4r_lyt_detail_DrawQuad(u32, u32, u32, u32, u32);
 u32 nw4r_lyt_detail_DrawQuad_Alpha(u32, u32, u32, u32, u32, u32);
 }  // namespace g
@@ -82,9 +82,9 @@ void setup() {
 u32 call(u32 native, u32 alpha_variant, u32 n_tex, u32 colors, u32 alpha) {
     if (alpha_variant)
         return native ? g::nw4r_lyt_detail_DrawQuad_Alpha(BASE, SIZE, n_tex, TEX, colors, alpha)
-                      : g::dec_fn_80464AD0(BASE, SIZE, n_tex, TEX, colors, alpha);
+                      : g::dec_nw4r_lyt_detail_DrawQuad_Alpha_orig(BASE, SIZE, n_tex, TEX, colors, alpha);
     return native ? g::nw4r_lyt_detail_DrawQuad(BASE, SIZE, n_tex, TEX, colors)
-                  : g::dec_fn_80464570(BASE, SIZE, n_tex, TEX, colors);
+                  : g::dec_nw4r_lyt_detail_DrawQuad_orig(BASE, SIZE, n_tex, TEX, colors);
 }
 }  // namespace
 

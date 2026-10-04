@@ -354,7 +354,8 @@ def decompiled_functions(names, natives):
         if body is None:
             raise SystemExit("no decompiled %s" % name)
         for callee in set(re.findall(r"\b(\w+)\(", body)):
-            if callee in known and callee != name and callee not in seen:
+            # (a native's own name, renamed below to its decompiled copy, isn't looked for)
+            if callee in known and callee != name and callee not in seen and (callee not in natives or callee in names):
                 todo.append(callee)
         out.append(body)
     text = "\n".join(out)
@@ -420,13 +421,16 @@ def bench_gxsdk(trials=3000):
 
 
 def bench_lyt(trials=4000):
-    """engine/lyt/quad.cpp's quads against the decompiled nw4r::lyt::detail::DrawQuad (fn_80464570) and
-    its alpha variant (fn_80464AD0), on random quads: the same FIFO bytes; instructions a quad"""
+    """engine/lyt/quad.cpp's quads against the decompiled nw4r::lyt::detail::DrawQuad and its alpha
+    variant, on random quads: the same FIFO bytes; instructions a quad"""
     cxx = os.path.join(DEVKITARM, "bin", "arm-none-eabi-g++")
     base = [f for f in FLAGS if f != "-O2"]
-    natives = ["fn_80464570", "fn_80464AD0"]
+    # the decompiled ones are kept as *_orig (decompile.py's PATCHED_NAMES); calls between them go to
+    # their dec_ copies too
+    origs = ["nw4r_lyt_detail_DrawQuad_orig", "nw4r_lyt_detail_DrawQuad_Alpha_orig"]
     with tempfile.TemporaryDirectory() as out:
-        dec, pulled = decompiled_functions(natives, natives)
+        dec, pulled = decompiled_functions(origs, origs + ["nw4r_lyt_detail_DrawQuad"])
+        dec = dec.replace("dec_nw4r_lyt_detail_DrawQuad(", "dec_nw4r_lyt_detail_DrawQuad_orig(")
         open(os.path.join(out, "dec.cpp"), "w").write(dec)
         print("decompiled functions in the bench: %s" % ", ".join(pulled))
         objs = []

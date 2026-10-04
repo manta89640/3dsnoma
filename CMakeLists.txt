@@ -63,6 +63,7 @@ set(ENGINE_SOURCES
   engine/g3d/g3d.cpp
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
+  engine/lyt/quad.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
   engine/math/mtx.cpp
