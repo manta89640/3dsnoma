@@ -69,6 +69,12 @@ Rules:
 | A content's file kept open when the channel closes it, for its next open (content 2 is opened 3 times in a start; an open and a close cost ~19 ms of SD access in Azahar) | `runtime/hw/ios/es.cpp` | Azahar: the file system's waits in the start's long frame 397 → 333 ms; that frame 2.12 → 2.01 s (with the two rows above). |
 | The save's trips to the card at every room entry (the channel copies its 480 KB save to /tmp in 32 KB reads, then moves it back): files opened only to read are unbuffered (stdio refilled a 4 KB buffer, so a 32 KB read was eight card reads), and a file moved from /tmp to the card is written in one write (was 120 of 4 KB) | `runtime/hw/ios/fs.cpp` | Azahar, back to back: the frame after the room appears 751 → 737 ms (its file system I/O 360 → 330 ms); Azahar charges little for SD writes, so the 120 → 1 writes count more on hardware (not measured). The save byte-identical (host). |
 | Guest memory as large as the game needs: MEM2 48 MB, not 64 (the room and its menus run in 44, 42 can't make the room; Flash and MobiClip are left out). The 3DS heaps split by need: the normal heap (at most 128 MB of addresses, 0x08000000 on) gets all but 48 MB, the linear heap keeps 16 MB for the GPU and sound plus MEM1; MEM2 goes in the normal heap (nothing reads guest memory by DMA) | `runtime/runtime.h` (`MEM2_SIZE`), `platform/3ds/main.cpp` (`__system_allocateHeaps`, `platform_alloc_guest`) | Guest memory 96 → 72 MB; what's saved goes to the program's own heap. |
+| Cached fixed-matrix draws keep their palette slots: such a draw tries the slots it had last frame first (empty, or still holding its rows), before any search | `runtime/hw/gx/tnl.cpp` | In the room ~808 of ~814 cached draws a frame take it; `armbench.py --gx` (frames of cached draws): 1,277 → 1,219 ARM11 instructions a draw. |
+| The pixel pipeline's state written to the PICA directly: each frame's state is set through citro3d first, later changes (combiners and their buffer, textures, depth/alpha/stencil tests, blending, logic op, culling, scissor) are written as citro3d writes them, without its context update after every change (~150 a frame) | `platform/3ds/gx_pica.cpp` | Azahar room (timers on): the batch flush step 2.4–3.2 → 1.4 ms a frame. `NOMA_CHECK_PICA_STATE=1` decodes each command list as the GPU reads it and compares the registers at every draw with what the renderer meant: 510K room draws, 0 differ (a dropped combiner write is reported at once). |
+| EFB copies converted straight from the read-back through its column/row tables (RGB565, RGB5A3, RGBA8 at full size: the room's copies are the household's Mii faces, RGB5A3 256×256) | `runtime/hw/gx/raster.cpp` (`gx_copy_to_texture_lookup`) | Azahar: a copy's conversion ~28 → 11 ms on the GPU thread. The same bytes as `gx_copy_to_texture` (`NOMA_SELFTEST=efb`: 3,000 random copies of every format). |
+| GX's I4 and I8 as the PICA's L4 and L8 (half of LA4/LA8), the combiners reading their alpha from red | `platform/3ds/pica_tex.h`, `gx_pica.cpp` | Azahar room: texture memory 4.5 → 3.7 MB; frames 600 and 1200 pixel-identical to the LA build's. |
+| CMPR as ETC1 (ETC1A4 when a texel is transparent) on the Old 3DS: each 4×4 block encoded from its CMPR sub-block's four colours (the flip splitting them best, differential or individual base colours, each half's modifier table matched on the summed offsets); padding blocks along an edge encoded once. On by default only on the Old 3DS (`NOMA_ETC1=0/1`) | `platform/3ds/pica_tex.h` | Azahar room: CMPR texture memory 2,112 → 546 KB; frame 1200 at 39.0 dB PSNR against the RGBA5551 picture. Costs time: 104 ARM11 instructions a texel against 27.6 for RGBA5551 (`armbench.py --gx`), room entry's texture work 272 → 584 ms. `NOMA_SELFTEST=tex` checks every format's conversion against decode + tiling and ETC1 against a reference decoder (flat blocks within 2 levels, texture-like 37.9 dB, alpha exact). |
+| nw4r::lyt's quads native (`nw4r_lyt_detail_DrawQuad`, `..._Alpha`, were fn_80464570/fn_80464AD0; every pane, picture and window part of a layout goes through the alpha one): the vertices go into the write-gather buffer straight from guest memory | `engine/lyt/quad.cpp` | `armbench.py --lyt`: 1,349 → 819 ARM11 instructions a quad with one texture coordinate set, 1,082 → 596 with none; the same FIFO bytes on 4,000 random quads. Azahar room, back to back: 40.96 → 41.94 fps. |
 
 ## In progress
 
@@ -135,7 +141,6 @@ What the program does only because it runs on a Wii, and what replaces it.
 | Compile `noma_decomp` at `-O2` (or `-Os` for cold objects). `-O1` has no instruction scheduling, which hurts on the in-order ARM11, and no small-function inlining. `-DNOMA_DECOMP_OPT=-O2` builds it so. Measured: every host self-test passes and the host runs normally; 3DS code 15.05 → 14.44 MB; in Azahar (which charges per instruction, so scheduling can't show) the room runs at 16.9 fps against 17.2 at `-O1`, the same tree. | `CMakeLists.txt` | Only on hardware, from scheduling | Done but for a hardware A/B | None found |
 | Cheaper polls: the function-entry and loop polls (`NOMA_LOOP`) read a flag a timer sets, instead of decrementing a global | runtime | Small, everywhere | 1 day | Low |
 | Profile-guided code layout: order `.text.<fn>` sections from the sampling profiler (22.6 MB of code against a 16 KB instruction cache), then GCC PGO with `.gcda` files written to the SD card | linker script | est. 5–15% | 2–4 days | None |
-| The guest accessors inline: at `-O1` GCC calls `gstore_traits<T>::load/store` and the `gref<gp<...>>` operators out of line (counted in a 3DS release build: ~63K call sites for `long`, ~26K `unsigned long`, ~17K `float`, ~25K `gref`); `always_inline` on them would drop the call and let callers keep values in r0-r3/s0-s15 | `runtime/guest.h` | Broad (Azahar charges per instruction, so it would show there); several MB more code, so an I-cache question on hardware | Hours + a hardware A/B | Code size |
 | `f32` instead of `f64` for values that are single precision on the Wii (`fadds`/`fmuls` results): identical bits, fewer conversions | m2c type inference | Broad, modest | 2–4 days | Only where provably single precision |
 
 ### Graphics
@@ -149,11 +154,8 @@ no GPU-side work pays before the CPU sides do. On the Old 3DS the GPU thread sha
 
 | What | Where | Expected | Effort | Risk |
 |---|---|---|---|---|
-| The layouts' quads natively (nw4r::lyt's DrawQuad family fn_80464570/fn_80464AD0 and the pane draw fn_80460EF0: ~5% of core 0 in a profile build), then g3d's material setup (fn_80443630, ResMatChan) | `engine/lyt`, `engine/g3d` | est. 1–3% of core 0 (the GX SDK natives measured far below their profile share: see Ruled out) | Days | Must match the streams |
-| Our own PICA state writes instead of `C3D_DrawElements` after a state change (~150 a frame): citro3d's context update walks both shaders' 96 uniform flags and rebinds every dirty part on each | `platform/3ds/gx_pica.cpp` | est. ~0.5 ms a frame on the GPU thread | 1–2 days | Low |
-| Cached draws without palette work: every frame now starts with an empty palette, so cached draws keep their slots (rewrites ~5,160 → ~30 vertices a frame), but each still looks its matrices up (~600 ARM11 instructions, ~800 draws a frame) because each draw loads a new matrix into the same XF row; a slot per draw that stays its own, or fixed attributes for fixed-matrix draws, would make them nearly free | `runtime/hw/gx/tnl.cpp`, `gx_pica.cpp` | est. ~1–2 ms a frame on the GPU thread | 2 days | Batch count |
-| Textures: I4/I8 as L4/L8 with alpha read from red (half of LA4/LA8); CMPR → ETC1/ETC1A4 at staging time, looked up by content hash; hot UI textures in VRAM. (GX tiles straight to PICA tiles: done, above.) | `runtime/hw/gx/texture.cpp`, `tools/stage_data.py` | Model textures 12.7 → 3.2 MB | ~1 week | ETC1 loses some colour detail |
-| EFB copies with the transfer engine instead of a CPU read-back mid-frame (Mii faces): measured, a copy's conversion ~28 ms on the GPU thread at room entry, plus the GPU sync | `platform/3ds/gx_pica.cpp` | One GPU stall and ~28 ms less per copy | 2–3 days | RGBA8/565/5551/4444 only, ≥ 64 px wide |
+| nw4r::lyt's pane draw (fn_80460EF0) natively, then g3d's material setup (fn_80443630, ResMatChan); the quads are done (above) | `engine/lyt`, `engine/g3d` | est. 1–2% of core 0 (the GX SDK natives measured far below their profile share: see Ruled out) | Days | Must match the streams |
+| Textures: CMPR → ETC1 at staging time, looked up by content hash (the encoding is what keeps ETC1 off on the New 3DS: ~310 ms more at room entry); hot UI textures in VRAM. (I4/I8 as L4/L8 and ETC1 at upload: done, above.) | `tools/stage_data.py`, `gx_pica.cpp` | ETC1 everywhere without its upload time | Days | Low (as lossy as now) |
 | Aspect: the game draws for 16:9 (SYSCONF IPL.AR) and the 3DS screen is 5:3, so the picture is ~6.5% narrow with the TV overscan margin showing: 4:3 mode or a crop of ~21 px per side in the transform, scissor and read-back | `platform/3ds/gx_pica.cpp` | Fills the screen | 1 day | Touch mapping must match |
 | A native nw4r::lyt renderer for the layouts; on the Old 3DS, a frameskip that still decodes GX state | `engine/lyt` | Large | Weeks | Must match lyt materials |
 
@@ -187,6 +189,16 @@ main (c9dfb61): the room-making frame 1.27 s, the room shown at 19.35 s; in the 
 | `-ffp-contract=off` for host builds | Apple clang fuses `a*b+c` into FMADD by default and the 3DS's VFP never does, so host and 3DS results can differ in the last bit. |
 
 ## Ruled out
+
+- **The guest accessors forced inline** (`NOMA_ACCESSORS_INLINE=1|2` in `runtime/guest.h`, off by
+  default): all of them inline makes the 3DS release build's code 12.75 → 18.55 MB (+45%, too much
+  for the Old 3DS) and the room ran slower in Azahar; the float ones alone are +113 KB with no gain
+  measured.
+- **EFB copies made on the GPU** (the render target moved into a texture with the transfer engine,
+  then drawn into the copy's texture). After the read-back's table conversion (Done) a copy costs
+  ~11 ms on the GPU thread, and the room makes one at its entry (Mii faces): over 1,200 room frames
+  the copy step averages 0.14 ms a frame and the read-back 0.01 ms. A GPU copy would also leave the
+  copied pixels out of guest memory, which the channel's own code may read.
 
 - **The GX SDK's hot calls as natives** (`engine/gx/gx_sdk.cpp`: __GXSetDirtyState and its parts,
   the TEV color/swap setters, GXLoadTexMtxImm, GXLoadTexObjPreLoaded; unwired). Measured with
@@ -241,7 +253,9 @@ the ARM-only paths (DSP intrinsics, inline asm), which the host self-tests can't
 `tools/armbench/armbench.py`: the AX voice renderer by kind of voice and its exactness on random
 voices (default), `--lines KIND` per source line, `--frame N` a whole AX frame with N voices,
 `--snd N` nw4r::snd's voice and channel updates, `--snd-diff REV` those against a git revision's,
-`--cx` the decompressors. `--cycles` adds an estimate of ARM11 cycles
+`--cx` the decompressors, `--gx` the GPU thread's per-draw kernels and texture conversions
+(`--gx-funcs KIND` per function), `--gxsdk` the GX SDK natives and `--lyt` nw4r::lyt's quads against
+the decompiled functions on random states. `--cycles` adds an estimate of ARM11 cycles
 (`tools/armbench/arm11_timing.py`): the MPCore TRM's issue cycles, result latencies, Early/Late
 registers and load/store unit (ARM DDI 0360F, chapter 15) applied to the instructions as they run,
 with its branch predictor (128 entries, 2-bit counters, static fallback) and return stack. It
