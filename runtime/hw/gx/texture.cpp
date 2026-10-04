@@ -230,6 +230,8 @@ void gx_preload(u32 bp60, u32 bp61, u32 bp62, u32 bp63) {
 }
 
 bool s_want_pixels;  // gx_texture_pixels: decode again what was released
+bool s_raw;          // gx_texture_raw: no decode
+const u8* s_raw_src;
 
 const GxTexture* gx_texture(u32 map) {
     u32 img0 = g_gx.bp[bp_tex(BP_TX_SETIMAGE0, map)];
@@ -264,9 +266,10 @@ const GxTexture* gx_texture(u32 map) {
         if (!src)
             return nullptr;
     }
+    s_raw_src = src;
     Entry& e = s_cache[k];
     e.used_frame = s_frame;
-    const bool refill = s_want_pixels && e.decoded && e.tex.rgba.empty();
+    const bool refill = !s_raw && s_want_pixels && e.decoded && e.tex.rgba.empty();
     if (e.checked_frame != s_frame || (preloaded && e.gen != s_tmem_serial) || refill) {
         NOMA_PROF_SCOPE("(gx texture check)");
         e.checked_frame = s_frame;
@@ -285,9 +288,12 @@ const GxTexture* gx_texture(u32 map) {
             e.tex.height = k.h;
             e.tex.fmt = k.fmt;
             e.tex.tlut_fmt = k.tlut_fmt;
-            e.tex.rgba.assign((size_t)k.w * k.h, 0);
-            NOMA_PROF_SCOPE("(gx texture decode)");
-            decode(src, k.fmt, k.w, k.h, k.tlut_addr, k.tlut_fmt, e.tex.rgba.data());
+            e.tex.tlut_addr = k.tlut_addr;
+            if (!s_raw) {
+                e.tex.rgba.assign((size_t)k.w * k.h, 0);
+                NOMA_PROF_SCOPE("(gx texture decode)");
+                decode(src, k.fmt, k.w, k.h, k.tlut_addr, k.tlut_fmt, e.tex.rgba.data());
+            }
             static u32 s_ids;
             if (!e.tex.id)
                 e.tex.id = ++s_ids;
@@ -309,6 +315,20 @@ void gx_texture_invalidate(u32 addr, u32 size) {
 }
 
 void gx_decode_texture(const u8* src, u32 fmt, u32 w, u32 h, u32* rgba) { decode(src, fmt, w, h, 0, 0, rgba); }
+void gx_decode_texture_tlut(const u8* src, u32 fmt, u32 w, u32 h, u32 tlut_addr, u32 tlut_fmt, u32* rgba) {
+    decode(src, fmt, w, h, tlut_addr, tlut_fmt, rgba);
+}
+u8* gx_tmem_for_tests() { return s_tmem; }
+const u8* gx_tmem() { return s_tmem; }
+
+const GxTexture* gx_texture_raw(u32 map, const u8** src) {
+    s_raw = true;
+    s_raw_src = nullptr;
+    const GxTexture* t = gx_texture(map);
+    s_raw = false;
+    *src = s_raw_src;
+    return t;
+}
 
 void gx_texture_release(const GxTexture* t) {
     std::vector<u32>().swap(const_cast<GxTexture*>(t)->rgba);

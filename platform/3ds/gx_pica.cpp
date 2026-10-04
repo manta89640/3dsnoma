@@ -40,6 +40,7 @@
 #include "runtime/hw/gx/vertex.h"
 #include "runtime/runtime.h"
 #include "gx_pica.h"
+#include "pica_tex.h"
 
 extern "C" u32 __ctru_heap_size;
 extern "C" const uint8_t gx_shbin[];
@@ -555,55 +556,21 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     }
 }
 
-// The decoded image into a PICA texture of W x H (powers of two): repeating textures are
-// resampled to that size, the others padded. The PICA's t runs from the last row up (t = 0 is
-// row H-1), GX's from the first down: the image is stored upside down (padding then sits above
-// it, at t > height/H, where coordinates don't reach). Texels are in 8x8 tiles in Z order and
-// little-endian: RGBA8 0xRRGGBBAA, LA8 0xLLAA, LA4 0xLA, RGB565, RGBA5551 (R in the top bits).
-void upload(const GxTexture* gt, u8* out, u32 W, u32 H, GPU_TEXCOLOR fmt, bool repeat) {
-    // a texel's place = column part + row part; the source texel likewise
-    static std::vector<u32> col_dst, col_src;
-    col_dst.resize(W), col_src.resize(W);
-    for (u32 x = 0; x < W; x++) {
-        col_dst[x] = (x >> 3) * 64 + ((x & 1) | ((x & 2) << 1) | ((x & 4) << 2));
-        col_src[x] = repeat ? x * gt->width / W : std::min(x, gt->width - 1);
-    }
-    auto rows = [&](auto&& put) {
-        for (u32 y = 0; y < H; y++) {
-            u32 py = H - 1 - y;
-            u32 row_dst = (py >> 3) * (W >> 3) * 64 + (((py & 1) << 1) | ((py & 2) << 2) | ((py & 4) << 3));
-            u32 sy = repeat ? y * gt->height / H : std::min(y, gt->height - 1);
-            const u32* src = gt->rgba.data() + sy * gt->width;
-            for (u32 x = 0; x < W; x++)
-                put(row_dst + col_dst[x], src[col_src[x]]);  // c: R G B A in bytes 0-3
-        }
-    };
-    switch (fmt) {
-    case GPU_LA4:
-        rows([&](u32 i, u32 c) { out[i] = (u8)((c & 0xF0) | (c >> 28)); });
-        break;
-    case GPU_LA8:
-        rows([&](u32 i, u32 c) { ((u16*)out)[i] = (u16)((c & 0xFF) << 8 | c >> 24); });
-        break;
-    case GPU_RGB565:
-        rows([&](u32 i, u32 c) {
-            ((u16*)out)[i] = (u16)((c & 0xF8) << 8 | (c >> 5 & 0x7E0) | (c >> 19 & 0x1F));
-        });
-        break;
-    case GPU_RGBA5551:
-        rows([&](u32 i, u32 c) {
-            ((u16*)out)[i] = (u16)((c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 18 & 0x3E) | c >> 31);
-        });
-        break;
-    default:
-        rows([&](u32 i, u32 c) { ((u32*)out)[i] = __builtin_bswap32(c); });
-        break;
+// the PICA format as pica_tex.h names it
+pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f) {
+    switch (f) {
+    case GPU_LA4: return pica_tex::LA4;
+    case GPU_LA8: return pica_tex::LA8;
+    case GPU_RGB565: return pica_tex::RGB565;
+    case GPU_RGBA5551: return pica_tex::RGBA5551;
+    default: return pica_tex::RGBA8;
     }
 }
 
 // the PICA texture for texture map `map`; scale: what to multiply its coordinates with
 C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
-    const GxTexture* gt = gx_texture(map);
+    const u8* raw = nullptr;
+    const GxTexture* gt = gx_texture_raw(map, &raw);
     if (!gt || !gt->width)
         return nullptr;
     u32 mode = g_gx.bp[bp_tex(BP_TX_SETMODE0, map)];
@@ -618,11 +585,8 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
         NOMA_PROF_SCOPE("(gx texture upload)");
         Timed timed(Timers::UPLOAD);
         T.uploads++, T.upload_texels += W * H;
-        if (gt->rgba.empty()) {  // released after an earlier upload: decoded again
-            gt = gx_texture_pixels(map);
-            if (!gt || gt->rgba.empty())
-                return nullptr;
-        }
+        if (!raw)
+            return nullptr;
         if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt)) {
             P.dead.push_back(e.tex);
             e.tex.data = nullptr;
@@ -636,10 +600,21 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
         }
         e.fmt = fmt;
         u8* out = (u8*)e.tex.data;
-        upload(gt, out, W, H, fmt, repeat);
+        // the GX bytes straight into the PICA's tiles; a repeating texture resampled to a power of
+        // two (and a format pica_tex doesn't convert) through an RGBA8 image
+        const u32 w = gt->width, h = gt->height;
+        const bool resample = repeat && (W != w || H != h);
+        if (resample || !pica_tex::from_gx(raw, gt->fmt, w, h, gx_tmem(), GX_TMEM_MASK, gt->tlut_addr, gt->tlut_fmt,
+                                           out, W, H, tex_fmt(fmt))) {
+            static std::vector<u32> rgba;
+            rgba.resize((size_t)w * h);
+            gx_decode_texture_tlut(raw, gt->fmt, w, h, gt->tlut_addr, gt->tlut_fmt, rgba.data());
+            pica_tex::from_rgba(rgba.data(), w, h, out, W, H, tex_fmt(fmt), repeat);
+            if (rgba.size() > (64u << 10))
+                std::vector<u32>().swap(rgba);
+        }
         C3D_TexFlush(&e.tex);
         e.version = gt->version;
-        gx_texture_release(gt);  // the PICA texture has the pixels now
         e.sx = repeat ? 1.0f : (float)gt->width / (float)W;
         e.sy = repeat ? 1.0f : (float)gt->height / (float)H;
     }

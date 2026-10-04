@@ -13,6 +13,7 @@ struct GxTexture {
     u32 id = 0;             // unique per cache entry
     u32 fmt = 0;            // the GX format it came from (paletted: and its palette's), for
     u32 tlut_fmt = 0;       // renderers that keep a texture in less memory than RGBA8
+    u32 tlut_addr = 0;      // (paletted: the palette's TMEM address)
 };
 
 // texture map 0-7 as the BP registers describe it now (null if it has no image)
@@ -22,6 +23,12 @@ const GxTexture* gx_texture(u32 map);
 // semantics: a new decode is a new version).
 void gx_texture_release(const GxTexture* t);
 const GxTexture* gx_texture_pixels(u32 map);
+// A renderer that converts the GX bytes itself (the 3DS): the same texture and versions, never
+// decoded to RGBA8; *src gets its bytes in GX format (valid until the next call), gx_tmem() has the
+// palettes (TMEM_MASK: a 2-byte entry's offset)
+const GxTexture* gx_texture_raw(u32 map, const u8** src);
+const u8* gx_tmem();
+const u32 GX_TMEM_MASK = (1u << 20) - 2;
 // the texture cache forgets textures not used for a while; called once per frame
 void gx_texture_frame();
 // TMEM (palettes): BP 0x65 copies main memory into it
@@ -34,5 +41,8 @@ u32 gx_texture_bytes(u32 fmt, u32 w, u32 h);
 void gx_texture_invalidate(u32 addr, u32 size);
 // a texture in GX format (not paletted) -> RGBA8 as in GxTexture
 void gx_decode_texture(const u8* src, u32 fmt, u32 w, u32 h, u32* rgba);
+// ... paletted too (the palette in TMEM at tlut_addr)
+void gx_decode_texture_tlut(const u8* src, u32 fmt, u32 w, u32 h, u32 tlut_addr, u32 tlut_fmt, u32* rgba);
+u8* gx_tmem_for_tests();
 
 }  // namespace guest
