@@ -28,8 +28,10 @@
 
 void noma_start_guest();
 
-// The normal heap's addresses (0x08000000 on) hold at most 128 MB, so it can't take all the memory:
-// it gets what's free but LINEAR_MIN, up to HEAP_MAX, and the linear heap the rest. The linear heap
+// The normal heap's addresses run from OS_HEAP_AREA_BEGIN to OS_HEAP_AREA_END (96 MB: the main
+// thread's stack is just above them, at 0x10000000), so it can't take all the memory: it gets what's
+// free but LINEAR_MIN, up to HEAP_MAX, and the linear heap the rest. (A real console's kernel refuses
+// a heap that runs past them; Azahar let 120 MB through, and the first start on hardware stopped here.) The linear heap
 // holds what the GPU and the DSP read (textures, vertices, sound buffers: GPU_RESERVE) and as much
 // guest memory as fits beside it (see platform_alloc_guest), the normal heap the rest of it.
 extern "C" u32 __ctru_linear_heap_size, __ctru_heap_size, __ctru_heap, __ctru_linear_heap;
@@ -37,7 +39,8 @@ extern "C" char *fake_heap_start, *fake_heap_end;
 // (GPU_RESERVE: the PICA's vertex and index buffers, the textures it keeps, read-backs and sound
 // take about 8 MB in the room; LINEAR_MIN also has room for the frame buffers. MEM1 is the
 // program's own .bss, guest::g_mem1, already committed when this runs)
-static const u32 GPU_RESERVE = 16u << 20, LINEAR_MIN = GPU_RESERVE + (8u << 20), HEAP_MAX = 120u << 20;
+static const u32 GPU_RESERVE = 16u << 20, LINEAR_MIN = GPU_RESERVE + (8u << 20),
+                 HEAP_MAX = OS_HEAP_AREA_END - OS_HEAP_AREA_BEGIN;
 
 extern "C" void __system_allocateHeaps(void) {
     Handle reslimit = 0;
