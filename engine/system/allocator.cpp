@@ -59,6 +59,7 @@ u32 find_contain_heap(u32 heap, u32 addr) {
         HEAP_STD_CONTAINS = 0x80189E24,  // [0x1C, 0x20)
         HEAP_UNT_CONTAINS = 0x8018A108,  // [0x1C, 0x1C + 0x24 * 0x28): blocks of one size
         ROOT_CONTAINS = 0x803654A0,      // everything
+        DELEGATE_CONTAINS = 0x800148B0,  // lib::Delegator<void (), 64>::DelegateHeap: its own 64 bytes, [0x1C, 0x5C)
     };
     u32 child = guest::load32(heap + 0x10);
     while (child != heap + 0xC) {
@@ -73,6 +74,8 @@ u32 find_contain_heap(u32 heap, u32 addr) {
             in = start <= addr && addr < start + guest::load32(child + 0x24) * guest::load32(child + 0x28);
         } else if (fn == ROOT_CONTAINS) {
             in = true;
+        } else if (fn == DELEGATE_CONTAINS) {
+            in = child + 0x1C <= addr && addr < child + 0x5C;
         } else {
             in = ::gcall<u32>(fn, child, addr) != 0;
         }
