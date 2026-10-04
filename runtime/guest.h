@@ -897,18 +897,23 @@ struct ProfMark {
 // poll budget like loop iterations do: hardware interrupts (the 3 ms audio DMA, VI) get taken
 // throughout the code, not only where the guest loops or re-enables interrupts.
 // (A build with -DNOMA_TRACE_CALLS also logs function entries; see runtime/trace.cpp.)
+// NOMA_TRACE_LEAF: a function that calls nothing (decompile.py): no device poll at its entry
 #ifdef NOMA_TRACE_CALLS
 void noma_trace(const char* name, u32 addr);
+#define NOMA_TRACE_LEAF(name, addr) noma_trace(name, addr)
 #define NOMA_TRACE(name, addr) \
     do {                       \
         noma_trace(name, addr); \
         NOMA_LOOP();           \
     } while (0)
 #elif defined(NOMA_PROFILE_CALLS)
+#define NOMA_TRACE_LEAF(name, addr) \
+    guest::ProfScope NOMA_PROF_CAT(noma_prof_scope_, __LINE__)(guest::g_prof, name)
 #define NOMA_TRACE(name, addr)                                          \
     guest::ProfScope NOMA_PROF_CAT(noma_prof_scope_, __LINE__)(guest::g_prof, name); \
     NOMA_LOOP()
 #else
+#define NOMA_TRACE_LEAF(name, addr) ((void)0)
 #define NOMA_TRACE(name, addr) NOMA_LOOP()
 #endif
 

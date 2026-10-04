@@ -1005,6 +1005,9 @@ def fold_ro_reads(fn_text, dol):
     return RO_READ.sub(value, fn_text)
 
 
+CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+
 def postprocess(fn_text, name_map):
     """Make names C++-safe and point GA_ constants at sanitized names; C++-ify a few m2c
     constructs (a label needs a statement after it, no casts on the left of an assignment)."""
@@ -1033,6 +1036,7 @@ def main():
     call_hints = load_call_hints(os.path.join(ROOT, "build/sig/call_hints.txt"))
     treat = treatments(dol, st, protos)
     by_name = {asm_name(f): f for f in st.functions}
+    fn_idents = {c_ident(asm_name(f)) for f in st.functions} | {c_ident(f.name) for f in st.functions} | set(NATIVE_NAMES)
     for sym in st.syms:
         SYM_ADDR.setdefault(sym.name, sym.addr)
     for n, a in linker_symbols(dol).items():
@@ -1234,7 +1238,11 @@ def main():
                     if n in PATCHED_NAMES or f.name in PATCHED_NAMES:
                         cn = c_ident(n)
                         body_lines[k] = re.sub(r"\b%s\(" % re.escape(cn), cn + "_orig(", l, count=1)
-                    body_lines.insert(k + 1, '    NOMA_TRACE("%s", 0x%08Xu);' % (n, f.addr))
+                    # a function that calls nothing needs no poll at its entry (its loops have
+                    # theirs; its caller and the next callee poll): NOMA_TRACE_LEAF
+                    inner = "\n".join(body_lines[k + 1:])
+                    leaf = not any(m.group(1) in fn_idents for m in CALL_RE.finditer(inner)) and "gcall<" not in inner
+                    body_lines.insert(k + 1, '    NOMA_TRACE%s("%s", 0x%08Xu);' % ("_LEAF" if leaf else "", n, f.addr))
                     break
             emit("\n".join(body_lines))
             ranges.append((start_line, len(out), n))
