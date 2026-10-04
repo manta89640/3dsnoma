@@ -201,6 +201,25 @@ struct gp;
 template <class T>
 struct gref;
 
+// At -O1 GCC calls the accessors below out of line (about 130,000 call sites in the decompiled
+// code), and each call makes the caller keep its live values out of r0-r3/s0-s15.
+// NOMA_ACCESSORS_INLINE=1 forces the float ones inline, =2 all of them. Measured on the 3DS
+// build: all of them inline is +45% code (12.75 -> 18.55 MB), too much for the Old 3DS; see
+// docs/optimisations.md for the floats-only measurement.
+#ifndef NOMA_ACCESSORS_INLINE
+#define NOMA_ACCESSORS_INLINE 0
+#endif
+#if NOMA_ACCESSORS_INLINE >= 2
+#define NOMA_ACC __attribute__((always_inline))
+#else
+#define NOMA_ACC
+#endif
+#if NOMA_ACCESSORS_INLINE >= 1
+#define NOMA_ACC_F __attribute__((always_inline))
+#else
+#define NOMA_ACC_F
+#endif
+
 // --------------------------------------------------------------------------------------
 // storage of each type in guest memory
 template <class T, class Enable = void>
@@ -209,7 +228,7 @@ struct gstore_traits;
 template <class T>
 struct gstore_traits<T, typename std::enable_if<std::is_integral<T>::value>::type> {
     static constexpr u32 size = sizeof(T);
-    static T load(u32 a) {
+    NOMA_ACC static T load(u32 a) {
         if (sizeof(T) == 1)
             return (T)guest::load8(a);
         if (sizeof(T) == 2)
@@ -218,7 +237,7 @@ struct gstore_traits<T, typename std::enable_if<std::is_integral<T>::value>::typ
             return (T)guest::load32(a);
         return (T)guest::load64(a);
     }
-    static void store(u32 a, T v) {
+    NOMA_ACC static void store(u32 a, T v) {
         if (sizeof(T) == 1)
             guest::store8(a, (u8)v);
         else if (sizeof(T) == 2)
@@ -233,13 +252,13 @@ struct gstore_traits<T, typename std::enable_if<std::is_integral<T>::value>::typ
 template <>
 struct gstore_traits<f32> {
     static constexpr u32 size = 4;
-    static f32 load(u32 a) {
+    NOMA_ACC_F static f32 load(u32 a) {
         u32 b = guest::load32(a);
         f32 f;
         ::memcpy(&f, &b, 4);
         return f;
     }
-    static void store(u32 a, f32 v) {
+    NOMA_ACC_F static void store(u32 a, f32 v) {
         u32 b;
         ::memcpy(&b, &v, 4);
         guest::store32(a, b);
@@ -249,13 +268,13 @@ struct gstore_traits<f32> {
 template <>
 struct gstore_traits<f64> {
     static constexpr u32 size = 8;
-    static f64 load(u32 a) {
+    NOMA_ACC_F static f64 load(u32 a) {
         u64 b = guest::load64(a);
         f64 f;
         ::memcpy(&f, &b, 8);
         return f;
     }
-    static void store(u32 a, f64 v) {
+    NOMA_ACC_F static void store(u32 a, f64 v) {
         u64 b;
         ::memcpy(&b, &v, 8);
         guest::store64(a, b);
@@ -265,8 +284,8 @@ struct gstore_traits<f64> {
 template <class U>
 struct gstore_traits<gp<U>> {
     static constexpr u32 size = 4;
-    static gp<U> load(u32 a) { return gp<U>(guest::load32(a)); }
-    static void store(u32 a, gp<U> v) { guest::store32(a, v.a); }
+    NOMA_ACC static gp<U> load(u32 a) { return gp<U>(guest::load32(a)); }
+    NOMA_ACC static void store(u32 a, gp<U> v) { guest::store32(a, v.a); }
 };
 
 // element size for pointer arithmetic (void* arithmetic is byte-wise, as in GNU C)
@@ -284,9 +303,9 @@ template <class T>
 struct gref {
     u32 a;
 
-    operator T() const { return gstore_traits<T>::load(a); }
-    T get() const { return gstore_traits<T>::load(a); }
-    const gref& operator=(T v) const {
+    NOMA_ACC operator T() const { return gstore_traits<T>::load(a); }
+    NOMA_ACC T get() const { return gstore_traits<T>::load(a); }
+    NOMA_ACC const gref& operator=(T v) const {
         gstore_traits<T>::store(a, v);
         return *this;
     }
@@ -295,7 +314,7 @@ struct gref {
 
 #define GREF_COMPOUND(op)                                  \
     template <class V>                                     \
-    const gref& operator op##=(V v) const {                \
+    NOMA_ACC const gref& operator op##=(V v) const {       \
         return *this = (T)(get() op v);                    \
     }
     GREF_COMPOUND(+)
@@ -327,11 +346,11 @@ struct gref {
 template <class U>
 struct gref<gp<U>> {
     u32 a;
-    gp<U> get() const { return gp<U>(guest::load32(a)); }
+    NOMA_ACC gp<U> get() const { return gp<U>(guest::load32(a)); }
     template <class V>
-    operator gp<V>() const { return gp<V>(guest::load32(a)); }
-    operator u32() const { return guest::load32(a); }
-    const gref& operator=(gp<U> v) const {
+    NOMA_ACC operator gp<V>() const { return gp<V>(guest::load32(a)); }
+    NOMA_ACC operator u32() const { return guest::load32(a); }
+    NOMA_ACC const gref& operator=(gp<U> v) const {
         guest::store32(a, v.a);
         return *this;
     }
@@ -512,14 +531,14 @@ namespace guest {
 template <>
 struct gstore_traits<M2C_UNK> {
     static constexpr u32 size = 4;
-    static M2C_UNK load(u32 a) { return M2C_UNK((s32)load32(a)); }
-    static void store(u32 a, M2C_UNK v) { store32(a, (u32)v.v); }
+    NOMA_ACC static M2C_UNK load(u32 a) { return M2C_UNK((s32)load32(a)); }
+    NOMA_ACC static void store(u32 a, M2C_UNK v) { store32(a, (u32)v.v); }
 };
 template <>
 struct gref<M2C_UNK> {
     u32 a;
-    s32 get() const { return (s32)load32(a); }
-    operator s32() const { return get(); }
+    NOMA_ACC s32 get() const { return (s32)load32(a); }
+    NOMA_ACC operator s32() const { return get(); }
     operator M2C_UNK() const { return M2C_UNK(get()); }
     template <class U>
     operator gp<U>() const { return gp<U>((u32)get()); }
