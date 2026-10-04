@@ -42,11 +42,11 @@ enum : u32 {
     D_DIRTY_STATE = 0x5FC,
 };
 
-// __GXData: its guest address and where it is in host memory (MEM1: one piece); stores go through
-// guest::store* (memory watches see them)
+// __GXData: its guest address and where it is in host memory (MEM1: one piece), read and written
+// in place
 struct Data {
     u32 a;
-    const u8* p;
+    u8* p;
     u32 w(u32 off) const {
         u32 v;
         ::memcpy(&v, p + off, 4);
@@ -54,9 +54,12 @@ struct Data {
     }
     u32 h(u32 off) const { return (u32)p[off] << 8 | p[off + 1]; }
     u32 b(u32 off) const { return p[off]; }
-    void set_w(u32 off, u32 v) const { guest::store32(a + off, v); }
-    void set_h(u32 off, u32 v) const { guest::store16(a + off, (u16)v); }
-    void set_b(u32 off, u32 v) const { guest::store8(a + off, (u8)v); }
+    void set_w(u32 off, u32 v) const {
+        v = __builtin_bswap32(v);
+        ::memcpy(p + off, &v, 4);
+    }
+    void set_h(u32 off, u32 v) const { p[off] = (u8)(v >> 8), p[off + 1] = (u8)v; }
+    void set_b(u32 off, u32 v) const { p[off] = (u8)v; }
 };
 inline Data gxdata() {
     u32 a = guest::load32(GA___GXData);
@@ -68,7 +71,20 @@ inline Data gxdata() {
 struct Pipe {
     void byte(u32 v) { guest::gather_put<1>(v & 0xFF); }
     void word(u32 v) { guest::gather_put<4>(v); }
-    void bp(u32 v) { byte(0x61), word(v); }
+    // a register write's 5 bytes with one bounds check where they fit before the buffer's end
+    void bp(u32 v) {
+        u32 n = guest::g_gather_n;
+        if (__builtin_expect(n <= 32 - 5, 1)) {
+            guest::g_gather[n] = 0x61;
+            u32 w = __builtin_bswap32(v);
+            ::memcpy(guest::g_gather + n + 1, &w, 4);
+            guest::g_gather_n = n += 5;
+            if (n == 32)
+                guest::gx_gather_burst();
+        } else {
+            byte(0x61), word(v);
+        }
+    }
     void cp(u32 reg, u32 v) { byte(0x08), byte(reg), word(v); }
     void xf(u32 reg, u32 v) { byte(0x10), word(reg), word(v); }  // one XF register
     void send() {}
@@ -103,6 +119,29 @@ inline u32 set_field(u32 word, u32 shift, u32 bits, u32 v) {
     return (word & ~mask) | ((v << shift) & mask);
 }
 
+// __SetSURegs(map, coord): a texture coordinate's scale registers (SU_SSIZE, SU_TSIZE) from its
+// map's size and wrap modes
+void su_regs(const Data& d, u32 map, u32 coord) {
+    // (an index past the tables reads and writes whatever guest memory is there, as the original)
+    const bool in = map < 8 && coord < 8;
+    auto rd = [&](u32 off) { return in ? d.w(off) : guest::load32(d.a + off); };
+    const u32 image0 = rd(D_TEX_IMAGE0 + map * 4), mode0 = rd(D_TEX_MODE0 + map * 4);
+    u32 s = (rd(0x108 + coord * 4) & ~0x1FFFFu) | (image0 & 0x3FF) | ((clz32((mode0 & 3) - 1) << 11) & 0x10000);
+    if (in)
+        d.set_w(0x108 + coord * 4, s);
+    else
+        guest::store32(d.a + 0x108 + coord * 4, s);
+    u32 t = (rd(0x128 + coord * 4) & ~0x1FFFFu) | ((image0 >> 10) & 0x3FF) |
+            ((clz32(((mode0 >> 2) & 3) - 1) << 11) & 0x10000);
+    if (in)
+        d.set_w(0x128 + coord * 4, t);
+    else
+        guest::store32(d.a + 0x128 + coord * 4, t);
+    Pipe p;
+    p.bp(s), p.bp(t);
+    d.set_h(D_BP_SENT_NOT, 0);
+}
+
 void set_su_tex_regs() {
     const Data d = gxdata();
     if (d.w(D_TEX_MAP_ID_NOT_SCALED) == 0xFF)
@@ -120,7 +159,7 @@ void set_su_tex_regs() {
             map = (iref >> (6 * i + 3)) & 7;
         }
         if (!(d.w(D_TEX_MAP_ID_NOT_SCALED) & bit(map)))
-            g::__SetSURegs(coord, map);
+            su_regs(d, coord, map);
     }
     // TEV stages
     for (u32 k = 0; k < n_tev; k++) {
@@ -128,7 +167,7 @@ void set_su_tex_regs() {
         u32 tc = d.w(D_TEXCOORD_FOR_STAGE + 4 * k) & 0xFFFFFEFF;
         u32 m = (k & 1) ? (tref >> 15) & 7 : (tref >> 3) & 7;
         if (tc != 0xFF && !(d.w(D_TEX_MAP_ID_NOT_SCALED) & bit(m)) && (d.w(D_TEV_TC_ENAB) & bit(k)))
-            g::__SetSURegs(tc, m);
+            su_regs(d, tc, m);
     }
 }
 
@@ -282,6 +321,8 @@ using namespace engine::gx;
 void __GXSetDirtyState() {
     set_dirty_state();
 }
+
+void __SetSURegs(u32 map, u32 coord) { engine::gx::su_regs(engine::gx::gxdata(), map, coord); }
 
 void __GXSetSUTexRegs() {
     set_su_tex_regs();

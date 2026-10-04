@@ -326,6 +326,8 @@ def bench_gx(funcs_kind=None, draws=64, flush_every=7):
 GXSDK_FUNCS = ["__GXSetDirtyState", "__GXSetSUTexRegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
                "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
                "GXLoadTexObjPreLoaded"]
+# natives the benched ones call, compared through them
+GXSDK_CALLED = ["__SetSURegs"]
 DECOMP_FLAGS = ["-O1", "-w", "-fno-strict-aliasing", "-fwrapv", "-ftrivial-auto-var-init=zero"]
 
 
@@ -372,7 +374,7 @@ def bench_gxsdk(trials=3000):
     cxx = os.path.join(DEVKITARM, "bin", "arm-none-eabi-g++")
     base = [f for f in FLAGS if f != "-O2"]
     with tempfile.TemporaryDirectory() as out:
-        dec, pulled = decompiled_functions(GXSDK_FUNCS, GXSDK_FUNCS)
+        dec, pulled = decompiled_functions(GXSDK_FUNCS + GXSDK_CALLED, GXSDK_FUNCS + GXSDK_CALLED)
         open(os.path.join(out, "dec.cpp"), "w").write(dec)
         print("decompiled functions in the bench: %s" % ", ".join(pulled))
         objs = []

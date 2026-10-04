@@ -121,6 +121,10 @@ NATIVE_NAMES = {
     # the search for the heap that holds an address (every free)
     "wii_Thread_GetUnusedStackSize", "lib_allocator_Fill",
     "lib_allocator_HeapBase_FindContainHeap",
+    # engine/gx: the GX library's hottest calls (gx_sdk.cpp; armbench.py --gxsdk compares them)
+    "__GXSetDirtyState", "__GXSetSUTexRegs", "__SetSURegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
+    "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
+    "GXLoadTexObjPreLoaded",
     # engine/input: the Wii Remote is the 3DS's controls; WPAD's Bluetooth stack never starts (remote.cpp)
     "KPADInitEx", "KPADReadEx", "KPADSetPosParam", "KPADSetConnectCallback", "WPADRegisterAllocator",
     "WPADProbe", "WPADDisconnect", "WPADControlMotor", "WPADIsSpeakerEnabled", "WPADSendStreamData",
