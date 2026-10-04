@@ -10,7 +10,9 @@ stereo) with the model of what should have played (brsar.simulate + sndrender):
     dump_check.py locate LABEL DUMP.wav --at SECONDS [--length 12]
         where in one of the archive's pieces (by its label) the recording at SECONDS is: the
         piece's position, in seconds from its start (e.g. the room's theme resuming where it
-        paused rather than from its start), and the levels of the two there
+        paused rather than from its start), and the levels of the two there. The LENGTH seconds
+        from SECONDS should hold that piece alone (a window running into a fade or another piece
+        finds a wrong place), and a piece that repeats a phrase may be found at the repeat.
 
 Onsets: the spectral flux of the mono mix (positive changes of the log spectrum above 150 Hz,
 10 ms apart), the same for the recording and the model.
@@ -56,7 +58,7 @@ def norm_xcorr(a, b):
     """Normalised cross-correlation of a (short) at every offset into b: (best offset, value)."""
     a = (a - a.mean()) / (a.std() + 1e-9)
     n = len(a)
-    if len(b) < n:
+    if n == 0 or len(b) < n:
         return 0, 0.0
     size = 1 << (len(b) + n).bit_length()
     c = np.fft.irfft(np.fft.rfft(b, size) * np.conj(np.fft.rfft(a, size)), size)[:len(b) - n + 1]
@@ -156,6 +158,8 @@ def cmd_locate(a):
     model = sndrender.render(sim, r.bank(sd.bank), gain_db=None, volume=sd.volume / 127.0, tail_s=0)
     dump = read_wav(a.dump)
     seg = dump[:, int(a.at * RATE):int((a.at + a.length) * RATE)]
+    if seg.shape[1] < RATE:
+        sys.exit('%s: less than a second of it from %.2f s (it lasts %.2f s)' % (a.dump, a.at, dump.shape[1] / RATE))
     k, c = norm_xcorr(flux(seg), flux(model))
     tsec = brsar.tick_to_seconds(sim['tempo'], sim['timebase'])
     loop_ticks = sim['loop_tick'].get(0, [(sim['ticks'], 0)])

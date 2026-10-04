@@ -156,17 +156,17 @@ void log_state(const char* when) {
                guest::vi_game_frames() / 60.0, (int)(s32)current(), (int)(s32)next(), (int)slot(), slots);
 }
 
-// NOMA_WUHU_MUSIC_TEST=N,M: the island's music flow without the island, wherever the game is at
-// game time N s (the room, for a test): music_depart, a second later (the island loading)
-// music_arrive, M seconds after that music_leave. The BGM manager's state is logged at each step
-// and every second for 10 s after leaving (the room theme's ticks show it paused and resumed
+// NOMA_WUHU_MUSIC_TEST=N,M[,L]: the island's music flow without the island, wherever the game is
+// at game time N s (the room, for a test): music_depart, L s later (the island loading; 1 if not
+// given) music_arrive, M seconds after that music_leave. The BGM manager's state is logged at each
+// step and every second for 10 s after leaving (the room theme's ticks show it paused and resumed
 // where it was); with NOMA_DUMP_AUDIO the recording is what a player would have heard.
 void test_frame() {
     static int step = -1;
-    static double depart_at, play_for, last_log;
+    static double depart_at, play_for, loading = 1, last_log;
     if (step < 0) {
         const char* e = std::getenv("NOMA_WUHU_MUSIC_TEST");
-        step = e && std::sscanf(e, "%lf,%lf", &depart_at, &play_for) == 2 ? 0 : 99;
+        step = e && std::sscanf(e, "%lf,%lf,%lf", &depart_at, &play_for, &loading) >= 2 ? 0 : 99;
     }
     if (step >= 99)
         return;
@@ -181,14 +181,14 @@ void test_frame() {
         step = 1;
         return;
     case 1:
-        if (t < depart_at + 1)
+        if (t < depart_at + loading)
             return;
         music_arrive();
         log_state("arrived");
         step = 2, last_log = t;
         return;
     case 2:
-        if (t < depart_at + 1 + play_for) {
+        if (t < depart_at + loading + play_for) {
             if (t - last_log >= 10)
                 log_state("on the island"), last_log = t;
             return;
@@ -202,7 +202,7 @@ void test_frame() {
         if (t - last_log >= 1) {
             log_state("back");
             last_log = t;
-            if (t > depart_at + 1 + play_for + 10)
+            if (t > depart_at + loading + play_for + 10)
                 step = 99;
         }
         return;
@@ -229,22 +229,33 @@ void music_arrive() {
     }
     if (asked() != NONE) {
         // Arriving without having departed, or with ours current but paused or ended: PlayById
-        // would queue ours behind a 3 s fade, or do nothing. StopNow cuts slots 0 and 1 and
-        // pauses slot 2 at once (what played is remembered, as departing does).
+        // would queue ours behind a 3 s fade, or do nothing. StopNow cuts slots 0 and 1 at once
+        // and pauses slot 2 (what played is remembered, as departing does).
         if (s_room_slot < 0 && asked() != WIDE_WORLD_ID)
             s_room = asked(), s_room_slot = slot();
         stop_now();
     }
-    // nothing current: PlayById starts ours at once in slot 0 or 1 (no fade in), slot 2 paused
+    // nothing current: PlayById starts ours at once in slot 0 or 1 (no fade in)
     play_by_id(WIDE_WORLD_ID, false);
+    // and pauses slot 2 again over its crossfade (180 frames). A theme still fading out (the island
+    // came up within half a second of departing, or StopNow has only just paused it) has its fade
+    // made that long again, scaled by the volume it has left, and would sound under ours for up to
+    // 3 s: it goes on fading at the departure's pace instead (BasicSound::Pause, fn_8046C9A0: the
+    // frames asked for, times the volume left; nothing if it has paused already).
+    if (u32 theme = sound_in(2))
+        if (guest::load32(theme + 0x88) == 1)  // pausing
+            g::fn_8046C9A0(theme, 1, DEPART_FADE_FRAMES);
 }
 
 void music_leave() {
     u32 room = s_room;
     s32 room_slot = s_room_slot;
     s_room = NONE, s_room_slot = -1;
-    if (asked() != WIDE_WORLD_ID)
+    u32 playing = asked();
+    if (playing != WIDE_WORLD_ID && playing != NONE)
         return;  // something else has taken over: leave it be
+    // (Nothing at all, if ours couldn't start or the island never came up: the room's theme is
+    // still waiting in slot 2, and is brought back the same way.)
     if (room_slot == 2 && room != NONE) {
         // The room's theme waits paused in slot 2. The room won't ask for it: its BGM controller
         // (lbl_80882D14) asks again, as the room is made, only if its own mode has changed, and
@@ -255,9 +266,11 @@ void music_leave() {
         play_by_id(room, true);
         return;
     }
-    // Something else played (the controller's mode isn't the theme's, so the room asks for its
-    // theme when it is made again), or nothing: ours fades out of the way.
-    stop(LEAVE_FADE_FRAMES);
+    // Something else played before the island (the controller's mode isn't the theme's, so the
+    // room asks for its theme when it is made again), or nothing: ours, if it plays, fades out of
+    // the way.
+    if (playing == WIDE_WORLD_ID)
+        stop(LEAVE_FADE_FRAMES);
 }
 
 }  // namespace engine::wuhu
