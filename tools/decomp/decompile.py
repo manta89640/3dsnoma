@@ -117,6 +117,8 @@ NATIVE_NAMES = {
     "nw4r_lyt_CalcLineRectImpl",
     # engine/g3d: nw4r::g3d's block copies and light settings
     "nw4r_g3d_detail_Copy32ByteBlocks", "nw4r_g3d_LightSetting_Import",
+    "nw4r_g3d_Camera_GetCameraMtx", "nw4r_g3d_Camera_GetProjectionMtx", "nw4r_g3d_Camera_GetEnvironmentTexMtx",
+    "nw4r_g3d_Fog_CopyTo",
     # engine/system: the game's thread class (its stack-use check); the heaps' NaN fill of new blocks and
     # the search for the heap that holds an address (every free)
     "wii_Thread_GetUnusedStackSize", "lib_allocator_Fill",

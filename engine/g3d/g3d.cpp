@@ -2,6 +2,8 @@
 //  - detail::Copy32ByteBlocks: the 32-byte-block copy g3d uses for matrix and light arrays (an FPU
 //    double loop on the Wii: here a memory copy)
 //  - LightSetting::Import: a scene's lights copied from another setting, every frame
+//  - Camera's matrix getters and Fog::CopyTo: ScnRoot's global settings copy all 32 cameras' and
+//    fogs' matrices and data into the draw state before every opaque and translucent pass
 #include "noma_decomp.h"
 #include "../snd/guest_obj.h"
 
@@ -69,6 +71,67 @@ void light_setting_import(u32 self, u32 rhs) {
 
 }  // namespace
 
+// a Camera is a pointer to its data (the matrices, flags at 0x70, the projection's parameters)
+inline f64 camf(u32 cam, u32 off) {
+    u32 b = guest::load32(cam + off);
+    f32 f;
+    ::memcpy(&f, &b, 4);
+    return f;
+}
+
+// Camera::GetCameraMtx(mtx): the view matrix, made again first if the camera changed
+u32 camera_get_camera_mtx(u32 camera, u32 dst) {
+    const u32 cam = dst ? guest::load32(camera) : 0;
+    if (!cam)
+        return camera;
+    if (!(guest::load32(cam + 0x70) & 8))
+        g::nw4r_g3d_Camera_UpdateCameraMtx(camera);
+    g::PSMTXCopy(cam, dst);
+    return cam;
+}
+
+// Camera::GetProjectionMtx(mtx): the projection (orthographic, frustum or perspective), made once
+// and kept at 0x30 until the camera changes
+void camera_get_projection_mtx(u32 camera, u32 dst) {
+    const u32 cam = dst ? guest::load32(camera) : 0;
+    if (!cam)
+        return;
+    const u32 flags = guest::load32(cam + 0x70);
+    if (!(flags & 0x80)) {
+        if (flags & 0x40)
+            g::C_MTXOrtho(cam + 0x30, camf(cam, 0xBC), camf(cam, 0xC0), camf(cam, 0xC4), camf(cam, 0xC8), camf(cam, 0xB4),
+                          camf(cam, 0xB8));
+        else if (flags & 0x10)
+            g::C_MTXFrustum(cam + 0x30, camf(cam, 0xBC), camf(cam, 0xC0), camf(cam, 0xC4), camf(cam, 0xC8),
+                            camf(cam, 0xB4), camf(cam, 0xB8));
+        else
+            g::C_MTXPerspective(cam + 0x30, camf(cam, 0xAC), camf(cam, 0xB0), camf(cam, 0xB4), camf(cam, 0xB8));
+        guest::store32(cam + 0x70, guest::load32(cam + 0x70) | 0x80);
+    }
+    g::nw4r_math_MTX44Copy(dst, cam + 0x30);
+}
+
+// Camera::GetEnvironmentTexMtx(mtx): the identity with the camera's texture scale and offset
+void camera_get_environment_tex_mtx(u32 camera, u32 dst) {
+    const u32 cam = dst ? guest::load32(camera) : 0;
+    if (!cam)
+        return;
+    g::PSMTXIdentity(dst, dst);
+    guest::store32(dst + 0x0, guest::load32(cam + 0xCC));
+    guest::store32(dst + 0xC, guest::load32(cam + 0xD4));
+    guest::store32(dst + 0x14, guest::load32(cam + 0xD0) ^ 0x80000000u);  // (a float negated: its sign bit)
+    guest::store32(dst + 0x1C, guest::load32(cam + 0xD8));
+    guest::store32(dst + 0x28, guest::load32(GA_lbl_80886A58));
+    guest::store32(dst + 0x2C, guest::load32(GA_lbl_80886A60));
+}
+
+// Fog::CopyTo(data): the fog's 48 bytes
+void fog_copy_to(u32 fog, u32 dst) {
+    const u32 src = dst ? guest::load32(fog) : 0;
+    if (src)
+        guest::memcpy_g(dst, src, 0x30);
+}
+
 }  // namespace engine::g3d
 
 // ---- the guest ABI (decl.h)
@@ -77,6 +140,11 @@ namespace g {
 void nw4r_g3d_detail_Copy32ByteBlocks(u32 dst, u32 src, u32 size) {
     engine::g3d::copy_32byte_blocks(dst, src, size);
 }
+
+u32 nw4r_g3d_Camera_GetCameraMtx(u32 camera, u32 dst) { return engine::g3d::camera_get_camera_mtx(camera, dst); }
+void nw4r_g3d_Camera_GetProjectionMtx(u32 camera, u32 dst) { engine::g3d::camera_get_projection_mtx(camera, dst); }
+void nw4r_g3d_Camera_GetEnvironmentTexMtx(u32 camera, u32 dst) { engine::g3d::camera_get_environment_tex_mtx(camera, dst); }
+void nw4r_g3d_Fog_CopyTo(u32 fog, u32 dst) { engine::g3d::fog_copy_to(fog, dst); }
 
 void nw4r_g3d_LightSetting_Import(u32 self, u32 rhs) {
     engine::g3d::light_setting_import(self, rhs);
