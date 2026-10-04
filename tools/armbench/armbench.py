@@ -3,6 +3,7 @@
 
     tools/armbench/armbench.py [--lines KIND] [--voices N]
     tools/armbench/armbench.py --cx [FILE...]
+    tools/armbench/armbench.py --frame [VOICES...]
 
 Builds tools/armbench/ax_bench.cpp and engine/audio/ax_render.cpp with devkitARM and the 3DS
 build's code generation flags, then
@@ -11,6 +12,8 @@ build's code generation flags, then
     four frames each: the 3DS-only paths (the ARM11's DSP instructions), which NOMA_SELFTEST=ax on
     the host can't reach.
 --lines KIND: instead, where voice KIND's instructions go, per source line.
+--frame: whole AX frames (tools/armbench/frame_bench.cpp: runtime/hw/dsp_ax.cpp's command list,
+SETUP, the voices, OUTPUT) with that many voices like the room's, instructions and cycles.
 --cycles: with the instruction counts, an estimate of ARM11 cycles (tools/armbench/arm11_timing.py:
 the ARM11 MPCore TRM's issue cycles, result latencies and interlocks, the branch predictor; every
 access an L1 hit), with --lines per source line too.
@@ -36,7 +39,8 @@ import arm11_timing  # noqa: E402
 
 from elftools.elf.elffile import ELFFile
 from unicorn import UC_ARCH_ARM, UC_HOOK_BLOCK, UC_HOOK_CODE, UC_MODE_ARM, Uc
-from unicorn.arm_const import UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_SP
+from unicorn.arm_const import (UC_ARM_REG_C1_C0_2, UC_ARM_REG_FPEXC, UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R1,
+                               UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_SP)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEVKITARM = os.environ.get("DEVKITARM", "/opt/devkitpro/devkitARM")
@@ -76,6 +80,9 @@ class Machine:
         self.fn = {name: symtab.get_symbol_by_name(name)[0]["st_value"] for name in names}
         self.uc.mem_map(STACK, 0x100000)
         self.uc.mem_map(RETURN, 0x1000)
+        # the VFP on, as on the 3DS (C++ runtime code, such as static locals' guards, uses it)
+        self.uc.reg_write(UC_ARM_REG_C1_C0_2, self.uc.reg_read(UC_ARM_REG_C1_C0_2) | 0xF << 20)
+        self.uc.reg_write(UC_ARM_REG_FPEXC, 0x40000000)
 
     def call(self, fn, *args):
         self.uc.reg_write(UC_ARM_REG_SP, STACK + 0x100000)
@@ -178,15 +185,32 @@ def bench_cx(files):
         sys.exit(1 if bad else 0)
 
 
+def bench_frame(counts):
+    """whole AX frames (tools/armbench/frame_bench.cpp: runtime/hw/dsp_ax.cpp's command list with
+    voices like the room's): instructions and estimated ARM11 cycles a frame, by voice count"""
+    with tempfile.TemporaryDirectory() as out:
+        m = Machine(build(out, ("tools/armbench/frame_bench.cpp", "runtime/hw/dsp_ax.cpp", "engine/audio/ax_render.cpp"),
+                          ("frame",)), ("frame",))
+        frames = 8
+        for n in counts:
+            ins = (m.instructions("frame", n, frames) - m.instructions("frame", n, 0)) / frames
+            cyc = (m.cycles("frame", n, frames) - m.cycles("frame", n, 0)) / frames
+            print("%3d voices: %7.0f ARM instructions, %7.0f estimated ARM11 cycles a frame (%.0f us of the 3 ms "
+                  "at 268 MHz, %.0f at 804)" % (n, ins, cyc, cyc / 268.0, cyc / 804.0), flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lines", type=int, metavar="KIND")
     ap.add_argument("--voices", type=int, default=1000)
     ap.add_argument("--cx", nargs="*", metavar="FILE")
     ap.add_argument("--cycles", action="store_true")
+    ap.add_argument("--frame", type=int, nargs="*", metavar="VOICES")
     args = ap.parse_args()
     if args.cx is not None:
         return bench_cx(args.cx)
+    if args.frame is not None:
+        return bench_frame(args.frame or [0, 1, 8, 24, 37])
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out))
         if args.lines is not None:

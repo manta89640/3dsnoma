@@ -3,6 +3,7 @@
 // and (later) the AX microcode that mixes the voices.
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <vector>
 
@@ -30,6 +31,17 @@ static void latch_dma() {
     u32 frames = s_dma_blocks * 8;
     s_dma_data.resize(2 * frames);
     u32 a = 0x80000000u | (s_dma_addr & 0x1FFFFFFF);
+    const u8* p = host_ptr(a);
+    if (p && (a & (PAGE_SIZE - 1)) + 4 * frames <= PAGE_SIZE) {
+        // the DSP writes big-endian R, L pairs: a pair's four bytes reversed are L, R
+        for (u32 i = 0; i < frames; i++) {
+            u32 v;
+            memcpy(&v, p + 4 * i, 4);
+            v = __builtin_bswap32(v);
+            memcpy(&s_dma_data[2 * i], &v, 4);
+        }
+        return;
+    }
     for (u32 i = 0; i < frames; i++) {  // the DSP writes R, L pairs
         s_dma_data[2 * i + 1] = (s16)load16(a + 4 * i);
         s_dma_data[2 * i] = (s16)load16(a + 4 * i + 2);

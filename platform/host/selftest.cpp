@@ -444,6 +444,81 @@ static void selftest_ax() {
         (double)(t2 - t1) / FRAMES, (double)(t1 - t0) / FRAMES);
 }
 
+// ---- AX frames: runtime/hw/dsp_ax.cpp's command lists (SETUP, the voices, OUTPUT) against the
+// definitions in engine/audio/ax_reference.h, frame after frame: the buses' ramps (as a rule all
+// zero, now and then not), voices of every kind (the PB list), the master volume at 1.0, at
+// another volume, and changing (a ramp over the frame); the output, the surround buffer and every
+// PB must agree.
+void dsp_ax_command_list(u32 list_addr, u32 words);
+
+static void selftest_axframe() {
+    const u32 data = 0x90FF8000, data_size = 0x10000;
+    const u32 list = 0x81710000, setup_buf = 0x81710200, surround = 0x81710400, lr = 0x81710600;
+    const u32 surround_ref = 0x81710800, lr_ref = 0x81710A00, pbs_nat = 0x81720000, pbs_ref = 0x81730000;
+    axref::Rng rnd{4242};
+    axref::test_data(rnd, data, data_size);
+    static s32 ref_buf[12][axref::SPF];
+    u16 last_master = 0x8000, volume = 0x8000;
+    int bad = 0, frames = 0, voice_no = 0;
+    for (int f = 0; f < 600 && bad < 5; f++, frames++) {
+        // the set-up: zero, or ramps
+        bool ramps = rnd() % 4 == 0;
+        for (u32 b = 0; b < 12; b++) {
+            u32 v = ramps && rnd() % 2 ? rnd() * 37u : 0;
+            store16(setup_buf + 6 * b, (u16)(v >> 16)), store16(setup_buf + 6 * b + 2, (u16)v);
+            store16(setup_buf + 6 * b + 4, (u16)(ramps && rnd() % 2 ? rnd() : 0));
+        }
+        // a new voice list now and then (PBs 0x140 apart, as the SDK lays them out)
+        static u32 voices = 0;
+        if (f % 8 == 0) {
+            voices = rnd() % 6;
+            for (u32 v = 0; v < voices; v++) {
+                u16 w[0xD6 / 2];
+                if (!axref::edge_voice(voice_no++, w, data))
+                    axref::random_voice(rnd, w, data, data_size);
+                for (u32 k = 0; k < 0x140; k += 2) {
+                    u16 x = k < 0xD6 ? w[k / 2] : 0;
+                    store16(pbs_nat + 0x140 * v + k, x), store16(pbs_ref + 0x140 * v + k, x);
+                }
+                u32 next = v + 1 < voices ? 0x140 * (v + 1) : 0;
+                store32(pbs_nat + 0x140 * v, next ? pbs_nat + next : 0);
+                store32(pbs_ref + 0x140 * v, next ? pbs_ref + next : 0);
+            }
+        }
+        // the master volume: as a rule 1.0; now and then another, held or changed every frame
+        u32 k = rnd() % 8;
+        volume = k < 5 ? 0x8000 : k == 5 ? volume : (u16)(rnd() % 3 ? rnd() % 0x10000 : rnd() % 0x8001);
+        u32 a = list;
+        auto cmd16 = [&](u16 v) { store16(a, v), a += 2; };
+        auto cmd32 = [&](u32 v) { cmd16((u16)(v >> 16)), cmd16((u16)v); };
+        cmd16(0x00), cmd32(setup_buf);
+        cmd16(0x04), cmd32(voices ? pbs_nat : 0);
+        cmd16(0x0B), cmd16(volume), cmd32(surround), cmd32(lr);
+        cmd16(0x0E);
+        dsp_ax_command_list(list, (a - list) / 2);
+        // the definition
+        axref::setup(ref_buf, setup_buf);
+        for (u32 v = 0; v < voices; v++) {
+            axref::Pb pb;
+            pb.read(pbs_ref + 0x140 * v);
+            axref::process_voice(pb, ref_buf);
+            pb.write();
+        }
+        axref::output(ref_buf, last_master, surround_ref, lr_ref, volume);
+        bool same = true;
+        for (u32 i = 0; i < 4 * axref::SPF && same; i += 4)
+            same = load32(surround + i) == load32(surround_ref + i) && load32(lr + i) == load32(lr_ref + i);
+        for (u32 i = 0; i < 0x140 * voices && same; i += 2)  // (but each list's links)
+            same = i % 0x140 < 4 || load16(pbs_nat + i) == load16(pbs_ref + i);
+        if (!same) {
+            bad++;
+            log("selftest axframe: frame %d differs (%u voices, master volume %04X, buses %s)", f, voices, volume,
+                ramps ? "ramping" : "zero");
+        }
+    }
+    log("selftest axframe: %d frames, %s", frames, bad ? "MISMATCH" : "ok");
+}
+
 namespace cxref = engine::cx::reference;
 
 // A random LZ10 (ex = false) or LZ11 stream of about n bytes, made token by token. kind 0: valid;
@@ -934,7 +1009,7 @@ bool run_selftest(const std::string& name) {
     else if (name == "mtx")
         selftest_mtx();
     else if (name == "ax")
-        selftest_ax();
+        selftest_ax(), selftest_axframe();
     else if (name == "cx")
         selftest_cx();
     else if (name == "fill")
@@ -949,6 +1024,7 @@ bool run_selftest(const std::string& name) {
         selftest_strtol();
         selftest_mtx();
         selftest_ax();
+        selftest_axframe();
         selftest_cx();
         selftest_fill();
     }

@@ -293,6 +293,33 @@ inline bool edge_voice(u32 i, u16 (&w)[0xD6 / 2], u32 data) {
     return true;
 }
 
+// ---------------------------------------------------------------- the command list's own work
+// SETUP: each bus starts as a ramp (value, delta)
+inline void setup(s32 (*s_buf)[SPF], u32 addr) {
+    for (int b = 0; b < 12; b++) {
+        u32 a = addr + 6 * b;
+        s32 v = (s32)((u32)guest::load16(a) << 16 | guest::load16(a + 2));
+        s16 d = (s16)guest::load16(a + 4);
+        for (u32 i = 0; i < SPF; i++)
+            s_buf[b][i] = (s32)((u32)v + (u32)((s32)i * d));
+    }
+}
+// OUTPUT: S to the surround buffer; L and R at the master volume, ramping from the last frame's
+// (last_master) to this one's, clamped, as 16-bit R L pairs
+inline void output(s32 (*s_buf)[SPF], u16& last_master, u32 surround_addr, u32 lr_addr, u16 volume) {
+    for (u32 i = 0; i < SPF; i++)
+        guest::store32(surround_addr + 4 * i, (u32)s_buf[MAIN_S][i]);
+    u16 v0 = last_master;
+    for (u32 i = 0; i < SPF; i++) {
+        s32 vol = v0 + (s32)(volume - v0) * (s32)i / (s32)SPF;
+        s16 l = clamp16((s32)(((s64)s_buf[MAIN_L][i] * vol) >> 15));
+        s16 r = clamp16((s32)(((s64)s_buf[MAIN_R][i] * vol) >> 15));
+        guest::store16(lr_addr + 4 * i, (u16)r);
+        guest::store16(lr_addr + 4 * i + 2, (u16)l);
+    }
+    last_master = volume;
+}
+
 // a random voice for the tests, as PB words: every format with addresses in [data, data + size)
 // (the caller fills that with random bytes), loops and streams, every SRC type, ratios (now and
 // then more input per output than the renderer's buffer), the mixer control with every bus and

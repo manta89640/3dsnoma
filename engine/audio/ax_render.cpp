@@ -220,7 +220,20 @@ struct Accel {
             u32 fa = (cur >> 1) & ~7u;  // the frame's first byte
             const u8* f = ram(fa);
             u32 j = cur & 15;  // the nibble in the frame
-            if (j == 0) {      // the header: predictor and scale for 14 samples
+            if (j == 0 && n >= 14 && f) {
+                // whole frames, as many as the request, the page and the end address leave: an end
+                // on a sample of frame m (its nibbles 2..15) ends the run before that frame; an end
+                // on a header is never reached (the address moves past it)
+                u32 dist = end - cur, frames = std::min(n / 14, page_room(fa) / 8);
+                if ((dist & 15) >= 2)
+                    frames = std::min(frames, dist >> 4);
+                if (frames) {
+                    frames_whole(f, frames, out);
+                    cur += 16 * frames, out += 14 * frames, n -= 14 * frames;
+                    continue;
+                }
+            }
+            if (j == 0) {  // the header: predictor and scale for 14 samples
                 pred = f ? f[0] : guest::load8(sample_addr(fa));
                 cur += 2, j = 2;
             }
@@ -242,6 +255,31 @@ struct Accel {
                 at_end();
         }
         memset(out, 0, n * sizeof(s16));  // (past the end)
+    }
+
+    // `frames` whole frames from f on: 14 samples each, every frame's header read
+    void frames_whole(const u8* f, u32 frames, s16* out) {
+        f = (const u8*)__builtin_assume_aligned(f, 8);
+        s32 y1 = (s16)hist, y2 = (s16)(hist >> 16);
+        const u32 M = opaque(0xF0000000u);
+        u32 p = 0;
+        do {
+            u32 w0 = __builtin_bswap32(load32(f)), w1 = __builtin_bswap32(load32(f + 4));  // nibble k at bits 31 - 4k
+            p = w0 >> 24;
+            u32 coefs = pb.pair(PB_COEFS + 4 * ((p >> 4) & 7));
+            s32 sc = 0x8000 << (p & 15);
+            auto one = [&](u32 t) {
+                s32 s = adpcm_sample(t & M, sc, coefs, y1, y2);
+                y2 = y1, y1 = s;
+                *out++ = (s16)s;
+            };
+            one(w0 << 8), one(w0 << 12), one(w0 << 16), one(w0 << 20), one(w0 << 24), one(w0 << 28);
+            one(w1), one(w1 << 4), one(w1 << 8), one(w1 << 12), one(w1 << 16), one(w1 << 20), one(w1 << 24);
+            one(w1 << 28);
+            f += 8;
+        } while (--frames);
+        pred = (u16)p;
+        hist = (u16)y1 | (u32)y2 << 16;
     }
 
     // samples j .. j + n - 1 of frame f (its nibbles j on, j >= 1, all within the frame)

@@ -47,6 +47,18 @@ inline s16 clamp16(s32 v) { return (s16)std::min<s32>(32767, std::max<s32>(-3276
 inline u32 w32(u32 addr) { return load32(addr); }
 // an address the CPU put in a list or PB (physical, or a cached/uncached pointer): main memory
 inline u32 mem(u32 a) { return a ? (0x80000000u | (a & 0x1FFFFFFF)) : 0; }
+// the n bytes at a as host memory, if they are RAM on one page (else nullptr: through the guest's
+// loads and stores, as hardware registers would be)
+inline u8* span(u32 a, u32 n) {
+    u8* p = host_ptr(a);
+    return p && (a & (PAGE_SIZE - 1)) + n <= PAGE_SIZE ? p : nullptr;
+}
+inline u32 rd32(const u8* p) {
+    u32 v;
+    memcpy(&v, p, 4);
+    return v;
+}
+inline void wr32(u8* p, u32 v) { memcpy(p, &v, 4); }
 
 // ---------------------------------------------------------------- voices
 // PB words the command list reads itself (the voices are engine::audio::ax_render_voice's)
@@ -56,14 +68,20 @@ enum : u32 {
 };
 
 // ---------------------------------------------------------------- commands
-// SETUP: each buffer starts as a ramp (value, delta): the CPU's depop of stopped voices
+// SETUP: each buffer starts as a ramp (value, delta): the CPU's depop of stopped voices; as a
+// rule all zero
 void setup(u32 addr) {
     for (int b = 0; b < 12; b++) {
         u32 a = addr + 6 * b;
-        s32 v = (s32)((u32)load16(a) << 16 | load16(a + 2));
-        s16 d = (s16)load16(a + 4);
-        for (u32 i = 0; i < SPF; i++)
-            s_buf[b][i] = v + (s32)i * d;
+        u32 v = (u32)load16(a) << 16 | load16(a + 2);
+        u32 d = (u32)(s32)(s16)load16(a + 4);
+        s32* out = s_buf[b];
+        if (d == 0 && v == 0) {
+            memset(out, 0, sizeof(s_buf[b]));
+        } else {
+            for (u32 i = 0; i < SPF; i++, v += d)  // (v + i * d, wrapping)
+                out[i] = (s32)v;
+        }
     }
 }
 
@@ -84,8 +102,15 @@ void add_sub_to_lr(u32 addr) {
 
 int process_pbs(u32 addr) {
     static int s_logged;
+    static const bool s_debug = getenv("NOMA_DEBUG_AX") != nullptr;
     int running = 0;
     for (int guard = 0; addr && guard < 256; guard++) {
+        const u8* p = span(addr, 0x140);
+        if (p && !s_debug && s_logged >= 6) {  // (the PB in place, as ax_render_voice reads it)
+            running += engine::audio::ax_render_voice(addr, s_buf);
+            addr = mem(__builtin_bswap32(rd32(p + PB_NEXT)));
+            continue;
+        }
         bool on = load16(addr + PB_RUNNING) == 1;
         if (s_logged < 6 && on) {
             s_logged++;
@@ -95,7 +120,6 @@ int process_pbs(u32 addr) {
                 load32(addr + PB_MIXCTRL), load16(addr + PB_VE));
         }
         running += on;
-        static const bool s_debug = getenv("NOMA_DEBUG_AX") != nullptr;
         if (s_debug && on && load16(addr + 0xD6)) {
             static int n;
             if (n++ < 5)  // (not mixed: the 3DS has no Wii Remote speaker)
@@ -124,19 +148,42 @@ void mix_aux(int aux, u32 write_addr, u32 read_addr, u16 volume) {
     s_last_aux[aux] = volume;
 }
 
-// the frame: S to the surround buffer, L and R clamped, as 16-bit R L pairs
+// the frame: S to the surround buffer, L and R at the master volume (ramping from the last
+// frame's to this one's) and clamped, as 16-bit R L pairs. As a rule the volume stays the same (no
+// ramp, no division), at 1.0 (the sum only clamped), and both buffers are RAM.
 void output(u32 surround_addr, u32 lr_addr, u16 volume) {
-    for (u32 i = 0; i < SPF; i++)
-        store32(surround_addr + 4 * i, (u32)s_buf[MAIN_S][i]);
     u16 v0 = s_last_master;
-    for (u32 i = 0; i < SPF; i++) {
-        s32 vol = v0 + (s32)(volume - v0) * (s32)i / (s32)SPF;
-        s16 l = clamp16((s32)(((s64)s_buf[MAIN_L][i] * vol) >> 15));
-        s16 r = clamp16((s32)(((s64)s_buf[MAIN_R][i] * vol) >> 15));
-        store16(lr_addr + 4 * i, (u16)r);
-        store16(lr_addr + 4 * i + 2, (u16)l);
-    }
     s_last_master = volume;
+    u8* s_out = span(surround_addr, 4 * SPF);
+    u8* lr_out = span(lr_addr, 4 * SPF);
+    if (s_out) {
+        for (u32 i = 0; i < SPF; i++)
+            wr32(s_out + 4 * i, __builtin_bswap32((u32)s_buf[MAIN_S][i]));
+    } else {
+        for (u32 i = 0; i < SPF; i++)
+            store32(surround_addr + 4 * i, (u32)s_buf[MAIN_S][i]);
+    }
+    auto pair = [&](u32 i, s16 l, s16 r) {  // (R then L, big-endian)
+        if (lr_out) {
+            wr32(lr_out + 4 * i, (u32)(u16)__builtin_bswap16((u16)r) | (u32)__builtin_bswap16((u16)l) << 16);
+        } else {
+            store16(lr_addr + 4 * i, (u16)r);
+            store16(lr_addr + 4 * i + 2, (u16)l);
+        }
+    };
+    if (volume == v0 && volume == 0x8000) {
+        for (u32 i = 0; i < SPF; i++)
+            pair(i, clamp16(s_buf[MAIN_L][i]), clamp16(s_buf[MAIN_R][i]));
+    } else if (volume == v0) {
+        for (u32 i = 0; i < SPF; i++)
+            pair(i, clamp16((s32)(((s64)s_buf[MAIN_L][i] * volume) >> 15)),
+                 clamp16((s32)(((s64)s_buf[MAIN_R][i] * volume) >> 15)));
+    } else {
+        for (u32 i = 0; i < SPF; i++) {
+            s32 vol = v0 + (s32)(volume - v0) * (s32)i / (s32)SPF;
+            pair(i, clamp16((s32)(((s64)s_buf[MAIN_L][i] * vol) >> 15)), clamp16((s32)(((s64)s_buf[MAIN_R][i] * vol) >> 15)));
+        }
+    }
 }
 
 }  // namespace
