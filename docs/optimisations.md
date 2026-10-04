@@ -22,6 +22,9 @@ Rules:
 | Native AX voice renderer: the Wii DSP's voice pipeline in C++, every voice, no 24-voice limit | `engine/audio/ax_render.cpp` | Replaced the emulated reference. Bit-exact (`NOMA_SELFTEST=ax`). |
 | Block renderer: ADPCM decoded a frame at a time straight from RAM; resampler planned in closed form, envelope folded in; muted voices and zero-volume buses only accounted for; PB copied a word at a time | `engine/audio/ax_render.cpp` | Room voice: 14,719 → 4,802 ARM11 instructions per 3 ms frame. Bit-exact on host and ARM. |
 | ARM11 DSP instructions in the mixer: SMLAD for the ADPCM predictor, PKHBT for its history, SSAT with shift for clamps, SMLAWB/SMLAWT to mix two samples per load (no clamp needed at volumes ≤ 1.0), REV16 for PB byte swaps | same | Included in the number above. |
+| AX voices scheduled for the ARM11's pipeline (ARM DDI 0360F ch. 15: MUL/MLA issue in 2 cycles with 4 to the result, SMULxy/SMLAWy/SMLAD in 1 with 3; loads 3; a shifted operand, a base or a multiplier wants its value a cycle early). ADPCM: runs of whole frames in one loop, a frame read with one LDM, each nibble masked out of the frame's words and scaled by SMLAWT (no MUL), the predictor as SMLATB + SMLABB so one 1-cycle multiply and the SSAT are all that lie between one sample and the next. The voice that is mixed into main L and R only at fixed volumes up to 1.0, without filters (91.7% of the room's voice frames, `NOMA_DEBUG_AX` counts them by path), in one pass: interpolated with SMLAWB plus the fraction's sign (exact), enveloped with SMULWB (no clamp up to 1.0), mixed with SMLAWB, in a software-pipelined loop of ARM assembly (GCC's code stalled on nearly every multiply and load); the PB read and written in place, only the words used | `engine/audio/ax_render.cpp` | Room voice (`tools/armbench/armbench.py`): 4,777 → 2,952 instructions, est. 8,439 → 3,771 ARM11 cycles a frame (`--cycles`; every access an L1 hit). Bit-exact: `NOMA_SELFTEST=ax` and the ARM run on 8,000 random voices, half shaped like the game's, after a fixed list of edge voices (envelope ramps onto 0, 1.0 and just past it on runs of ±32767 samples, volumes at and above 1.0, 511/512/513 input samples); every mutation of the new paths is caught but one buffer bound's. |
+| The AX frame around the voices: SETUP fills a zero bus with memset and a ramp by addition; OUTPUT with the master volume held (the rule, at 1.0) without the ramp's division per sample (the ARM11 has no divide instruction: each was a library call) and through the buffers' host pointers; the PB list walked in place; no debug peak scan; the AI DMA's latch reads the frame a word at a time | `runtime/hw/dsp_ax.cpp`, `runtime/hw/dsp.cpp` | A whole frame (`armbench.py --frame N`, est. ARM11 cycles): no voices 14,278 → 7,075; 8 voices 82,027 → 37,916; 24 voices 218,564 → 99,320, i.e. 816 → 371 µs of the 3 ms at the Old 3DS's 268 MHz (272 → 124 µs at 804). The output's checksum is the original code's. `NOMA_SELFTEST=ax` runs 600 whole frames against the definitions (ramping buses, every kind of voice list, the master volume held, changed, at 1.0). |
+| nw4r::snd's voice update: the game's player hands every voice its output parameters every frame, which flags pitch, envelope, mix and filter for recalculation (measured on the host in the room: every active voice, every frame). Voice::CalcMixParam's results kept per voice, channel and output with the bits of its 19 inputs (the same bits, the same results); AxVoice::SetMix's 24 PB words and AxVoice::Sync's envelope written in word pairs, at the mix's targets without the step arithmetic | `engine/snd/voice.cpp`, `engine/snd/ax_voice.cpp` | `armbench.py --snd` (voices like the room's): est. 3,094 → 2,047 ARM11 cycles a voice a frame. The same state after every frame as the original on 200 random scenarios (`armbench.py --snd-diff 29eb580`: every output mode, pan curve and mode, one or two channels and outputs, remote speakers, ramps, voices starting, pausing and finishing; whole parameter sets or single fields changing, NaN, infinities, −0); every mutation of the new code is caught but an equivalent one. |
 | The Wii Remote, native: KPAD and WPAD answered with the 3DS's controls; the Bluetooth stack (BTE, WUD), the emulated Bluetooth controller and Wii Remote, the remote's speaker stream and rumble are gone | `engine/input/remote.cpp` | No Bluetooth pairing at boot, no 100 Hz report traffic through IPC, no speaker audio encoding. The pointer goes exactly where it's put. |
 | 3DS texture memory: compact PICA formats (LA4/LA8/RGB565/RGBA5551) instead of RGBA8, LRU eviction | `platform/3ds/gx_pica.cpp` | Glyphs and textures fit again. |
 | The transform unit as a PICA vertex shader (`gx.v.pica`, 138 instructions): the CPU only decodes the stream and follows the indices (model-space position, normal, color, up to three texgen sources, 64-byte vertices); the shader does the position matrix (a palette of 42 matrix rows as uniforms, indexed per vertex), the projection folded with the 3DS viewport transform, GX lighting (spot/none attenuation, diffuse modes, ambient/material from register or vertex, up to 8 lights in a loop) and texgens (2×4/3×4 matrices, post matrices with normalisation, q division); culling by the GPU | `platform/3ds/shaders/gx.v.pica`, `runtime/hw/gx/tnl.cpp`, `platform/3ds/gx_pica.cpp` | Measured, Azahar room: GPU-thread vertex cost 11 → 7 ms per frame before the cache below, 1.5 → 20 fps overall with it. Verified by running the real shader binary in a PICA interpreter (`runtime/hw/gx/pica_vsh.cpp`, `NOMA_CHECK_GX_DRAW=pica NOMA_GX_SHBIN=…`) against the reference transform: 780k room draws, 0 differ; a dump of one frame's draw calls (`NOMA_DUMP_BATCHES=N`) replays on the host with `tools/pica_replay.cpp`. |
@@ -52,20 +55,23 @@ Rules:
 
 ### Audio
 
-Measured in the room (host, 120,000 voice frames): every voice is ADPCM through the standard
-resampler at about 1.2 input samples per output, mixed only into main L+R at fixed volumes ≤ 1.0.
-77% of voices have a fixed envelope, 18% a ramping one, 4% are muted. No aux buses, no surround, no
-filters.
+Measured in the room (host, 3 minutes, `NOMA_DEBUG_AX`): up to 27 voices a frame; 91.7% of voice
+frames take the one-pass path (fixed envelope 83%, ramping 8.3%, none at exactly 1.0 or above it),
+8.2% are muted (their samples are only decoded), 0.1% use another bus, a filter or SRC type 2. Every
+voice is ADPCM. nw4r::snd recalculates every voice's pitch, envelope, mix and filter every frame.
+Estimates below are ARM11 cycles from `armbench.py --cycles` (L1 hits only).
 
 | What | Expected | Effort | Exact? |
 |---|---|---|---|
-| ADPCM: keep the rounding constant in a register so each sample is one MLA, not MUL+ADD | −2 instructions per byte | Small | Yes |
-| ADPCM: decode whole frames in one loop (one header read, then 7 bytes) until the end address, a page edge or the request; checks only where the end falls inside a frame | ≈ −200 instructions per voice frame | Small | Yes |
-| Read only the PB words the voice uses, and write back only the ones it changed | ≈ −250 instructions per voice frame | Small | Yes |
-| Resampler, upsampling (ratio < 1): consecutive outputs share their two input samples | Fewer loads | Small | Yes |
+| The sound thread's other parts, benched like the voice update: Channel::Update (envelope, LFO, sweep, 18 voice setters per channel per frame) and the sequencer's tick | (snd channels) and (snd sequences) were 2.9% and 2.3% of core 0 in Azahar's room profile | Medium | Yes, with a `--snd-diff`-style scenario for them |
+| PLD (data preload) of the next voice's PB and samples while this one renders: the L1 data cache takes up to three outstanding read misses (ARM DDI 0360F §1.3.2), and between two AX frames the game's own code evicts the 16 KB cache, so a voice frame meets ~10 misses (7 PB lines, 2-3 sample lines); the Old 3DS has no L2 | Hides FCRAM latency per voice; unmeasurable here (Unicorn and Azahar model no caches) | Small | Yes |
+| Main L and R interleaved in the bus buffer, so the one-pass loop updates a sample's pair with LDRD/STRD (−2 instructions a sample) | est. ~200 cycles a voice frame | Medium (every bus user: dsp_ax.cpp, the generic mixing, the tests) | Yes |
+| Render each voice's samples to a small buffer and mix voices into the buses two at a time (each bus word loaded and stored once per two voices), the interpolation loop then free to work on two samples at a time | est. ~15 instead of ~19 cycles a sample | Medium | Yes (the buses' wrapping sums don't depend on the order) |
+| Aux buses zeroed only when something mixes into or reads them (SETUP fills all twelve; the room uses main L, R and S) | est. ~1,800 cycles a frame | Small | Yes |
+| ADPCM's partial frames (where a voice frame starts and ends inside an ADPCM frame) entered into the unrolled frame code instead of the nibble loop | est. ~100 cycles a voice frame | Small | Yes |
+| The voice update per AX voice (pitch, envelope, mix, filter in one visit, each object's host address resolved once) instead of per kind of update | est. ~200 of the 2,047 cycles a voice | Small | Yes (each AX voice's state is its own) |
+| Decode-once cache: non-streamed ADPCM decoded to PCM16 once, keyed by address, end, loop, coefficients, start/loop context and memory write generation; a voice may use it where its position and history match the cache's | The ADPCM's ~7.5 cycles a sample for looped instrument samples, for 3.5× their memory as PCM16 (the Old 3DS has none to spare) | Medium | Yes, if the key is complete |
 | Biquad: the 5-tap sum with SMLALD (64-bit) | Only if the game turns biquads on (it hasn't so far) | Small | Yes |
-| Decode-once cache: non-streamed ADPCM decoded to PCM16 once, keyed by address, end, loop, coefficients, start/loop context and memory write generation | The ADPCM cost disappears for looped instrument samples | Medium | Yes, if the key is complete |
-| Mix two voices per pass over the buses (each bus word loaded and stored once per two voices) | Fewer bus loads and stores | Medium | Yes |
 
 ### Wii parts with no purpose on a 3DS
 
@@ -142,11 +148,31 @@ What the program does only because it runs on a Wii, and what replaces it.
   decoders get the gain without it.
 - **Maths that needs FMA, NEON, or correctly rounded libraries for game logic.** The ARM11 has
   none of them, and they change results.
+- **Mixing in floating point** (as engines with SIMD floats do): the ARM11's VFP has no vectors
+  worth the name and its results wouldn't be the DSP's integers; the ARMv6 DSP instructions (16-bit
+  halves, saturation, 32×16 multiplies) do the AX's arithmetic exactly.
+- **The ADPCM predictor without the saturation in its chain** (a plain shift, the clamp checked
+  after the frame): the check costs more instructions than the cycle of latency it saves; the
+  in-order ARM11 is then issue-bound, not latency-bound.
+- **Folding the envelope into the mix volumes** (one multiply instead of two): the two roundings
+  (`(s × ve) >> 15`, then `(e × vol) >> 15`) can't be one, so it can't be exact.
 
 ## ARM11 kernel bench
 
 Compile an engine kernel with the 3DS build's flags, link a small driver
 (`arm-none-eabi-g++ -nostartfiles -Wl,-e,bench`), and run it under Unicorn (`pip install unicorn
-pyelftools`). Counting executed instructions per call shows each change's effect without a
+pyelftools capstone`). Counting executed instructions per call shows each change's effect without a
 device. Running the same inputs through the old and new code and hashing every output compares
 the ARM-only paths (DSP intrinsics, inline asm), which the host self-tests can't reach.
+
+`tools/armbench/armbench.py`: the AX voice renderer by kind of voice and its exactness on random
+voices (default), `--lines KIND` per source line, `--frame N` a whole AX frame with N voices,
+`--snd N` nw4r::snd's voice update, `--snd-diff REV` that update against a git revision's,
+`--cx` the decompressors. `--cycles` adds an estimate of ARM11 cycles
+(`tools/armbench/arm11_timing.py`): the MPCore TRM's issue cycles, result latencies, Early/Late
+registers and load/store unit (ARM DDI 0360F, chapter 15) applied to the instructions as they run,
+with its branch predictor (128 entries, 2-bit counters, static fallback) and return stack. It
+assumes every access hits the L1 cache and doesn't fold branches: a lower bound, for comparing
+versions of a kernel. Instruction counts and the estimate both ignore what the 3DS's memory
+costs: on the Old 3DS (268 MHz, no L2; the New 3DS has 804 MHz and a 2 MB L2, per 3dbrew's hardware
+page) a miss to FCRAM is far dearer than on the host.
