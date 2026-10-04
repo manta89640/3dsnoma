@@ -35,11 +35,11 @@ static void mkdirs_for(const std::string& path) {
 
 // ---------------------------------------------------------------------------- files
 // The file system's work is done on the I/O thread (ios.cpp: host_io), in the order the requests
-// came. Writes are buffered (64 KB): on the 3DS every unbuffered write is an SD card access. Reads
-// of a file opened only to read go through a small buffer: the stdio buffer is what the card reads
-// at once, and the channel's reads are a few bytes to a few KB (a 64 KB buffer made each a 12 ms
-// card access in Azahar). Handles of the same file see each other's writes: a handle flushes the
-// others before it reads or measures the file.
+// came. Writes are buffered (64 KB): on the 3DS every unbuffered write is an SD card access. A file
+// opened only to read is unbuffered: each read is one card access of its own size (a 64 KB buffer
+// made a 128-byte read a 64 KB one, 12 ms in Azahar; a small buffer makes a 32 KB read eight, as
+// stdio refills it a buffer at a time). Handles of the same file see each other's writes: a handle
+// flushes the others before it reads or measures the file.
 class FsFile;
 static std::vector<FsFile*> s_open_files;
 
@@ -213,10 +213,12 @@ public:
     }
 };
 
-// a file moved between /tmp and the card (Rename across the two)
+// a file moved between /tmp and the card (Rename across the two: the channel writes its save to
+// /tmp, then moves it), in as few SD accesses as it takes: unbuffered, whole
 std::shared_ptr<RamFile> load_host_file(const std::string& host) {
     auto file = std::make_shared<RamFile>();
     if (FILE* f = fopen(host.c_str(), "rb")) {
+        setvbuf(f, nullptr, _IONBF, 0);
         std::vector<u8> buf(64 * 1024);
         size_t n;
         while ((n = fread(buf.data(), 1, buf.size(), f)) > 0)
@@ -229,14 +231,11 @@ bool save_host_file(const RamFile& file, const std::string& host) {
     FILE* f = fopen(host.c_str(), "wb");
     if (!f)
         return false;
-    std::vector<u8> buf(PAGE);
-    for (u32 pos = 0; pos < file.size; pos += PAGE) {
-        u32 n = std::min(PAGE, file.size - pos);
-        file.read(buf.data(), pos, n);
-        fwrite(buf.data(), 1, n, f);
-    }
-    fclose(f);
-    return true;
+    setvbuf(f, nullptr, _IONBF, 0);
+    std::vector<u8> buf(file.size);
+    file.read(buf.data(), 0, file.size);
+    bool ok = fwrite(buf.data(), 1, buf.size(), f) == buf.size();
+    return fclose(f) == 0 && ok;
 }
 
 }  // namespace
@@ -278,7 +277,10 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
     h->mode = mode;
     h->host = host;
     h->f = f;
-    setvbuf(h->f, nullptr, _IOFBF, (mode & 2) ? 64 * 1024 : 4 * 1024);
+    if (mode & 2)
+        setvbuf(h->f, nullptr, _IOFBF, 64 * 1024);
+    else
+        setvbuf(h->f, nullptr, _IONBF, 0);
     h->size = (long)st.st_size;
     s_open_files.push_back(h.get());
     return h;
