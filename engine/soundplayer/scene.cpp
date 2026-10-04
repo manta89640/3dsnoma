@@ -185,6 +185,7 @@ void SoundPlayerScene::leave() {
     if (leaving_)
         return;
     leaving_ = true;
+    music_->leave();  // the player's piece stops as the screen goes
     guest::log("soundplayer: back to the room");
     game::change_scene_with_wipe(guest(), game::NAME_LIVING_ROOM_SCENE, game::WIPE_FADE_WHITE);
 }

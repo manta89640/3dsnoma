@@ -20,18 +20,21 @@ struct Beat {
     double beats = 0;     // quarter notes since the piece started, with the fraction
 };
 
+// Pieces start and stop cleanly, at once: no crossfades or fades in the player (a new piece cuts
+// the last one off and starts from its first note; pause and resume take effect at once).
 class Music {
 public:
-    // The room's theme goes on playing into the screen, as the piece playing; crossfades are
-    // made short (half a second) while the screen is open.
-    Music();
-    // Leaving: the fade length goes back, and a paused piece plays again (the room, made again
-    // next, asks for its theme, and that request does nothing if its theme is the piece current,
-    // paused or not).
-    ~Music();
+    // The room's theme goes on playing into the screen, as the piece playing.
+    Music() {}
+    // Leaving (also called by the scene as its wipe starts, so the music stops with the screen):
+    // the piece the player started stops at once; the room's theme, if it still plays, plays on
+    // into the room, and is resumed if it was paused (the room, made again next, asks for its
+    // theme, and that request does nothing if its theme is the piece current, paused or not).
+    ~Music() { leave(); }
+    void leave();
 
-    // play this sound (an ID of the archive): fades the last piece out and this one in; the piece
-    // playing again is resumed if paused, restarted if it had ended
+    // play this sound (an ID of the archive), cutting off the last piece; the piece current is
+    // resumed if paused, played again if it had ended, and left alone if it plays
     void play(u32 sound_id);
     void pause();
     void resume();
@@ -43,9 +46,6 @@ public:
     static const u32 NO_SOUND = ~0u;
 
     Beat beat() const;
-
-private:
-    s32 saved_fade_frames_;
 };
 
 }  // namespace engine::soundplayer
