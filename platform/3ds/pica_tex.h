@@ -13,15 +13,16 @@
 // (half the passes over the texels, no temporary of w*h*4 bytes); for any format but the few that
 // have to be resampled the same texture memory as from_rgba of the decoded image, byte for byte.
 #pragma once
+#include <algorithm>
 #include <cstring>
 
 #include "runtime/hw/gx/gx.h"
 
 namespace guest::pica_tex {
 
-enum Fmt : u8 { LA4, LA8, RGB565, RGBA5551, RGBA8, L8, L4 };
+enum Fmt : u8 { LA4, LA8, RGB565, RGBA5551, RGBA8, L8, L4, ETC1, ETC1A4 };
 
-inline u32 texel_bits(Fmt f) { return f == L4 ? 4 : f == LA4 || f == L8 ? 8 : f == RGBA8 ? 32 : 16; }
+inline u32 texel_bits(Fmt f) { return f == L4 || f == ETC1 ? 4 : f == LA4 || f == L8 || f == ETC1A4 ? 8 : f == RGBA8 ? 32 : 16; }
 
 // a 4-bit texel's store: two to a byte
 struct Nib {};
@@ -142,11 +143,359 @@ inline void pad(u8* out, const Places& pl, u32 w, u32 h, u32 W, u32 H) {
 
 }  // namespace detail
 
+// ---- CMPR (GX's DXT1) as ETC1 or ETC1A4: a quarter (half with alpha) of RGBA5551, lossy. Each 8x8
+// tile holds four 4x4 blocks (left to right, then down), each a little-endian 64-bit ETC1 word
+// (ETC1A4: after a 64-bit word of 4-bit alphas); texel i = 4 * x + y within the block, its index
+// bits at i (which of the table's two magnitudes) and 16 + i (negated). Encoded per block: the
+// flip that splits its colors best, base colors differential where they are close enough (5 bits)
+// else individual (4 bits), and for each half the modifier table with the least error over its
+// (few: DXT1 blocks have four colors) distinct colors.
+namespace etc1 {
+
+const int MOD[8][2] = {{2, 8}, {5, 17}, {9, 29}, {13, 42}, {18, 60}, {24, 80}, {33, 106}, {47, 183}};
+inline int clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+// an 8-bit channel to 5 and 4 bits, rounded (tables: the ARM11 has no divide)
+struct Quant {
+    u8 q5[256], q4[256];
+    constexpr Quant() : q5(), q4() {
+        for (int v = 0; v < 256; v++)
+            q5[v] = (u8)((v * 31 + 127) / 255), q4[v] = (u8)((v * 15 + 127) / 255);
+    }
+};
+constexpr Quant QUANT;
+inline int ch(u32 c, int k) { return (int)((c >> (8 * k)) & 255); }
+
+// a half's texels (indices into the block) around base b[3]: the table, and per texel its code (bit
+// 0: the larger magnitude, bit 1: negated). The modifiers add one value to all three channels, so a
+// texel is matched by its summed offset from the base (clamping left out); only the tables around
+// the one whose range fits the half's largest offset are tried
+inline void fit_half(const u32* px, const u8* texels, const int* b, int* table, u8* code) {
+    int sv[8], nd = 0, which[8], cnt[8], maxs = 0;
+    for (int i = 0; i < 8; i++) {
+        const u32 c = px[texels[i]];
+        const int v = ch(c, 0) + ch(c, 1) + ch(c, 2) - b[0] - b[1] - b[2];
+        int d = 0;
+        while (d < nd && sv[d] != v)
+            d++;
+        if (d == nd)
+            sv[nd] = v, cnt[nd++] = 0;
+        cnt[d]++, which[i] = d;
+        maxs = std::max(maxs, v < 0 ? -v : v);
+    }
+    int t0 = 0;
+    while (t0 < 7 && 3 * MOD[t0][1] < maxs)
+        t0++;
+    u32 best = ~0u;
+    u8 dcode[8], best_code[8] = {};
+    for (int t = std::max(0, t0 - 1); t <= std::min(7, t0 + 1); t++) {
+        const int a3 = 3 * MOD[t][0], b3 = 3 * MOD[t][1];
+        u32 err = 0;
+        for (int d = 0; d < nd; d++) {
+            const int m = sv[d] < 0 ? -sv[d] : sv[d];
+            const int ea = m - a3, eb = m - b3;
+            const bool large = eb * eb < ea * ea;
+            dcode[d] = (u8)((large ? 1 : 0) | (sv[d] < 0 ? 2 : 0));
+            err += (u32)(large ? eb * eb : ea * ea) * (u32)cnt[d];
+        }
+        if (err < best) {
+            best = err, *table = t;
+            for (int d = 0; d < nd; d++)
+                best_code[d] = dcode[d];
+        }
+    }
+    for (int i = 0; i < 8; i++)
+        code[i] = best_code[which[i]];
+}
+
+// one block: px[16] (0xAABBGGRR, texel i = 4 * x + y) -> the ETC1 word
+inline u64 encode(const u32* px) {
+    // the halves by x (flip 0) or by y (flip 1): the split whose halves' averages differ the most
+    u8 half[2][2][8];
+    int sum[2][2][3] = {};
+    for (int f = 0; f < 2; f++) {
+        int n[2] = {0, 0};
+        for (int i = 0; i < 16; i++) {
+            const int hh = ((f ? (i & 3) : (i >> 2)) >= 2);
+            half[f][hh][n[hh]++] = (u8)i;
+            for (int c = 0; c < 3; c++)
+                sum[f][hh][c] += ch(px[i], c);
+        }
+    }
+    int sep[2];
+    for (int f = 0; f < 2; f++) {
+        sep[f] = 0;
+        for (int c = 0; c < 3; c++) {
+            const int d = sum[f][1][c] - sum[f][0][c];
+            sep[f] += d < 0 ? -d : d;
+        }
+    }
+    const int flip = sep[1] > sep[0] ? 1 : 0;
+    // base colors: 5-bit with a 3-bit difference when it fits, else 4-bit each
+    int q5[2][3], q4[2][3];
+    bool diff = true;
+    for (int hh = 0; hh < 2; hh++)
+        for (int c = 0; c < 3; c++) {
+            const int avg = (sum[flip][hh][c] + 4) >> 3;
+            q5[hh][c] = QUANT.q5[avg];
+            q4[hh][c] = QUANT.q4[avg];
+        }
+    for (int c = 0; c < 3; c++) {
+        const int d = q5[1][c] - q5[0][c];
+        diff &= d >= -4 && d <= 3;
+    }
+    int base[2][3];
+    for (int hh = 0; hh < 2; hh++)
+        for (int c = 0; c < 3; c++)
+            base[hh][c] = diff ? (q5[hh][c] << 3 | q5[hh][c] >> 2) : q4[hh][c] * 17;
+    int table[2];
+    u8 code[2][8];
+    for (int hh = 0; hh < 2; hh++)
+        fit_half(px, half[flip][hh], base[hh], &table[hh], code[hh]);
+    u64 v = (u64)flip << 32 | (u64)diff << 33 | (u64)table[1] << 34 | (u64)table[0] << 37;
+    for (int hh = 0; hh < 2; hh++)
+        for (int i = 0; i < 8; i++) {
+            const int t = half[flip][hh][i];
+            v |= (u64)(code[hh][i] & 1) << t | (u64)(code[hh][i] >> 1) << (16 + t);
+        }
+    if (diff) {
+        for (int c = 0; c < 3; c++) {
+            const int at = 40 + 8 * c;  // b at 40, g at 48, r at 56
+            v |= (u64)q5[0][2 - c] << (at + 3) | (u64)((q5[1][2 - c] - q5[0][2 - c]) & 7) << at;
+        }
+    } else {
+        for (int c = 0; c < 3; c++) {
+            const int at = 40 + 8 * c;
+            v |= (u64)q4[0][2 - c] << (at + 4) | (u64)q4[1][2 - c] << at;
+        }
+    }
+    return v;
+}
+
+// one block whose texels are four palette colors (a CMPR sub-block): mask[k] the texels (bit i, i =
+// 4 * x + y) with palette entry k; the same choices as encode() made per entry instead of per texel
+struct Popcount {
+    u8 n[256];
+    constexpr Popcount() : n() {
+        for (int v = 0; v < 256; v++)
+            n[v] = (u8)((v & 1) + ((v >> 1) & 1) + ((v >> 2) & 1) + ((v >> 3) & 1) + ((v >> 4) & 1) + ((v >> 5) & 1) +
+                        ((v >> 6) & 1) + ((v >> 7) & 1));
+    }
+};
+constexpr Popcount POPCOUNT;
+inline int pop16(u32 m) { return POPCOUNT.n[m & 255] + POPCOUNT.n[(m >> 8) & 255]; }
+
+inline u64 encode_palette(const u32* pal, const u16* mask) {
+    // the halves as texel masks: flip 0 by x (texels 0-7 | 8-15), flip 1 by y (y < 2 | y >= 2)
+    static const u16 HALF[2][2] = {{0x00FF, 0xFF00}, {0x3333, 0xCCCC}};
+    int pc[4][3];
+    for (int k = 0; k < 4; k++)
+        pc[k][0] = (int)(pal[k] & 255), pc[k][1] = (int)((pal[k] >> 8) & 255), pc[k][2] = (int)((pal[k] >> 16) & 255);
+    int cnt[2][2][4], sum[2][2][3];
+    for (int f = 0; f < 2; f++)
+        for (int hh = 0; hh < 2; hh++) {
+            int r = 0, g = 0, b = 0;
+            for (int k = 0; k < 4; k++) {
+                const int n = pop16(mask[k] & HALF[f][hh]);
+                cnt[f][hh][k] = n;
+                r += n * pc[k][0], g += n * pc[k][1], b += n * pc[k][2];
+            }
+            sum[f][hh][0] = r, sum[f][hh][1] = g, sum[f][hh][2] = b;
+        }
+    int sep[2];
+    for (int f = 0; f < 2; f++) {
+        sep[f] = 0;
+        for (int c = 0; c < 3; c++) {
+            const int d = sum[f][1][c] - sum[f][0][c];
+            sep[f] += d < 0 ? -d : d;
+        }
+    }
+    const int flip = sep[1] > sep[0] ? 1 : 0;
+    int q5[2][3], q4[2][3];
+    bool diff = true;
+    for (int hh = 0; hh < 2; hh++)
+        for (int c = 0; c < 3; c++) {
+            const int avg = (sum[flip][hh][c] + 4) >> 3;
+            q5[hh][c] = QUANT.q5[avg];
+            q4[hh][c] = QUANT.q4[avg];
+        }
+    for (int c = 0; c < 3; c++) {
+        const int d = q5[1][c] - q5[0][c];
+        diff &= d >= -4 && d <= 3;
+    }
+    int table[2];
+    u32 lsb = 0, msb = 0;
+    for (int hh = 0; hh < 2; hh++) {
+        int bsum = 0;
+        for (int c = 0; c < 3; c++)
+            bsum += diff ? (q5[hh][c] << 3 | q5[hh][c] >> 2) : q4[hh][c] * 17;
+        int sv[4], maxs = 0;
+        for (int k = 0; k < 4; k++) {
+            sv[k] = pc[k][0] + pc[k][1] + pc[k][2] - bsum;
+            if (cnt[flip][hh][k])
+                maxs = std::max(maxs, sv[k] < 0 ? -sv[k] : sv[k]);
+        }
+        int t0 = 0;
+        while (t0 < 7 && 3 * MOD[t0][1] < maxs)
+            t0++;
+        u32 best = ~0u;
+        u32 large_best = 0;
+        for (int t = t0 > 0 ? t0 - 1 : 0; t <= t0; t++) {
+            const int a3 = 3 * MOD[t][0], b3 = 3 * MOD[t][1];
+            u32 err = 0, large_set = 0;
+            for (int k = 0; k < 4; k++) {
+                const int m = sv[k] < 0 ? -sv[k] : sv[k];
+                const int ea = m - a3, eb = m - b3;
+                const bool large = eb * eb < ea * ea;
+                large_set |= (u32)large << k;
+                err += (u32)(large ? eb * eb : ea * ea) * (u32)cnt[flip][hh][k];
+            }
+            if (err < best)
+                best = err, table[hh] = t, large_best = large_set;
+        }
+        const u32 half = HALF[flip][hh];
+        for (int k = 0; k < 4; k++) {
+            const u32 texels = mask[k] & half;
+            if (large_best >> k & 1)
+                lsb |= texels;
+            if (sv[k] < 0)
+                msb |= texels;
+        }
+    }
+    u64 v = (u64)flip << 32 | (u64)diff << 33 | (u64)table[1] << 34 | (u64)table[0] << 37 | (u64)lsb |
+            (u64)msb << 16;
+    if (diff) {
+        for (int c = 0; c < 3; c++) {
+            const int at = 40 + 8 * c;
+            v |= (u64)q5[0][2 - c] << (at + 3) | (u64)((q5[1][2 - c] - q5[0][2 - c]) & 7) << at;
+        }
+    } else {
+        for (int c = 0; c < 3; c++) {
+            const int at = 40 + 8 * c;
+            v |= (u64)q4[0][2 - c] << (at + 4) | (u64)q4[1][2 - c] << at;
+        }
+    }
+    return v;
+}
+
+}  // namespace etc1
+
+// a CMPR sub-block's (4x4) palette, as texture.cpp decodes it (0xAABBGGRR)
+inline void cmpr_palette(const u8* q, u32 p[4]) {
+    const u32 c0 = (u32)q[0] << 8 | q[1], c1 = (u32)q[2] << 8 | q[3];
+    auto x5 = [](u32 v) { return (v << 3) | (v >> 2); };
+    auto x6 = [](u32 v) { return (v << 2) | (v >> 4); };
+    const u32 r0 = x5(c0 >> 11), g0 = x6((c0 >> 5) & 63), b0 = x5(c0 & 31);
+    const u32 r1 = x5(c1 >> 11), g1 = x6((c1 >> 5) & 63), b1 = x5(c1 & 31);
+    auto rgba = [](u32 r, u32 g, u32 b, u32 a) { return r | g << 8 | b << 16 | a << 24; };
+    p[0] = rgba(r0, g0, b0, 255), p[1] = rgba(r1, g1, b1, 255);
+    if (c0 > c1) {
+        p[2] = rgba((r1 * 3 + r0 * 5) >> 3, (g1 * 3 + g0 * 5) >> 3, (b1 * 3 + b0 * 5) >> 3, 255);
+        p[3] = rgba((r0 * 3 + r1 * 5) >> 3, (g0 * 3 + g1 * 5) >> 3, (b0 * 3 + b1 * 5) >> 3, 255);
+    } else {
+        p[2] = rgba((r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2, 255);
+        p[3] = rgba((r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2, 0);
+    }
+}
+// the CMPR sub-block holding image texel (x, y) of a w-wide texture
+inline const u8* cmpr_sub_block(const u8* src, u32 w, u32 x, u32 y) {
+    return src + ((y / 8) * ((w + 7) / 8) + x / 8) * 32 + 8 * (((x / 4) & 1) + 2 * ((y / 4) & 1));
+}
+inline u32 cmpr_index(const u8* q, u32 x, u32 y) { return (q[4 + (y & 3)] >> (6 - 2 * (x & 3))) & 3; }
+
+// whether a CMPR texture has transparent texels (a block in three-color mode using index 3)
+inline bool cmpr_has_alpha(const u8* src, u32 w, u32 h) {
+    const u32 blocks = ((w + 7) / 8) * ((h + 7) / 8) * 4;
+    for (u32 b = 0; b < blocks; b++, src += 8) {
+        if (((u32)src[0] << 8 | src[1]) > ((u32)src[2] << 8 | src[3]))
+            continue;
+        for (int r = 0; r < 4; r++)
+            for (int k = 0; k < 4; k++)
+                if (((src[4 + r] >> (6 - 2 * k)) & 3) == 3)
+                    return true;
+    }
+    return false;
+}
+
+// CMPR (w x h) as ETC1 / ETC1A4 of W x H, padded with its edge texels (a block inside the image is
+// one CMPR sub-block: the image is stored upside down, and 4-row blocks stay aligned). Padding
+// blocks repeat the edge: past the right edge a row's blocks are all alike, past the bottom every
+// row is the last one's, so those are encoded once.
+inline void etc1_from_cmpr(const u8* src, u32 w, u32 h, u8* out, u32 W, u32 H, bool alpha) {
+    const u32 block_bytes = alpha ? 16 : 8, tiles_x = W / 8;
+    static u64 below[256][2];  // the blocks of a row wholly below the image, by block column
+    bool below_made = false;
+    for (u32 my = 0; my < H; my += 4) {
+        const u32 iy_top = H - 4 - my;  // the image row of the block's last memory row
+        const bool all_below = H - 1 - my >= h && H - 1 - (my + 3) >= h;  // (every row clamps to h - 1)
+        u64 right[2];
+        bool right_made = false;
+        for (u32 mx = 0; mx < W; mx += 4) {
+            const u32 tile = (my / 8) * tiles_x + mx / 8, sub = ((mx / 4) & 1) + 2 * ((my / 4) & 1);
+            u8* o = out + (tile * 4 + sub) * block_bytes;
+            u64 words[2];  // alpha (ETC1A4), color
+            if (all_below && below_made) {
+                memcpy(words, below[mx / 4], 16);
+            } else if (mx >= w && right_made) {
+                memcpy(words, right, 16);
+            } else if (mx + 3 < w && iy_top + 3 < h) {
+                const u8* q = cmpr_sub_block(src, w, mx, iy_top);
+                u32 p[4];
+                cmpr_palette(q, p);
+                // the texels of each palette entry: CMPR rows are 4 2-bit indices, x from the top
+                // bits; block row y (memory) is image row 3 - y
+                u16 mask[4] = {0, 0, 0, 0};
+                for (u32 y = 0; y < 4; y++) {
+                    const u32 bits = q[4 + 3 - y];
+                    for (u32 x = 0; x < 4; x++)
+                        mask[(bits >> (6 - 2 * x)) & 3] |= (u16)(1u << (4 * x + y));
+                }
+                words[0] = 0;
+                if (alpha)
+                    for (u32 k = 0; k < 4; k++)
+                        if (p[k] >> 28)
+                            for (u32 i = 0; i < 16; i++)
+                                if (mask[k] >> i & 1)
+                                    words[0] |= (u64)(p[k] >> 28) << (4 * i);
+                words[1] = etc1::encode_palette(p, mask);
+            } else {
+                u32 px[16];
+                for (u32 x = 0; x < 4; x++)
+                    for (u32 y = 0; y < 4; y++) {
+                        u32 iy = H - 1 - (my + y), ix = mx + x;
+                        iy = iy < h ? iy : h - 1, ix = ix < w ? ix : w - 1;
+                        const u8* q = cmpr_sub_block(src, w, ix, iy);
+                        u32 p[4];
+                        cmpr_palette(q, p);
+                        px[4 * x + y] = p[cmpr_index(q, ix, iy)];
+                    }
+                words[0] = 0;
+                if (alpha)
+                    for (u32 i = 0; i < 16; i++)
+                        words[0] |= (u64)(px[i] >> 28) << (4 * i);
+                words[1] = etc1::encode(px);
+            }
+            if (mx >= w && !right_made)
+                memcpy(right, words, 16), right_made = true;
+            if (all_below && !below_made)
+                memcpy(below[mx / 4], words, 16);
+            if (alpha)
+                memcpy(o, &words[0], 8), o += 8;
+            memcpy(o, &words[1], 8);
+        }
+        if (all_below)
+            below_made = true;
+    }
+}
+
 // GX format gxfmt (w x h at src; palettes in tmem, at tlut_addr, mask tmem_mask) -> PICA format fmt
 // (W x H, padded). false for a format this doesn't convert (the caller decodes it).
 inline bool from_gx(const u8* src, u32 gxfmt, u32 w, u32 h, const u8* tmem, u32 tmem_mask, u32 tlut_addr,
                     u32 tlut_fmt, u8* out, u32 W, u32 H, Fmt fmt) {
     using namespace detail;
+    if (gxfmt == 14 && (fmt == ETC1 || fmt == ETC1A4)) {
+        etc1_from_cmpr(src, w, h, out, W, H, fmt == ETC1A4);
+        return true;
+    }
     static Places pl;
     pl.make(W, H);
     u32 bw, bh, bytes;

@@ -10,7 +10,7 @@
 //           empty at each frame's start, each draw hinted with the slots it had the frame before
 // tex(direct, fmt, w, h, hash) converts a w x h texture of GX format fmt (random bytes and palette) into PICA
 // texture memory: decoded to RGBA8 then tiled (direct 0), or straight from the GX tiles (direct 1,
-// platform/3ds/pica_tex.h), returning a hash of the result (hash 1) or nothing.
+// platform/3ds/pica_tex.h; 2: CMPR as ETC1), returning a hash of the result (hash 1) or nothing.
 // gx(kind, draws, vertices, flush_every) runs `draws` such draws of `vertices` vertices, the pending
 // batch submitted (the palette's slots freed) every flush_every draws, and returns a hash of what
 // was built (to compare builds of tnl.cpp).
@@ -243,7 +243,7 @@ extern "C" u32 tex(u32 direct, u32 fmt, u32 w, u32 h, u32 hash) {
     u32 W = 8, H = 8;
     while (W < w) W <<= 1;
     while (H < h) H <<= 1;
-    pica_tex::Fmt pf = pica_format(fmt);
+    pica_tex::Fmt pf = direct == 2 ? pica_tex::ETC1 : pica_format(fmt);
     if (direct)
         pica_tex::from_gx(s_texsrc, fmt, w, h, gx_tmem(), GX_TMEM_MASK, 0, 0, s_texout, W, H, pf);
     else {

@@ -317,6 +317,9 @@ def bench_gx(funcs_kind=None, draws=64, flush_every=7):
             same = m.call("tex", 0, fmt, w, h, 1) == m.call("tex", 1, fmt, w, h, 1)
             print("%-22s %4dx%-4d %5.1f -> %5.1f ARM instructions a texel (decode + tile -> direct), %s" % (
                 name, w, h, old / (w * h), new / (w * h), "same texture" if same else "TEXTURE DIFFERS"))
+            if fmt == 14:
+                etc = m.instructions("tex", 2, fmt, w, h, 0)
+                print("%-22s %4dx%-4d %5.1f ARM instructions a texel as ETC1" % (name, w, h, etc / (w * h)))
 
 
 # --gxsdk: engine/gx/gx_sdk.cpp's natives against the decompiled functions they replace

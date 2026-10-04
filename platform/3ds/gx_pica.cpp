@@ -729,9 +729,11 @@ GPU_TEXCOLOR pica_format(const GxTexture* gt) {
 
 u32 texel_bits(GPU_TEXCOLOR f) {
     switch (f) {
-    case GPU_L4: return 4;
+    case GPU_L4:
+    case GPU_ETC1: return 4;
     case GPU_LA4:
-    case GPU_L8: return 8;
+    case GPU_L8:
+    case GPU_ETC1A4: return 8;
     case GPU_LA8:
     case GPU_RGB565:
     case GPU_RGBA5551: return 16;
@@ -768,6 +770,19 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     }
 }
 
+// NOMA_ETC1: CMPR textures as ETC1 (default: on the Old 3DS only)
+bool etc1_on() {
+    static int s_on = -1;
+    if (s_on < 0) {
+        const char* v = getenv("NOMA_ETC1");
+        bool n3ds = false;
+        APT_CheckNew3DS(&n3ds);
+        s_on = v ? atoi(v) != 0 : !n3ds;
+        log("pica: CMPR textures as %s", s_on ? "ETC1" : "RGBA5551");
+    }
+    return s_on > 0;
+}
+
 // the PICA format as pica_tex.h names it
 pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f) {
     switch (f) {
@@ -777,6 +792,8 @@ pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f) {
     case GPU_RGBA5551: return pica_tex::RGBA5551;
     case GPU_L8: return pica_tex::L8;
     case GPU_L4: return pica_tex::L4;
+    case GPU_ETC1: return pica_tex::ETC1;
+    case GPU_ETC1A4: return pica_tex::ETC1A4;
     default: return pica_tex::RGBA8;
     }
 }
@@ -794,13 +811,17 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     e.last_used = P.frame;
     bool repeat = ws != 0 || wt != 0;
     u32 W = next_pow2(gt->width), H = next_pow2(gt->height);
-    GPU_TEXCOLOR fmt = pica_format(gt);
     if (e.version != gt->version || !e.tex.data) {
         NOMA_PROF_SCOPE("(gx texture upload)");
         Timed timed(Timers::UPLOAD);
         T.uploads++, T.upload_texels += W * H;
         if (!raw)
             return nullptr;
+        GPU_TEXCOLOR fmt = pica_format(gt);
+        // CMPR as ETC1 (ETC1A4 with transparent texels): a quarter (half) of RGBA5551, lossy; on by
+        // default where memory is tightest, the Old 3DS (NOMA_ETC1=0/1)
+        if (gt->fmt == 14 && etc1_on() && !(repeat && (W != gt->width || H != gt->height)))
+            fmt = pica_tex::cmpr_has_alpha(raw, gt->width, gt->height) ? GPU_ETC1A4 : GPU_ETC1;
         if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt)) {
             P.dead.push_back(e.tex);
             e.tex.data = nullptr;
