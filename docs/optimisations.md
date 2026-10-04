@@ -84,6 +84,45 @@ Rules:
 
 ## Candidates
 
+### Toward 60 fps in the room
+
+The budget: Azahar charges one tick per ARM11 instruction at 268 MHz, also in New 3DS mode (its
+per-instruction timing, azahar PR #2262, isn't the default), so 60 fps there is at most ~4.47M
+instructions a frame on core 0. The room runs at ~42 fps: ~6.4M ticks a frame, ~6% idle. A real New
+3DS (804 MHz, L2 cache) runs more instructions per second than that, so hardware may already be
+nearer 60. The New 3DS is the 60 fps target; the Old 3DS has a third of the clock and no L2.
+
+Where core 0's frame goes (Azahar profile build, room, inclusive, before the lyt quads went native;
+the call tree from the decompiled code):
+
+| Part | Share | What |
+|---|---|---|
+| Room UI layouts, drawing | 26.8% | One layout object (`fn_8013BECC` → Layout::Draw `fn_8045A730` → Pane::Draw `fn_80459090` → Material::SetupGX `fn_80460EF0`, Picture/TextBox/Window DrawSelf). SetupGX sends a pane's whole TEV, channel and texture-matrix state for every pane |
+| 3D scene, calc | 18.5% | ScnRoot UpdateFrame/CalcWorld (`fn_804481E0`)/CalcView/Gather/ZSort for every model every frame |
+| 3D scene, drawing | 18.4% | Three ScnRoots and nw4r::ef effects; DrawResMdlDirectly → per-material setup (`fn_80445030`, ResMatChan `fn_80443630`); every DrawOpa/DrawXlu (~5 a frame) first copies 32 cameras, compares 32 fogs and loads the lights again (`fn_804500E0`, `fn_80442450`) |
+| Sound thread | ~18% | nw4r::snd's frame (`fn_8047C820`) and AX mixing |
+| Layout animation and matrices | ~3% | Layout::Animate with option 0 (hidden panes animated too) |
+| Loader thread's stack scan | 1.7% | `wii_Thread_GetUnusedStackSize` on every loop pass, its result unused; the native compares a word at a time with `memcmp` calls |
+| Heap search on every free | 1.7% | `fn_801893A0` |
+
+Measured on the host in the room (game-sent commands only, display lists excluded): 4,813 BP
+writes a frame, 64% of them the value the register already holds; 3,263 XF words, 78% unchanged;
+1,125 indexed XF words, 78% unchanged. The decompiled code runs 22,800 function entries and 14,200
+loop iterations a frame, so the entry polls are only ~2% of core 0; the cost is per memory access:
+a guest load at a variable address is ~7 ARM instructions (page lookup, MMIO check, byte swap), a
+write-gather byte ~12, against one PowerPC instruction (`GXSetTevAlphaIn`: 16 PowerPC
+instructions, ~55 ARM on its fast path).
+
+| What | Where | Expected (core 0) | Effort | Exact? |
+|---|---|---|---|---|
+| nw4r::lyt's draw path native (Layout::Draw, Pane::Draw, Material::SetupGX, the DrawSelf functions), sending only the GX state that differs from the last pane's; later straight to the PICA, past the GX FIFO (also less decoding on the GPU thread) | `engine/lyt` | est. 15–20% of the frame (of 26.8%) | 1–2 weeks | The FIFO's effect, not its bytes, once state is skipped (the GPU thread's state is the reference) |
+| g3d's per-root work once per frame (`fn_804500E0`: cameras, fogs, lights), then CalcWorld/CalcView native, then material setup with skipped state | `engine/g3d` | est. 8–15% | 1–2 weeks | Yes for calc; effect-exact for the draw |
+| The sound thread off core 0 (New 3DS core 2, or the system core) without a wait per AX frame | 85's | up to ~18% (only with no wait per AX frame: an AX thread on core 1 that the main core waited for made the room ~10% slower in Azahar, which runs cores one after another) | Days | Yes |
+| Guest memory accesses cheaper: the MMIO check out of the fast path (unmapped pages fault and a data-abort handler does the device access), write-gather stores through a pointer drained at the polls (at most a function's straight-line writes between two polls) | `runtime/guest.h`, decompile.py | est. 5–10% everywhere | Days | Yes |
+| The stack scan a word at a time without `memcmp` (or unrolled LDM) | `engine/system/thread.cpp` | ~1.4% | Hours | Yes |
+| Layout::Animate skipping hidden subtrees (Nintendo's own option bit 1; the pane itself still animates, so visibility tracks still apply) | game patch | ~1% | Hours | Changes when hidden panes take their frame |
+
+
 ### Audio
 
 Measured in the room (host, 3 minutes, `NOMA_DEBUG_AX`): up to 27 voices a frame; 91.7% of voice
