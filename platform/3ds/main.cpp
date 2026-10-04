@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -459,6 +460,20 @@ bool platform_io_thread_start(void (*fn)()) {
 // ---- input: the 3DS controls as a Wii Remote
 static WiimoteInput s_in;
 
+// A stick (the circle pad, the C-stick: about 156 from the centre at the rim) as -1..1, y up: nothing
+// within 20 of the centre (a pad at rest isn't quite centred), and from there out to the rim the
+// whole range, so a slight tilt is a slow walk rather than a jump to a fifth of full speed.
+static void read_stick(const circlePosition& c, float* x, float* y) {
+    const float rim = 156.0f, dead = 20.0f;
+    float m = sqrtf((float)c.dx * c.dx + (float)c.dy * c.dy);
+    if (m <= dead) {
+        *x = *y = 0;
+        return;
+    }
+    float s = std::min((m - dead) / (rim - dead), 1.0f) / m;
+    *x = (float)c.dx * s, *y = (float)c.dy * s;
+}
+
 static void poll_input() {
     hidScanInput();
     u32 held = hidKeysHeld();
@@ -474,22 +489,40 @@ static void poll_input() {
     if (held & KEY_DLEFT) b |= WM_LEFT;
     if (held & KEY_DRIGHT) b |= WM_RIGHT;
     s_in.buttons = b;
+    // L, R and (New 3DS) ZL, ZR for native scenes: libctru's hidInit starts the New 3DS's irrst
+    // service, and hidScanInput merges its ZL, ZR and C-stick into the keys
+    u16 pad = 0;
+    if (held & KEY_L) pad |= PAD_L;
+    if (held & KEY_R) pad |= PAD_R;
+    if (held & KEY_ZL) pad |= PAD_ZL;
+    if (held & KEY_ZR) pad |= PAD_ZR;
+    s_in.pad = pad;
     if (held & KEY_TOUCH) {
         touchPosition t;
         hidTouchRead(&t);
         s_in.x = (float)t.px / 160.0f - 1.0f;
         s_in.y = (float)t.py / 120.0f - 1.0f;
     }
-    // the circle pad nudges the pointer too
+    // the circle pad: the stick in stick mode, else it nudges the pointer
     circlePosition c;
     hidCircleRead(&c);
-    bool nudged = c.dx * c.dx + c.dy * c.dy > 20 * 20;
+    bool nudged = false;
+    if (input_stick_mode()) {
+        read_stick(c, &s_in.stick_x, &s_in.stick_y);
+    } else {
+        s_in.stick_x = s_in.stick_y = 0;
+        nudged = c.dx * c.dx + c.dy * c.dy > 20 * 20;
+    }
     if (nudged) {
         s_in.x += (float)c.dx / 156.0f * 0.03f;
         s_in.y -= (float)c.dy / 156.0f * 0.03f;
         s_in.x = s_in.x < -1 ? -1 : s_in.x > 1 ? 1 : s_in.x;
         s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
     }
+    // the camera stick: the New 3DS's C-stick (an old 3DS reads it as centred)
+    circlePosition cs;
+    hidCstickRead(&cs);
+    read_stick(cs, &s_in.cam_x, &s_in.cam_y);
     // The pointer stays where the stylus left it, so a menu that opens while the pointer is over
     // it (the room's その他 panel) never closed, and buttons stayed highlighted. A Wii Remote put
     // down or pointed away has no pointer, and the room hides its menus: here the pointer leaves

@@ -1,9 +1,14 @@
 // NOMA_INPUT: scripted Wii Remote input, "TIME:BUTTONS[:SECONDS],..." -- e.g. "3:A,6.5:A+B:1"
 // presses A at 3 s and A+B for one second at 6.5 s (a press lasts 0.15 s by default).
-// Buttons: A B 1 2 + - H(ome) U D L R; "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
+// Buttons: A B 1 2 + - H(ome) U D L R (U D L R: the D-pad), and the 3DS's own [L] [R] [ZL] [ZR]
+// (shoulder buttons, which only native scenes read: "5:[L]:2" holds L for 2 s);
+// "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
 // would: the platform's own input (the touch screen, the circle pad) moves it on; "P(off)" takes it
 // off the screen (a remote pointed away, or the 3DS's pointer left alone) until the next P(x;y);
 // "OFF" presses the Wii's power button once (what closing from the 3DS's HOME Menu does).
+// "S(x;y)" tilts the stick to x, y (-1..1, y up: what the circle pad gives a native scene in stick
+// mode) and "C(x;y)" the camera stick (the C-stick): held for the event's seconds when given
+// ("4:S(0;1):2.5" walks forward for 2.5 s), else until the next S (or C) event; "S(0;0)" lets go.
 // Times are on the game's
 // clock: the frames it has finished, 60 to a second (so a script reaches the same screens
 // however fast the machine runs the game); both platforms merge the script into their input.
@@ -25,10 +30,14 @@ namespace guest {
 
 namespace {
 
+enum : u8 { STICK_NONE, STICK_MOVE, STICK_CAMERA };
+
 struct ScriptEvent {
     double t, len;
-    u16 buttons;
+    u16 buttons, pad;
     bool point, power, off;
+    u8 stick;          // STICK_: an S or C event
+    bool until_next;   // (a stick event with no seconds)
     float x, y;
     bool after_message;  // t counts from the first time the game asked for message `message`
     u32 message;
@@ -54,7 +63,7 @@ const std::vector<ScriptEvent>& script() {
             q = sc.size();
         std::string item = sc.substr(p, q - p);
         p = q + 1;
-        ScriptEvent ev{0, 0.15, 0, false, false, false, 0, 0, false, 0};
+        ScriptEvent ev{0, 0.15, 0, 0, false, false, false, STICK_NONE, false, 0, 0, false, 0};
         size_t c1 = item.find(':');
         if (c1 == std::string::npos)
             continue;
@@ -70,11 +79,16 @@ const std::vector<ScriptEvent>& script() {
         }
         std::string what = item.substr(c1 + 1);
         size_t c2 = what.find(':');
-        if (c2 != std::string::npos) {
+        bool timed = c2 != std::string::npos;
+        if (timed) {
             ev.len = atof(what.substr(c2 + 1).c_str());
             what = what.substr(0, c2);
         }
-        if (what == "OFF") {
+        if (!what.empty() && (what[0] == 'S' || what[0] == 'C') && what.size() > 1 && what[1] == '(') {
+            ev.stick = what[0] == 'S' ? STICK_MOVE : STICK_CAMERA;
+            ev.until_next = !timed;
+            sscanf(what.c_str() + 1, "(%f;%f)", &ev.x, &ev.y);
+        } else if (what == "OFF") {
             ev.power = true;
         } else if (what == "P(off)") {
             ev.point = ev.off = true;
@@ -82,7 +96,20 @@ const std::vector<ScriptEvent>& script() {
             ev.point = true;
             sscanf(what.c_str(), "P(%f;%f)", &ev.x, &ev.y);
         } else {
-            for (char ch : what) {
+            for (size_t i = 0; i < what.size(); i++) {
+                char ch = what[i];
+                if (ch == '[') {
+                    size_t close = what.find(']', i);
+                    if (close == std::string::npos)
+                        break;
+                    std::string name = what.substr(i + 1, close - i - 1);
+                    if (name == "L") ev.pad |= PAD_L;
+                    if (name == "R") ev.pad |= PAD_R;
+                    if (name == "ZL") ev.pad |= PAD_ZL;
+                    if (name == "ZR") ev.pad |= PAD_ZR;
+                    i = close;
+                    continue;
+                }
                 switch (ch) {
                 case 'A': ev.buttons |= WM_A; break;
                 case 'B': ev.buttons |= WM_B; break;
@@ -155,6 +182,10 @@ void input_script_apply(WiimoteInput& in) {
     static std::vector<bool> s_moved;  // the P and OFF events that have happened
     static bool s_off;                 // the pointer is off the screen (P(off), until P(x;y))
     s_moved.resize(s.size());
+    // each stick follows the latest of its events to have started (the later one in the script if
+    // two start together); once a timed one is over, it is let go
+    const ScriptEvent* stick[3] = {nullptr, nullptr, nullptr};
+    double stick_at[3] = {0, 0, 0};
     for (size_t i = 0; i < s.size(); i++) {
         const ScriptEvent& ev = s[i];
         double at = ev.t;
@@ -164,7 +195,10 @@ void input_script_apply(WiimoteInput& in) {
                 continue;
             at += m->second;
         }
-        if (ev.power) {
+        if (ev.stick) {
+            if (t >= at && (!stick[ev.stick] || at >= stick_at[ev.stick]))
+                stick[ev.stick] = &ev, stick_at[ev.stick] = at;
+        } else if (ev.power) {
             if (t >= at && !s_moved[i])
                 stm_power_event(), s_moved[i] = true;
         } else if (ev.point) {
@@ -175,7 +209,19 @@ void input_script_apply(WiimoteInput& in) {
             }
         } else if (t >= at && t < at + ev.len) {
             in.buttons |= ev.buttons;
+            in.pad |= ev.pad;
         }
+    }
+    for (u8 k : {STICK_MOVE, STICK_CAMERA}) {
+        const ScriptEvent* ev = stick[k];
+        if (!ev)
+            continue;
+        bool held = ev->until_next || t < stick_at[k] + ev->len;
+        float x = held ? ev->x : 0.0f, y = held ? ev->y : 0.0f;
+        if (k == STICK_MOVE)
+            in.stick_x = x, in.stick_y = y;
+        else
+            in.cam_x = x, in.cam_y = y;
     }
     if (s_off)
         in.pointing = false;

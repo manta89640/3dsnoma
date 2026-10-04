@@ -14,9 +14,13 @@ namespace guest {
 
 namespace {
 WiimoteInput s_in;  // set by the platform layer
+bool s_stick_mode;  // set by a native scene
 }
 
 void wiimote_set_input(const WiimoteInput& in) { s_in = in; }
+const WiimoteInput& wiimote_input() { return s_in; }
+void input_set_stick_mode(bool on) { s_stick_mode = on; }
+bool input_stick_mode() { return s_stick_mode; }
 
 }  // namespace guest
 
