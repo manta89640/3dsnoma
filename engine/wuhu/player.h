@@ -20,8 +20,8 @@ using engine::math::Vec3;
 
 // The room's walking and running speeds, in Wii no Ma units a frame at 60 Hz (a Mii is 158 units
 // tall at height scale 1). fn_801ECE98 (the BodyController's Move state, made by
-// room_BodyController_ChangeToMove) takes one pair or the other by a flag of the Mii's (sex or age:
-// not known).
+// room_BodyController_ChangeToMove) takes one pair or the other by the Mii's sex (fn_801F40A8: its
+// face's bit 31): A a man's, B a woman's.
 struct Gait {
     f32 walk, run;
 };
@@ -39,6 +39,8 @@ struct PlayerParams {
     f32 dead_zone, run_tilt;         // stick tilt that starts walking, and running
     f32 radius, knee, chest;         // the body's two spheres: radius, centres above the feet
     f32 step_up, snap_down;          // highest step up; lowest step down before it is a fall
+    f32 max_drop;                    // the deepest fall (or slide down a slope too steep to stand on)
+                                     // a step may start: a deeper one is refused, as a wall would be
     f32 wade_depth;                  // deepest water the Mii walks into
     f32 walkable_ny;                 // ground at least this flat (normal y) is walked on; steeper slid down
     f32 wall_ny;                     // steeper than this (and overhangs) is a wall
@@ -96,13 +98,13 @@ private:
     };
     Ground ground_at(f32 x, f32 z, f32 from_y, f32 to_y) const;
     f32 water_above(f32 x, f32 z, f32 ground_y, f32 top_y) const;
-    bool landing_ok(f32 x, f32 z, f32 from_y) const;
+    bool landing_ok(f32 x, f32 z, f32 from_y, f32 lowest) const;
     Vec3 push(Vec3 sphere) const;
     Vec3 slide_off_walls(Vec3 feet, bool* free) const;
     void tick(const PlayerInput& in, f32 frames);
     void walk(f32 frames);
     bool try_step(Vec3 d);
-    void start_fall(bool slide);
+    void start_fall(bool slide, f32 lowest);
     void ride_slope(Vec3 n);
     void fall(f32 frames);
 
@@ -113,6 +115,7 @@ private:
     f32 phase_ = 0, distance_ = 0, depth_ = 0;
     bool airborne_ = false, sliding_ = false;
     f32 slide_x_ = 0, slide_z_ = 0;  // down the slope, on x/z
+    f32 fall_lowest_ = 0;            // the lowest the fall may end (max_drop under where it began)
     int air_ticks_ = 0;
     u16 ground_attr_ = 0;
     Vec3 ground_n_{0, 1, 0};

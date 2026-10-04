@@ -48,10 +48,17 @@ f32 smooth(f32 cur, f32 target, f32& vel, f32 time, f32 dt) {
 
 FollowCameraParams FollowCameraParams::make(f32 h) {
     FollowCameraParams p;
+    // The framing: the Mii about a sixth of the picture tall, low in its middle (its feet a quarter
+    // of the way up), the island before it: 7 heights from the head (110 units at k = 10), 15 degrees
+    // down, looking at a point 1.6 heights up (at 45 degrees' field of view). Pulled in (the terrain,
+    // the player), the point looked at comes down to the Mii's middle, so that the whole Mii stays in
+    // the picture.
     p.head = 0.85f * h;
-    p.distance = 3.0f * h;  // design: ~35 units for the island's Mii
+    p.distance = 7.0f * h;
     p.min_distance = 1.2f * h;
-    p.max_distance = 8.0f * h;
+    p.max_distance = 12.0f * h;
+    p.aim_near = 0.55f * h;
+    p.aim_far = 1.6f * h;
     p.pitch = 15.0f;
     p.min_pitch = -15.0f;
     p.max_pitch = 70.0f;
@@ -140,7 +147,8 @@ void FollowCamera::place_eye(f32 dt, bool snap) {
     if (world_.ground(eye.x, eye.z, eye.y + p_.margin, eye.y - p_.margin, floor, &hit))
         eye.y = hit.point.y + p_.margin;
     cam_.eye = eye;
-    cam_.target = target_;
+    const f32 s = clampf((dist_ - p_.min_distance) / std::max(p_.distance - p_.min_distance, 1e-3f), 0, 1);
+    cam_.target = target_ + Vec3{0, p_.aim_near + (p_.aim_far - p_.aim_near) * s - p_.head, 0};
     cam_.up = {0, 1, 0};
 }
 

@@ -11,22 +11,23 @@
 //   NOMA_WALK_TRAIL  waypoints up the volcano's dirt trail, a CSV of x,z,y lines (a walkable path
 //                    over the KCL: from the river, y 109, to where the dirt ends on the volcano's
 //                    shoulder, y 1010; above it the way up is steeper than 45 degrees or in tunnels)
-//   NOMA_WALK_K      Wii no Ma units per island unit (default 14.475 = 158 / 10.915, the top of the
-//                    WSR audience Mii's bounding box, WS2_common_avaC0)
-//   NOMA_WALK_K2     a second k for a second long walk (default 9: a Mii with its head, 1.2 times
-//                    as big, as the island places its audience)
+//   NOMA_WALK_K      Wii no Ma units per island unit (default 10: Wii no Ma's Mii against WSR's,
+//                    body and head, as the staged package's environment gives it; docs/wuhu_design.md
+//                    §8)
+//   NOMA_WALK_K2     a second k for a second long walk (default 9: a Mii a tenth bigger)
 //   NOMA_WALK_OUT    a folder for paths.csv: every walk's path, ten points a second
 //
 // The walks, each for a Mii at both k: from the town's spawn north into the coin-toss fountain (its
 // rim and basin stop the Mii), into a building's wall by the plaza, up the volcano's dirt trail
 // (waypoints), into a tree's trunk, a rock shore and a beach into the sea (the shore stops it, at
-// most knee-deep), off a grass ledge north of the plaza (it falls and lands), down a rock slope too
-// steep to stand on (it slides down it, keeping to it), across the suspension bridge (ハラハラつり橋),
-// and random walking (10 minutes from the spawn, 5 on the hills, 5 on a beach) with the camera
-// turned now and then. Every tick of every walk checks that the Mii stands on the ground when not
-// falling, is in no wall, isn't in deep water, didn't pass through a wall since the last tick, and
-// that nothing stands between the camera and the Mii's head, nor water over the camera. Then the
-// queries are timed.
+// most knee-deep), to the edge of a grass ledge north of the plaza (a drop of 100: refused, it stops
+// at the edge), off a lower ledge south of it (24: it falls and lands), to the top of a rock slope
+// too steep to stand on (178 down to the sand: refused), and from halfway down it (put there, it
+// slides down, keeping to it), across the suspension bridge (ハラハラつり橋), and random walking (10
+// minutes from the spawn, 5 on the hills, 5 on a beach) with the camera turned now and then. Every
+// tick of every walk checks that the Mii stands on the ground when not falling, is in no wall, isn't
+// in deep water, didn't pass through a wall since the last tick, and that nothing stands between the
+// camera and the Mii's head, nor water over the camera. Then the queries are timed.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -268,7 +269,7 @@ public:
             if (w_.cast(prev + Vec3{0, pp_.knee, 0}, p + Vec3{0, pp_.knee, 0}, solid, &h))
                 t.tunnel++;
             const engine::g3d::Camera& c = cam.camera();
-            if (w_.cast(c.target, c.eye, FollowCamera::blocks_view, &h))
+            if (w_.cast(cam.pivot(), c.eye, FollowCamera::blocks_view, &h))  // (the head: what it orbits)
                 t.cam_blocked++;
             t.cam_pulled += cam.distance() < 0.98f * cp_.distance;
             t.cam_min = std::min(t.cam_min, cam.distance());
@@ -317,9 +318,9 @@ bool toward(const Player& pl, f32 x, f32 z, f32 tilt, Drive& d) {
 void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& trail, FILE* out) {
     const PlayerParams pp = PlayerParams::make(k);
     log("selftest walk: k %.3f: the Mii %.2f tall, walks %.3f and runs %.3f a frame (%.1f and %.1f a second), "
-        "radius %.2f, step %.2f, wading %.2f",
+        "radius %.2f, step %.2f, wading %.2f, drops up to %.2f, slopes up to %.1f degrees",
         k, pp.height, pp.walk_speed, pp.run_speed, pp.walk_speed * 60, pp.run_speed * 60, pp.radius, pp.step_up,
-        pp.wade_depth);
+        pp.wade_depth, pp.max_drop, std::acos(pp.walkable_ny) * 180 / PI);
     Walker wk(w, pp, out, tag);
     const Vec3 spawn{-2029, 69, 2330};
 
@@ -404,31 +405,63 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
         wk.report("beach", pl, t, pl.water_depth() <= pp.wade_depth && pl.speed() < 0.1f * pp.walk_speed,
                   "stopped at the sea");
     }
-    {  // off the grass ledge north of the plaza (y 169) down its rock face to the plaza (69)
+    {  // to the edge of the grass ledge north of the plaza (y 169), whose rock face drops 100 to the
+       // plaza (69): deeper than max_drop, so refused as a wall would be
         Player pl(w, pp);
         Tally t = wk.run("cliff", Vec3{-2487.5f, 169, 1560}, 0, 12, pl, [](const Player&, u32, Drive& d) {
             d.world = true, d.wz = 0.5f;
             return true;
         });
-        wk.report("cliff", pl, t, t.fell && !pl.airborne() && std::fabs(pl.position().y - 69) < 1, "fell and landed");
+        wk.report("cliff", pl, t,
+                  !t.fell && std::fabs(pl.position().y - 169) < 1 && pl.speed() < 0.1f * pp.walk_speed,
+                  "stopped at the edge of the 100 drop");
     }
-    {  // off a grass top on the east coast (y 238) onto its rock slope (64 degrees: too steep to stand
-       // on), down which it slides, keeping to the slope, onto the sand (y 60)
+    {  // east off the grass south of it (y 169) onto the lawn below (145.4): a drop of 24, within
+       // max_drop, so it falls and lands
+        Player pl(w, pp);
+        const f32 lx = -2037.5f, lz = 1412.5f;  // the lawn
+        bool there = false;
+        Tally t = wk.run("ledge", Vec3{-2112.5f, 169, 1412.5f}, 90, 15, pl, [&](const Player& p, u32, Drive& d) {
+            f32 dx = lx - p.position().x, dz = lz - p.position().z;
+            if (dx * dx + dz * dz < 3 * 3 && !p.airborne()) {
+                there = true;
+                return false;
+            }
+            return toward(p, lx, lz, 0.5f, d);
+        });
+        wk.report("ledge", pl, t, there && t.fell && std::fabs(pl.position().y - 145.4f) < 1, "fell 24 and landed");
+    }
+    {  // east coast: from a grass top (y 238) toward its rock slope (64 degrees: too steep to stand on),
+       // which ends on the sand 178 lower: deeper than max_drop, so it isn't stepped onto
         Player pl(w, pp);
         const f32 yaw = 12.2f;  // the slope's fall line
-        bool slid = false;
-        Tally t = wk.run("slope", Vec3{9144.5f, 239, 5575.6f}, yaw, 15, pl, [&](const Player& p, u32, Drive& d) {
-            slid |= p.airborne();
-            if (slid && !p.airborne())
-                return false;  // down
+        Tally t = wk.run("slope", Vec3{9144.5f, 239, 5575.6f}, yaw, 10, pl, [&](const Player&, u32, Drive& d) {
             d.world = true, d.wx = 0.5f * std::sin(yaw * PI / 180), d.wz = 0.5f * std::cos(yaw * PI / 180);
             return true;
         });
+        wk.report("slope", pl, t, !t.fell && pl.position().y > 230 && pl.speed() < 0.1f * pp.walk_speed,
+                  "stopped at the top of the 178 slide");
+        // put on the slope, a third of the way down (where nothing refuses it: a Mii warped onto steep
+        // ground slides down whatever the depth), it slides down, keeping to the slope, onto the sand
+        Vec3 on{0, 0, 0};
+        Hit h;
+        for (f32 dist = 0; dist < 100 && on.y == 0; dist += 1) {
+            f32 x = 9144.5f + dist * std::sin(yaw * PI / 180), z = 5575.6f + dist * std::cos(yaw * PI / 180);
+            if (w.ground(x, z, 1e9f, -1e9f, floor_of, &h) && h.normal.y < pp.walkable_ny && h.point.y < 180)
+                on = h.point;
+        }
+        Player sl(w, pp);
+        bool slid = false;
+        Tally ts = wk.run("slide", on, yaw, 15, sl, [&](const Player& p, u32, Drive&) {
+            slid |= p.airborne();
+            return !(slid && !p.airborne());  // (until down)
+        });
         char what[96];
-        snprintf(what, sizeof(what), "slid down and landed, at most %.2f over the slope", t.max_over_slope);
-        wk.report("slope", pl, t,
-                  t.fell && !pl.airborne() && std::fabs(pl.position().y - 60) < 1 &&
-                      t.max_over_slope < 0.1f * pp.height,
+        snprintf(what, sizeof(what), "slid down from y %.1f and landed, at most %.2f over the slope", on.y,
+                 ts.max_over_slope);
+        wk.report("slide", sl, ts,
+                  on.y > 0 && ts.fell && !sl.airborne() && std::fabs(sl.position().y - 60) < 1 &&
+                      ts.max_over_slope < 0.1f * pp.height,
                   what);
     }
     {  // across the suspension bridge (deck about y 699..766), east to west
@@ -595,7 +628,7 @@ void selftest_walk() {
 
     if (const char* g = getenv("NOMA_KCL_GROUND"))
         check_rasters(w, g);
-    const f32 k = getenv("NOMA_WALK_K") ? (f32)atof(getenv("NOMA_WALK_K")) : 158.0f / 10.915f;
+    const f32 k = getenv("NOMA_WALK_K") ? (f32)atof(getenv("NOMA_WALK_K")) : 10.0f;
     const f32 k2 = getenv("NOMA_WALK_K2") ? (f32)atof(getenv("NOMA_WALK_K2")) : 9.0f;
     FILE* out = nullptr;
     if (const char* o = getenv("NOMA_WALK_OUT")) {
