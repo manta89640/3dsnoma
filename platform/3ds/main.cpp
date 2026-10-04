@@ -408,18 +408,21 @@ bool platform_audio_thread_start(void (*fn)()) {
     bool n3ds = false;
     APT_CheckNew3DS(&n3ds);
     const char* e = getenv("NOMA_AX_THREAD");
-    if (!n3ds || !e || !atoi(e))
+    const int core = e ? atoi(e) : 0;
+    if (!n3ds || (core != 1 && core != 2))
         return false;
-    APT_SetAppCpuTimeLimit(80);
+    if (core == 1)
+        APT_SetAppCpuTimeLimit(80);
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     s_audio_fn = fn;
-    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 1, 1, true);
+    // (on core 2 above the GPU's thread: a frame is short and the next one waits for it)
+    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 2, core, true);
     if (!t) {
-        log("ax: no thread on core 1: the frames are mixed inline");
+        log("ax: no thread on core %d: the frames are mixed inline", core);
         return false;
     }
-    log("ax: the frames are mixed on core 1");
+    log("ax: the frames are mixed on core %d", core);
     return true;
 }
 
