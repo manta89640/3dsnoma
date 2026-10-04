@@ -26,16 +26,18 @@ public:
     virtual ~IslandContent() {}
     // the load starts (called once, by the scene's constructor; the screen is black)
     virtual void start_loading() = 0;
-    // Once a frame while loading: the load's next step (a step short enough for the frame: the
-    // loading rings go on turning and the sound thread goes on running), and how far it is, 0 to 1.
+    // Once a frame while loading, until ready(): the load's next step (a step short enough for the
+    // frame: the loading rings go on turning and the sound thread goes on running), and how far it
+    // is, 0 to 1.
     virtual f32 progress() = 0;
     // loaded: the first frame can be drawn (the scene then fades in from black)
     virtual bool ready() const = 0;
-    // once a frame from ready() on; frozen: the player and the camera stay as they are (the window
-    // is open, or the scene fades in or out), animations may go on
+    // once a frame from the frame the scene starts fading in (ready(), and the loading rings shown
+    // long enough) on, always before that frame's draw; frozen: the player and the camera stay as
+    // they are (the window is open, or the scene fades in or out), animations may go on
     virtual void update(const Controls& controls, bool frozen) = 0;
-    // the frame's 3D, from ready() on: the opaque pass, then the translucent one (the scene's 2D
-    // goes over them)
+    // the frame's 3D, every frame from the same frame on: the opaque pass, then the translucent one
+    // (the scene's 2D goes over them)
     virtual void draw_opaque() = 0;
     virtual void draw_translucent() = 0;
 };

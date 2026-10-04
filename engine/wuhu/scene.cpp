@@ -48,9 +48,6 @@ const u64 RINGS_AFTER_US = 500000;
 const int RINGS_MIN_FRAMES = 30;
 // the caption stays four seconds
 const int CAPTION_FRAMES = 240;
-// the fade in from black ends by itself in 16 frames; this opens the island anyway should the
-// wipe never report its end (as lyt::screen_may_open)
-const int WIPE_TIMEOUT_FRAMES = 90;
 // the room's fade in from black, asked for as the island fades out, lapses after this many game
 // frames if the room hasn't faded in by then
 const u32 BLACK_RETURN_FRAMES = 300;
@@ -137,7 +134,8 @@ void IslandScene::update() {
     const Controls controls = read_controls();
     switch (state_) {
     case State::LOADING: {
-        f32 progress = content_->progress();
+        // the load's next step, until it is done (the rings may stay a few frames longer)
+        const f32 progress = content_->ready() ? 1.0f : content_->progress();
         u64 t = guest::host_time_us() - load_start_us_;
         if (rings_frames_ < 0 && t > RINGS_AFTER_US && !content_->ready()) {
             rings_frames_ = 0;
@@ -159,12 +157,16 @@ void IslandScene::update() {
             black_frames_ = 1;
             game::bottom_set_mode(bottom_, game::BOTTOM_HOME, false);
             music_arrive();
+            // the content's first update, before its first draw (this frame's: from ready() on it
+            // is drawn every frame, and updated before it is drawn)
+            content_->update(controls, true);
         }
         break;
     }
     case State::FADING_IN:
         content_->update(controls, true);
-        if (state_frames_ > 1 && (!lyt::wipe_playing() || state_frames_ > WIPE_TIMEOUT_FRAMES)) {
+        // the fade in from black (16 frames) has ended, or never reports its end (lyt.h's timeout)
+        if (lyt::screen_may_open(state_frames_)) {
             set_state(State::PLAYING);
             caption_->show(CAPTION_FRAMES);
         }
@@ -229,7 +231,9 @@ void IslandScene::on_pushed(u32 button) {
 }
 
 void IslandScene::open_menu() {
-    if (state_ != State::PLAYING)
+    // not while the window still fades out after いいえ: it would not open again, and the scene
+    // would wait in MENU for a choice that can't come
+    if (state_ != State::PLAYING || confirm_->shown())
         return;
     set_state(State::MENU);
     caption_->hide();
