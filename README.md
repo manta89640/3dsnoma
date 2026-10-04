@@ -9,7 +9,9 @@ middleware. Where the Wii's own parts have no purpose on a 3DS, native code take
 the Wii Remote is the 3DS's controls (`engine/input/remote.cpp`), the HOME Button Menu is left
 out. The content players, Adobe Flash and MobiClip, are left out too (`runtime/patches/players.cpp`):
 the shop, whose catalogues were Flash, is hidden from the room (`runtime/patches/menus.cpp`), as are
-the menu buttons for the Wii's own settings and services.
+the menu buttons for the Wii's own settings and services. The port adds a screen of its own to the
+room, the Sound Player (`engine/soundplayer`): the channel's music, with the household's Miis
+dancing to it.
 
 **No Nintendo data is in this repository.** You need your own copy of the channel: a WAD made
 from your own Wii (and your console's keys to decrypt it). Everything generated from it (the
@@ -162,11 +164,46 @@ The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button su
 Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
 progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
 
+## The Sound Player
+
+A screen of the port's own for listening to the channel's music: the sixth button of the room's
+bottom bar (サウンド, right of いろんな間) opens it, through the room's own circle wipe, and the Home
+tab at the bottom left (or B) goes back to the room, whose music comes back by itself.
+
+- The tracks are the channel's own, found in its sound archive (`snd/douga.brsar`, which the
+  channel keeps in memory): the 43 pieces of music (the sequences its BGM player plays, labelled
+  `SEQ_BGM_*`; the silent placeholder and the one filed twice left out), then 17 jingles (company
+  logos, the Miis' feelings, the 5 pm chime). The archive has only labels; the list's names are
+  those put into words. They play through the channel's own BGM player (`sound::BGMManager`),
+  which crossfades between pieces and keeps the room's theme paused until the room asks for it
+  again.
+- Left: the list, in the channel's list window with the message board's rows (the room's cyan
+  for focus), scrolling a row at a time (the tabs on its edges, held, or the D-pad). The track
+  playing has a cyan bar with ♪ (grey with ∥ when paused). Right: the title, and the video
+  player's own controls (previous, play/pause, next, stop).
+- The household's Miis dance at a table in the TV programme's white studio, an amp beside them,
+  every family member (one to eight) placed so that none hides another. The dances are the
+  channel's own (the TV caster's, the DSi relay's, the messages' cheers), their frames set from
+  the music's sequencer every frame, so the moves land on the beat at any frame rate; paused or
+  stopped, the Miis wait calmly. The amp is drawn by the port (no such model exists in the
+  channel), its speaker and light pulsing on the beat.
+- Buttons: the pointer and A as everywhere; the D-pad's up and down move the list's highlight
+  and A plays it (with the pointer away), left and right play the previous and next track,
+  + pauses and resumes, − stops, B goes back.
+
+It is a scene of its own (`engine/soundplayer`), made in native code but run by the channel's
+scene manager like the theater or the options: `engine/system/host_scene.cpp` gives the
+channel's `lib::Scene` a native factory and virtuals, through guest code addresses for native
+functions (`guest::host_fn_address`, `runtime/dispatch.cpp`). The bar's button is added where the
+bar makes its own (`runtime/patches/menus.cpp`). `NOMA_SP_BEATS=1` logs where the music is and
+what each Mii plays, every frame.
+
 ## Layout
 
 - `engine/` — native 3DS code in place of the program's SDK functions (the base of the engine
   the port is becoming): `os/` (interrupts, clock), `cw/` (compiler runtime helpers), `input/`
-  (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out).
+  (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out,
+  scenes written in native code), `soundplayer/` (the Sound Player).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what
