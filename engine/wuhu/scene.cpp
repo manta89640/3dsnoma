@@ -17,6 +17,7 @@
 
 #include <string>
 
+#include "engine/input/remote.h"
 #include "engine/ui/g3d.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
@@ -59,17 +60,29 @@ u32 s_black_return_at = 0;
 const char* const STATE_NAMES[] = {"loading", "fading in", "playing", "menu", "leaving"};
 
 // The circle pad walks the Mii here, rather than moving the pointer (which platform/3ds/main.cpp
-// makes it do elsewhere): the stick mode of the remote's input, on while the scene lives.
-// INTEGRATION (track G1, engine/input/remote.h): its stick mode is to be switched here; until then
-// the circle pad still nudges the pointer on the island.
-void stick_mode(bool on) { (void)on; }
+// makes it do elsewhere): the stick mode of the remote's input, on while the scene lives (touching
+// still points, for the Home tab and the window).
+void stick_mode(bool on) { guest::input_set_stick_mode(on); }
 
-// The player's controls this frame: the remote's buttons, as the game's input manager read them.
-// INTEGRATION (track G1, engine/input/remote.h): the move and camera sticks are to be read here.
+f32 clamp1(f32 v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
+
+// The player's controls this frame: the remote's buttons, as the game's input manager read them;
+// the move stick (the circle pad); the camera: the New 3DS's C-stick, or L and R to turn it round
+// the Mii (R to the right), the D-pad's up and down to look up and down and its left and right to
+// come in and go out, Y (the remote's 2) to bring it round behind the Mii. (NOMA_INPUT on the host:
+// S(x;y), C(x;y), [L], [R], the D-pad's U, D, L, R and 2.)
 Controls read_controls() {
     Controls c;
     c.held = game::buttons_held();
     c.pressed = game::buttons_triggered();
+    const guest::WiimoteInput& in = guest::wiimote_input();
+    auto on = [&](u32 bit) { return (c.held & bit) ? 1.0f : 0.0f; };
+    c.move_x = in.stick_x, c.move_y = in.stick_y;
+    const f32 l = (in.pad & guest::PAD_L) ? 1.0f : 0.0f, r = (in.pad & guest::PAD_R) ? 1.0f : 0.0f;
+    c.camera_x = clamp1(in.cam_x + r - l);
+    c.camera_y = clamp1(in.cam_y + on(game::PAD_UP) - on(game::PAD_DOWN));
+    c.zoom = on(game::PAD_RIGHT) - on(game::PAD_LEFT);
+    c.behind = (c.pressed & game::PAD_TWO) != 0;
     return c;
 }
 
