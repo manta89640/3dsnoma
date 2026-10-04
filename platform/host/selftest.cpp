@@ -996,6 +996,44 @@ static void selftest_fill() {
     log("selftest fill: %d fills, %s", cases, bad ? "MISMATCH" : "ok");
 }
 
+// wii_Thread_GetUnusedStackSize (engine/system/thread.cpp) against the guest's loop: from the stack's
+// base a word at a time while it holds 0xDEADBABE, the last word never counted; stacks of 0 to 64 KB at
+// any alignment, used from the top down to any depth, with words left untouched inside the used part
+// and stray writes inside the fill
+static void selftest_stack() {
+    axref::Rng rnd{777};
+    const u32 thread = 0x90180000, area = 0x90200000;
+    int bad = 0, cases = 0;
+    for (int t = 0; t < 4000 && bad < 5; t++, cases++) {
+        u32 size = t % 50 == 0 ? rnd() % 16 : rnd() % 0x10000;
+        u32 base = area + (t % 4 == 0 ? rnd() % 4 : (rnd() % 64) * 8);
+        for (u32 i = 0; i + 4 <= size + 8; i += 4)
+            store32(base + i, 0xDEADBABE);
+        u32 depth = rnd() % 3 == 0 ? 0 : rnd() % (size + 1);  // bytes used from the top
+        for (u32 a = base + size - depth; a + 4 <= base + size; a += 4)
+            if (rnd() % 8)
+                store32(a & ~3u, rnd());
+        for (int k = rnd() % 3; k > 0 && size >= 4; k--)
+            store8(base + rnd() % size, (u8)rnd());
+        store32(thread + 0x318, base), store32(thread + 0x31C, size);
+        u32 want = 0;
+        for (u32 p = base;;) {
+            u32 w = load32(p);
+            p += 4;
+            if (w != 0xDEADBABE || p >= base + size)
+                break;
+            want++;
+        }
+        want *= 4;
+        u32 got = g::wii_Thread_GetUnusedStackSize(thread);
+        if (got != want) {
+            bad++;
+            log("selftest stack: %u bytes at %08X: %u, the loop %u", size, base, got, want);
+        }
+    }
+    log("selftest stack: %d stacks, %s", cases, bad ? "MISMATCH" : "ok");
+}
+
 // OSCalcCRC16 (engine/os/crc.cpp, a byte at a time) against the SDK's loop it replaces (half a byte
 // at a time through the DOL's table of 16): random blocks of 0 B to 1 MB at any alignment, and the
 // channel's save file size
@@ -1196,6 +1234,8 @@ bool run_selftest(const std::string& name) {
         selftest_fill();
     else if (name == "crc")
         selftest_crc();
+    else if (name == "stack")
+        selftest_stack();
     else if (name == "efb")
         selftest_efb();
     else if (name == "tex")
@@ -1214,6 +1254,7 @@ bool run_selftest(const std::string& name) {
         selftest_cx();
         selftest_fill();
         selftest_crc();
+        selftest_stack();
         selftest_efb();
         selftest_tex();
     }

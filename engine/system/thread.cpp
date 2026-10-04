@@ -1,7 +1,7 @@
 // The channel's thread class (wii::Thread: an OSThread with its stack at 0x318/0x31C, filled with
 // 0xDEADBABE when the thread is created): how much of the stack was never touched, counted from
-// its far end one word at a time. Asked every frame for each thread, it walked whole stacks in
-// emulated code; here it is a host loop over the stack's bytes.
+// its far end one word at a time. The loader thread asks on every pass of its loop; here it is a
+// host loop over the stack's words (NOMA_SELFTEST=stack checks it against the guest's loop).
 #include "noma_decomp.h"
 
 namespace engine::system {
@@ -18,11 +18,19 @@ u32 unused_stack(u32 thread) {
     u32 n = 0;
     const u8* h = guest::host_ptr(base);
     if (h && end > base && guest::host_ptr(end - 1) == h + (end - 1 - base)) {
-        // the stack is one host block: compare the big-endian words in place
-        static const u8 fill[4] = {0xDE, 0xAD, 0xBA, 0xBE};
-        u32 words = (end - base) / 4;
+        // the stack is one host block: compare its words in place, four at a time (the fill's
+        // big-endian bytes DE AD BA BE read as a little-endian word)
+        static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "host words are little-endian");
+        const u32 F = 0xBEBAADDEu;
+        const u32 lim = (end - base + 3) / 4 - 1;  // the words that can count
         u32 i = 0;
-        while (i < words && ::memcmp(h + i * 4, fill, 4) == 0 && base + (i + 1) * 4 < end)
+        for (; i + 4 <= lim; i += 4) {
+            u32 w[4];
+            ::memcpy(w, h + i * 4, 16);
+            if ((w[0] ^ F) | (w[1] ^ F) | (w[2] ^ F) | (w[3] ^ F))
+                break;
+        }
+        for (u32 w; i < lim && (::memcpy(&w, h + i * 4, 4), w == F);)
             i++;
         n = i;
     } else {
