@@ -221,6 +221,9 @@ PATCHED_NAMES = {
     # the room bar's Sound Player button leads to its scene, made with the channel's own scene
     # factories at the start (runtime/patches/menus.cpp, engine/soundplayer)
     "controller_living_SceneTransit_Go", "app_SceneFactories_ctor",
+    # the way to Wuhu Island and back in black (runtime/patches/wipes.cpp, engine/wuhu):
+    # SceneTransit::Request, layout::parts::Wipe's Out and In
+    "fn_8006FCA8", "fn_80154CE8", "layout_parts_Wipe_In",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",

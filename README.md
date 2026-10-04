@@ -205,7 +205,8 @@ what each Mii plays, every frame.
   (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out,
   scenes written in native code), `ui/` (what the native scenes share: the channel's layouts,
   buttons, wipes and 3D pieces as they use them, pictures made at run time), `soundplayer/` (the
-  Sound Player).
+  Sound Player), `wuhu/` (walkable Wuhu Island, in progress: `docs/wuhu_design.md`; so far the
+  bar's 出発 button and the scene's shell).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what
