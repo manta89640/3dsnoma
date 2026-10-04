@@ -78,6 +78,7 @@ struct GxTnlPalette {
     Entry entries[TNL_PAL_SLOTS / 3];
     u8 slot_entry[TNL_PAL_SLOTS];  // slot -> entry index, 0xFF: none
     u8 by_row[3][64];              // (kind - 1, XF row) -> entry index, 0xFF: none
+    u16 used_groups = 0;           // bit per group: some of its slots are in use
     u16 ref = 0;                   // bit per group: used since the clock's hand passed it
     u8 hand = 0;
     GxTnlPalette() {
@@ -85,7 +86,7 @@ struct GxTnlPalette {
         memset(by_row, 0xFF, sizeof(by_row));
     }
     // the pending batch was submitted: every slot may be reused
-    void flushed() { used = 0; }
+    void flushed() { used = 0, used_groups = 0; }
 };
 
 // A draw as planned for the shader: the constants, and what the vertices need.

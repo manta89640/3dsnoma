@@ -109,6 +109,7 @@ int pal_try(GxTnlPalette& pal, u32 g, u8 kind, u8 xf_row) {
     }
     pal.ref |= (u16)(((1u << (e.n / 3)) - 1) << g);
     pal.used |= slots_mask(e.first, 3 * pal_groups_of(kind));
+    pal.used_groups |= (u16)(((1u << pal_groups_of(kind)) - 1) << g);
     return e.first;
 }
 
@@ -116,17 +117,19 @@ int pal_try(GxTnlPalette& pal, u32 g, u8 kind, u8 xf_row) {
 // -1 when every slot that could hold them is in use by the pending batch. `hint`: the slot they
 // had last time (-1: none), tried first.
 int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
+    u32 tried = 0xFF;
     if (hint >= 0 && hint < (int)TNL_PAL_SLOTS && pal.slot_entry[hint] != 0xFF) {
         u32 g = pal.slot_entry[hint];
         if (pal.entries[g].first == hint) {
             int s = pal_try(pal, g, kind, xf_row);
             if (s >= 0)
                 return s;
+            tried = g;
         }
     }
     // the entry holding these rows, by row (an R3's rows may sit in an R3N entry)
     u32 g = pal.by_row[kind - 1][xf_row & 63];
-    if (g != 0xFF) {
+    if (g != 0xFF && g != tried) {
         int s = pal_try(pal, g, kind, xf_row);
         if (s >= 0)
             return s;
@@ -153,9 +156,9 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
             lo--;
         if (pal.entries[hi - 1].kind == PAL_R3N)
             hi++;
-        if (hi > PAL_GROUPS || (pal.used & slots_mask(3 * lo, 3 * (hi - lo))))
-            continue;
         const u16 mask = (u16)(((1u << (hi - lo)) - 1) << lo);
+        if (hi > PAL_GROUPS || (pal.used_groups & mask))
+            continue;
         if (pal.ref & mask) {
             pal.ref &= (u16)~mask;
             continue;
@@ -174,6 +177,7 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
     }
     pal_fill(pal, (u32)best, kind, xf_row);
     pal.used |= slots_mask(3 * best, 3 * need);
+    pal.used_groups |= (u16)(((1u << need) - 1) << best);
     pal.ref |= (u16)(((1u << need) - 1) << best);
     return 3 * best;
 }
