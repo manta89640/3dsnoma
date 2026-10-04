@@ -54,9 +54,12 @@ const float FRAME_W = 640.0f, FRAME_H = 456.0f;  // the game's frame buffer
 // (written again every frame), the rest the display lists' vertices, kept from frame to frame
 // (the display-list cache below). The palette slots are a buffer of their own beside it, so that
 // a list's vertices stay untouched when its matrices get other slots.
-const u32 POOL_VERTICES = 65536;     // 4 MB + 256 KB of slots
-const u32 IMM_VERTICES = 28 << 10;
-const u32 IBUF_INDICES = 384 << 10;  // 768 KB
+// Sized from the room and the scenes before it, about twice what they use at most: 9K immediate
+// vertices and 23K indices in a frame, 10.6K list vertices kept (linear heap is the Old 3DS's
+// scarcest memory: textures, the guest's MEM1, the sound).
+const u32 POOL_VERTICES = 40 << 10;  // 2.5 MB + 160 KB of slots
+const u32 IMM_VERTICES = 20 << 10;
+const u32 IBUF_INDICES = 128 << 10;  // 256 KB
 
 #define DISPLAY_TRANSFER_FLAGS                                                                  \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
@@ -173,9 +176,12 @@ State P;
 // milliseconds per frame over N frames, with counts (svcGetSystemTick around every part costs
 // something itself, so only when asked); the profiler's scopes cover the same parts for free
 struct Timers {
-    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, N };
+    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, N };
     u64 ticks[N] = {};
     u32 calls[N] = {};
+    u64 frame_ticks[N] = {};  // the sections' ticks when the frame started (a slow frame is logged on its own)
+    u32 spike_ms = 100;       // NOMA_GX_SPIKE_MS
+    u32 uploads = 0, upload_texels = 0, copies = 0;  // this frame
     u64 frame_t0 = 0, wall = 0;
     u32 frames = 0;
     u32 consts_vectors = 0, pal_slots = 0, pieces = 0, tev_misses = 0, plan_misses0 = 0;
@@ -187,6 +193,8 @@ struct Timers {
 inline bool timers_on() {
     if (T.every == -2)
         T.every = getenv("NOMA_GX_TIMERS") ? std::max(1, atoi(getenv("NOMA_GX_TIMERS"))) : 0;
+    if (T.every > 0 && getenv("NOMA_GX_SPIKE_MS"))
+        T.spike_ms = (u32)std::max(1, atoi(getenv("NOMA_GX_SPIKE_MS")));
     return T.every > 0;
 }
 struct Timed {
@@ -199,16 +207,34 @@ struct Timed {
     }
 };
 static const char* const k_timer_names[Timers::N] = {"plan", "consts", "vertices", "slots", "submit", "flush", "tev",
-                                                     "textures", "bind", "pixel", "xform", "frame", "end", "clear", "readback"};
+                                                     "textures", "upload", "bind", "pixel", "xform", "frame", "end", "clear",
+                                                     "readback", "copy"};
 
 // at a frame's end: the frame's wall time; every N frames the averages
 void timers_frame_end() {
     if (!timers_on())
         return;
     u64 now = svcGetSystemTick();
-    if (T.frame_t0)
+    if (T.frame_t0) {
         T.wall += now - T.frame_t0, T.frames++;
+        // a slow frame: where its own time went
+        const double fms = (double)(now - T.frame_t0) * 1000.0 / SYSCLOCK_ARM11;
+        if (fms >= (double)T.spike_ms) {
+            char line[512];
+            int n = snprintf(line, sizeof(line), "gx spike: frame %u took %.0f ms:", P.frame, fms);
+            for (int k = 0; k < Timers::N; k++) {
+                double ms = (double)(T.ticks[k] - T.frame_ticks[k]) * 1000.0 / SYSCLOCK_ARM11;
+                if (ms >= 1.0)
+                    n += snprintf(line + n, sizeof(line) - n, " %s %.0f", k_timer_names[k], ms);
+            }
+            snprintf(line + n, sizeof(line) - n, "; %u textures made (%u KB of texels), %u EFB copies", T.uploads,
+                     T.upload_texels >> 10, T.copies);
+            log("%s", line);
+        }
+    }
     T.frame_t0 = now;
+    memcpy(T.frame_ticks, T.ticks, sizeof(T.ticks));
+    T.uploads = T.upload_texels = T.copies = 0;
     if (T.frames < (u32)T.every)
         return;
     const double ms = 1000.0 / SYSCLOCK_ARM11 / T.frames;
@@ -239,6 +265,7 @@ void timers_frame_end() {
     log("%s", line);
     memset(T.ticks, 0, sizeof(T.ticks));
     memset(T.calls, 0, sizeof(T.calls));
+    memset(T.frame_ticks, 0, sizeof(T.frame_ticks));
     T.wall = 0, T.frames = 0;
     T.consts_vectors = T.pal_slots = T.pieces = T.tev_misses = 0;
     T.dec0 = d;
@@ -267,20 +294,32 @@ void upload_uniforms() {
         P.bools_dirty = P.ints_dirty = true;
         P.uni_resend = false;
     }
-    // runs of changed vectors
-    u32 i = 0;
-    while (i < 95) {
-        bool d = i < 64 ? (P.uni_dirty_lo >> i) & 1 : (P.uni_dirty_hi >> (i - 64)) & 1;
-        if (!d) {
-            i++;
-            continue;
+    // runs of changed vectors (c0-c94: c95 is citro3d's), found a run at a time
+    u64 lo = P.uni_dirty_lo;
+    u32 hi = P.uni_dirty_hi & ((1u << (95 - 64)) - 1);
+    while (lo | hi) {
+        u32 i = lo ? (u32)__builtin_ctzll(lo) : 64 + (u32)__builtin_ctz(hi);
+        // the run's end: the first clear bit from i on
+        u32 j;
+        if (i < 64) {
+            u64 ones = ~lo & (~0ull << i);
+            j = ones ? (u32)__builtin_ctzll(ones) : 64;
+            lo &= j < 64 ? ~0ull << j : 0;
+            if (j == 64) {  // (a run on into c64 on)
+                u32 more = ~hi;
+                u32 k = more ? (u32)__builtin_ctz(more) : 32;
+                j = 64 + k;
+                hi &= k < 32 ? ~0u << k : 0;
+            }
+        } else {
+            u32 b = i - 64;
+            u32 ones = ~hi & (~0u << b);
+            u32 k = ones ? (u32)__builtin_ctz(ones) : 32;
+            j = 64 + k;
+            hi &= k < 32 ? ~0u << k : 0;
         }
-        u32 j = i + 1;
-        while (j < 95 && (j < 64 ? (P.uni_dirty_lo >> j) & 1 : (P.uni_dirty_hi >> (j - 64)) & 1))
-            j++;
         GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
         GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, &P.uni[i][0], 4 * (j - i));
-        i = j;
     }
     P.uni_dirty_lo = 0, P.uni_dirty_hi = 0;
     if (P.bools_dirty) {
@@ -577,6 +616,8 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     GPU_TEXCOLOR fmt = pica_format(gt);
     if (e.version != gt->version || !e.tex.data) {
         NOMA_PROF_SCOPE("(gx texture upload)");
+        Timed timed(Timers::UPLOAD);
+        T.uploads++, T.upload_texels += W * H;
         if (gt->rgba.empty()) {  // released after an earlier upload: decoded again
             gt = gx_texture_pixels(map);
             if (!gt || gt->rgba.empty())
@@ -1894,17 +1935,29 @@ bool read_back() {
 // bands (this one: two passes through an anti-aliased EFB) moves each band to the top of the
 // EFB with the scissor box offset; EFB coordinates are screen coordinates minus that offset.
 s32 efb_off_x, efb_off_y;
+// an EFB column's and row's place in the read-back buffer (for the offset they were made with)
+u32 s_rb_col[1024], s_rb_row[1024];
+s32 s_rb_off_x = 1 << 30, s_rb_off_y = 1 << 30;
+void set_efb_offset(s32 ox, s32 oy) {
+    efb_off_x = ox, efb_off_y = oy;
+    if (efb_off_x == s_rb_off_x && efb_off_y == s_rb_off_y)
+        return;
+    s_rb_off_x = efb_off_x, s_rb_off_y = efb_off_y;
+    for (u32 v = 0; v < 1024; v++) {
+        float fx = (float)((s32)v + efb_off_x) + 0.5f, fy = (float)((s32)v + efb_off_y) + 0.5f;
+        u32 X = (u32)std::min(399.0f, std::max(0.0f, fx * 400.0f / FRAME_W));
+        u32 Y = (u32)std::min(239.0f, std::max(0.0f, fy * 240.0f / FRAME_H));
+        s_rb_col[v] = X * 240, s_rb_row[v] = 239 - Y;
+    }
+}
 void load_efb_offset() {
     u32 r = g_gx.bp[BP_SCISSOR_OFFSET];
-    efb_off_x = (s32)bits(r, 0, 10) * 2 - 342, efb_off_y = (s32)bits(r, 10, 10) * 2 - 342;
+    set_efb_offset((s32)bits(r, 0, 10) * 2 - 342, (s32)bits(r, 10, 10) * 2 - 342);
 }
 
 // an EFB pixel from the read-back render target (the frame scaled to 400x240, rotated)
 void readback_rgba(u32 x, u32 y, s32* out) {
-    float fx = (float)((s32)x + efb_off_x) + 0.5f, fy = (float)((s32)y + efb_off_y) + 0.5f;
-    u32 X = (u32)std::min(399.0f, std::max(0.0f, fx * 400.0f / FRAME_W));
-    u32 Y = (u32)std::min(239.0f, std::max(0.0f, fy * 240.0f / FRAME_H));
-    u32 p = s_readback[X * 240 + (239 - Y)];
+    u32 p = s_readback[s_rb_col[x & 1023] + s_rb_row[y & 1023]];
     out[0] = (s32)(p >> 24), out[1] = (s32)((p >> 16) & 255), out[2] = (s32)((p >> 8) & 255), out[3] = (s32)(p & 255);
 }
 
@@ -1978,7 +2031,7 @@ void PicaRenderer::draw_done() {
         begin_frame();  // (a frame an applet interrupted, with no draw since: it is shown too)
     if (P.in_frame) {  // the frame is complete
         if (gx_efb_copy_test_frame() == (int)P.frame && read_back()) {
-            efb_off_x = efb_off_y = 0;  // the whole frame
+            set_efb_offset(0, 0);  // the whole frame
             gx_efb_copy_test(readback_rgba, "sdmc:/3ds/noma/efbcopy_3ds");
         }
         {
@@ -2044,6 +2097,8 @@ void PicaRenderer::efb_copy(u32 value) {
         if (P.warned++ < 4)
             log("pica: EFB depth copy to a texture (not emulated)");
     } else if (read_back()) {
+        Timed timed(Timers::COPY);
+        T.copies++;
         gx_copy_to_texture(c, readback_rgba);
     }
     if (c.clear && P.resume)
