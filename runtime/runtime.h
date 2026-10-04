@@ -146,5 +146,11 @@ void threads_forget_context(u32 ctx);  // the context is set up for a new thread
 
 // ---- function dispatch (dispatch.cpp)
 const char* fn_name(u32 guest_addr);
+// a guest code address for a native function (the same one every time), so that guest code can
+// call it through a pointer: a vtable slot, a callback. The function takes the register ABI's
+// arguments (u32 per integer register, in order, at most eight; f64 per float register).
+u32 host_fn_address(void* fn);
+template <class F>
+static inline u32 host_fn(F* fn) { return host_fn_address((void*)fn); }
 
 }  // namespace guest

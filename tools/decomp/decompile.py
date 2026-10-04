@@ -205,6 +205,9 @@ PATCHED_NAMES = {
     # theater's Wii Points button, the room bar's shop button
     "layout_option_Option_ctor", "layout_option_Option_SetActive", "controller_theater_LayoutController_ctor",
     "layout_living_MoveBtn_ctor",
+    # the room bar's Sound Player button leads to its scene, made with the channel's own scene
+    # factories at the start (runtime/patches/menus.cpp, engine/soundplayer)
+    "fn_800706E0", "fn_80247FC0",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",

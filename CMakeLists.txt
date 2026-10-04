@@ -77,8 +77,17 @@ set(ENGINE_SOURCES
   engine/snd/seq.cpp
   engine/snd/tables.cpp
   engine/snd/voice.cpp
+  engine/soundplayer/amp.cpp
+  engine/soundplayer/bar_button.cpp
+  engine/soundplayer/catalog.cpp
+  engine/soundplayer/controls.cpp
+  engine/soundplayer/music.cpp
+  engine/soundplayer/scene.cpp
+  engine/soundplayer/stage.cpp
+  engine/soundplayer/track_list.cpp
   engine/system/allocator.cpp
   engine/system/home_button.cpp
+  engine/system/host_scene.cpp
   engine/system/keyboard.cpp
   engine/system/thread.cpp
   engine/ut/font.cpp
