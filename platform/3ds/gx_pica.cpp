@@ -1320,6 +1320,9 @@ void begin_frame() {
     P.batch_count = 0;
     P.all_dirty = true;
     P.env_valid = false;
+    // every frame's palette starts the same: a frame drawing what the last one drew then gives its
+    // matrices the same slots, and the list cache's draws keep the slots their vertices have
+    P.pal = GxTnlPalette();
     // the GPU has finished the frame before: a full cache starts over now
     if (P.cache_full) {
         for (u32 i = 0; i < DL_ENTRIES; i++)
