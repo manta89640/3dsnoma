@@ -10,6 +10,9 @@
 // as in the channel's dialogs (lyt::mark_a / mark_b); B is いいえ with the pointer on the screen too
 // (the scenes open the window with B: B again closes it). A choice takes the buttons away and plays
 // the window's FadeOut.
+// It can also open over another window of the same look (engine/ui/menu's, paged out for it): it
+// then comes in with its PageIn over the veil the other leaves it, and いいえ, going back to that
+// window, leaves with its PageOut, handing the veil back at once (はい still fades it all out).
 // All its guest objects are made with it (hidden until opened) and deleted with it.
 #pragma once
 
@@ -30,8 +33,9 @@ public:
     Confirm(const Confirm&) = delete;
     Confirm& operator=(const Confirm&) = delete;
 
-    // the window opens (nothing if it is shown already)
-    void open();
+    // the window opens (nothing if it is shown already); over_window: in the place of another
+    // window, whose veil it takes over (see above)
+    void open(bool over_window = false);
     // shown: opening, open, or fading out after a choice
     bool shown() const { return state_ != State::HIDDEN; }
     // once a frame (after the scene's own parts, before its cursor's update)
@@ -51,7 +55,9 @@ private:
     u32 cursor_;
     u32 scene_ = 0, window_ = 0;  // Common_Scene (a layout of its own), Common_Window hanging from it
     u32 no_ = 0, yes_ = 0;        // the buttons
-    u32 window_in_ = 0, window_out_ = 0;
+    u32 veil_ = 0;                // the window's Pic_Bg
+    u32 window_in_ = 0, window_out_ = 0, page_in_ = 0, page_out_ = 0;
+    bool over_window_ = false;
     State state_ = State::HIDDEN;
     Choice choice_ = Choice::NONE;
 };

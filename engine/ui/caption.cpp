@@ -1,6 +1,9 @@
 // A caption at the top of the screen (see caption.h).
 #include "engine/ui/caption.h"
 
+#include <algorithm>
+#include <limits>
+
 #include "engine/ui/lyt.h"
 
 namespace engine::ui {
@@ -20,7 +23,8 @@ const int SUBTITLE_DELAY = 8;
 
 }  // namespace
 
-Caption::Caption(const std::u16string& title, const std::u16string& subtitle) {
+Caption::Caption(const std::u16string& title, const std::u16string& subtitle, u32 chars) {
+    chars_ = std::max<u32>(chars + 1, (u32)std::max(title.size(), subtitle.size()) + 1);
     for (Line* line : {&title_, &subtitle_}) {
         line->layout = lyt::layout_new(TOP_MESSAGE_LEX);
         line->fade_in = lyt::find_anim(line->layout, "FadeIn_All");
@@ -28,7 +32,7 @@ Caption::Caption(const std::u16string& title, const std::u16string& subtitle) {
         lyt::pose(line->layout, line->fade_in, 0);  // transparent until shown
         u32 box = lyt::find_pane(line->layout, "Text_Title");
         const std::u16string& text = line == &title_ ? title : subtitle;
-        lyt::text_reserve(box, (u32)text.size() + 1);
+        lyt::text_reserve(box, chars_);
         lyt::set_text(box, text);
         if (line == &subtitle_) {
             lyt::show(lyt::find_pane(line->layout, "Pic_Line"), false);
@@ -43,9 +47,14 @@ Caption::~Caption() {
     lyt::layout_delete(title_.layout);
 }
 
+void Caption::set_text(const std::u16string& title, const std::u16string& subtitle) {
+    lyt::set_text(lyt::find_pane(title_.layout, "Text_Title"), title.substr(0, chars_ - 1));
+    lyt::set_text(lyt::find_pane(subtitle_.layout, "Text_Title"), subtitle.substr(0, chars_ - 1));
+}
+
 void Caption::show(int frames) {
     frame_ = 0;
-    hide_at_ = frames;
+    hide_at_ = frames == UNTIL_HIDDEN ? std::numeric_limits<int>::max() : frames;
     shown_ = sub_shown_ = hiding_ = false;
 }
 
