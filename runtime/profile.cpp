@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +37,10 @@ struct Counts {
     std::unordered_map<const char*, u32> self, total;
     std::unordered_map<u32, u32> threads;
     std::map<std::pair<u32, const char*>, u32> thread_self;  // per guest thread
+    // NOMA_PROFILE_UNDER=name: the samples with that function on the stack, by the function they
+    // were in (self) and by the functions below it they were under (total)
+    u32 under = 0;
+    std::unordered_map<const char*, u32> under_self, under_total;
 };
 Counts s_counts;
 Counts s_gpu_counts;    // the GPU's thread: self only, "(gpu idle)" while it waits for commands
@@ -45,6 +50,9 @@ Counts s_frame_gpu;
 bool s_frames_on;
 std::atomic_flag s_lock = ATOMIC_FLAG_INIT;
 int s_every;  // seconds between reports
+int s_top = 25;  // NOMA_PROFILE_TOP: lines per list
+const char* s_under_name;  // NOMA_PROFILE_UNDER
+const char* s_under;       // ... the name as the stacks hold it (the first pointer seen with that text)
 
 // a host thread with a stack of its own: where it is now
 void sample_host(const ProfStack& st, Counts& c, const char* idle) {
@@ -103,6 +111,23 @@ void sample() {
             if (!seen)
                 s_counts.total[names[i]]++;
         }
+        if (s_under_name) {
+            u32 at = depth;
+            for (u32 i = 0; i < depth && at == depth; i++)
+                if (names[i] == s_under || (!s_under && strcmp(names[i], s_under_name) == 0))
+                    s_under = names[i], at = i;
+            if (at < depth) {
+                s_counts.under++;
+                s_counts.under_self[names[depth - 1]]++;
+                for (u32 i = at + 1; i < depth; i++) {
+                    bool seen = false;
+                    for (u32 j = at + 1; j < i && !seen; j++)
+                        seen = names[j] == names[i];
+                    if (!seen)
+                        s_counts.under_total[names[i]]++;
+                }
+            }
+        }
     }
     s_lock.clear(std::memory_order_release);
 }
@@ -155,6 +180,9 @@ void profile_start() {
     s_every = getenv("NOMA_PROFILE") ? atoi(getenv("NOMA_PROFILE")) : 0;
     if (s_every <= 0)
         return;
+    if (getenv("NOMA_PROFILE_TOP"))
+        s_top = std::max(5, atoi(getenv("NOMA_PROFILE_TOP")));
+    s_under_name = getenv("NOMA_PROFILE_UNDER");
 #ifdef __3DS__
     // the system core when the app may use some of it (the game runs on core 0), else core 0 at
     // a priority above the game's
@@ -231,8 +259,13 @@ void profile_report_due() {
         if (n < (int)sizeof(line) - 32)
             n += snprintf(line + n, sizeof(line) - n, " %08X %.1f%%", t.second, 100.0 * t.first / c.samples);
     log("%s", line);
-    log_top("self ", c.self, c.samples, 25);
-    log_top("total", c.total, c.samples, 25);
+    log_top("self ", c.self, c.samples, s_top);
+    log_top("total", c.total, c.samples, s_top);
+    if (c.under) {
+        log("profile: %.1f%% under %s:", 100.0 * c.under / c.samples, s_under_name);
+        log_top("under self ", c.under_self, c.samples, s_top);
+        log_top("under total", c.under_total, c.samples, s_top);
+    }
     // the busiest guest threads: where each spends its time
     for (size_t t = 0; t < th.size() && t < 3; t++) {
         std::unordered_map<const char*, u32> m;
