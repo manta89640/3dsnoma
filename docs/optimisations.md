@@ -14,6 +14,15 @@ Rules:
   gains on hardware, and on the Old 3DS, which has no L2 cache.
 - For kernels, count ARM11 instructions: compile with the 3DS flags and run under Unicorn
   ("ARM11 kernel bench" below).
+- **Spikes, not only averages.** `NOMA_LOAD_STATS=ms` (env.txt) logs every frame longer than `ms`
+  with what happened in it (each guest thread's CPU time, idle time, content reads by archive file
+  and how long the guest waited, LZ/Huffman bytes and time, file system jobs, heap allocations,
+  texture uploads; in profile builds that frame's own top functions, the GPU thread's included), a
+  line per loading burst, and every 10 s the frame-time distribution (p50/p90/p99, worst). Azahar
+  models the SD card from hardware measurements (a read costs ~0.52 ms plus ~183 ns a byte, about
+  5.5 MB/s; it charges FS opens too) but not SD writes; and a log line costs ~2 ms there
+  (svcOutputDebugString), so a slow frame's lines land in the next frame. The decoders' times in
+  those lines include the AX mixing done in their poll points: judge kernels by instruction counts.
 
 ## Done
 
@@ -43,6 +52,14 @@ Rules:
 | The SDK's software keyboard and ATOK left out: 1,592 of their 1,604 functions are stubs. `tools/decomp/reachable.py` follows calls, address loads and vtable/table entries from where execution starts (`__start`, `main`, the .ctors table, the natives' own references) and found only 12 one-line accessors that the linker shared with the channel's classes still reached; they stay decompiled (`KEEP` in `regions.py`). Its 14 static constructors fill only its own tables (no live code reads them) and run as stubs | `tools/decomp/regions.py`, `tools/decomp/reachable.py` | 552 KB of PowerPC code; 3DS code 15.05 → 13.63 MB. No stub hit beyond the constructors on the way through the room, その他, メッセージを送る, the Mii pick and the mood choice. |
 | The channel's contents read on an I/O thread: an ES content read stays pending while every guest thread runs on, the bytes go straight into guest memory, and the device poll sends the replies in order (the content handle keeps its own position, so seeks don't wait; closing waits for the reads in flight) | `runtime/hw/ios/ios.cpp`, `es.cpp`, `platform/*/main.cpp` (`platform_io_thread_start`; `NOMA_IO_INLINE=1` reads inline) | The start-up's 408 reads (10.2 MB) no longer stop the emulator: about a second on a 3DS SD card. Loading itself isn't shorter: the game reads and decompresses each piece in turn (host at a simulated 4 MB/s, `NOMA_READ_MBPS=4`: last read at 29.9 s either way). |
 | Libraries behind natives decompiled only where they can still run: WPAD, the Bluetooth stack, the HOME Button Menu and PD/KPR/KBD/HID are "dead" regions, where decompile.py stubs what `tools/decomp/reachable.py` can't reach (1,470 functions, 435 KB of PowerPC; 77 stay) | `tools/decomp/regions.py`, `decompile.py` | 3DS code 13.63 → 12.66 MB. No stub hit beyond the boot constructors in the room (HOME, 1, 2, +, −, B pressed) or the first start. |
+| Loading spikes measured frame by frame: `NOMA_LOAD_STATS` (see Rules), per-spike profiler samples (`profile_frame_end`) | `runtime/load_stats.cpp`, `runtime/profile.cpp`, hooks in IOS, CX, VI, irq, heap | Baseline (Azahar, release, start to the room): the start's long frame 2.72 s (the 6 MB sound archive read: 1.1 s), the room made in one 3.15 s frame, the room shown at 25.2 s; in the room 29-34 fps, p99 ~50 ms. |
+| The file system's requests on the I/O thread: NAND opens, reads, writes, closes, `/dev/fs`, ES's content open and close are jobs, in the order they came (IOS's file system is one thread too); only the guest thread that sent one waits, a content's close no longer waits for every read in flight; `/tmp` (in memory) is done at once while no job waits. Opens take one SD access (fopen, then fstat; libctru's stat opens the file too), read-only files a 4 KB stdio buffer (64 KB made every small read a 64 KB card read) | `runtime/hw/ios/ios.cpp`, `fs.cpp`, `es.cpp` | Measured, Azahar: a NAND open stopped every guest thread for ~60 ms (now ~10 ms on the I/O thread), a small read 12.6 ms, a close ~10 ms: 2.05 s of such stops during the start, 0.68 s in the frame that makes the room. Room-making frame 3.15 → 2.50 s; the room shown 3.3 s sooner. The save written at a host shutdown is byte-identical with `NOMA_IO_INLINE=1`. |
+| Huffman glyph sheets: the 10-bit table also gives every whole symbol its bits hold (up to an output word), runs of the 1-bit code (the empty background: two thirds of the symbols, in runs of 16 or more) are counted with CLZ and stored a word at a time; both go on across input words and stop at a symbol's end with the streaming code's state; the output goes straight to host memory | `engine/cx/uncompress.cpp` | ARM11 instructions per output byte over 16 sheets of both fonts: 41.2 → 26.0 (sparse sheets 33.7 → 16.3, dense kanji 48.3 → 34.4). Azahar: the font's 4.4 MB 939 → 747 ms. Exact: `NOMA_SELFTEST=cx` now also decodes every LZ file (715) and glyph sheet (136) in `./content` in random pieces; host UBSan harness over all sheets. |
+| The heaps' NaN fill of new blocks native (`lib_allocator_Fill`, 0x8018A13C): every block lib::allocator hands out is filled with `lib_allocator_sFillValue` (0x7FFFFFFF) and 0xFF in the last size & 3 bytes; 28 MB at the start and 29 MB while the room is made went through the decompiled loop a word at a time | `engine/system/allocator.cpp` | Measured, Azahar: room-making frame 2.50 → 1.67 s, the start's long frame 2.51 → 2.18 s; the room shown at 20.1 s. `NOMA_SELFTEST=fill` (3,000 fills, mutations caught); the host save byte-identical. |
+| The 3DS log buffered (16 KB, written at most every 500 ms; the I/O thread writes what a stopped program left, fatal errors and quitting at once): every line was an FS write from the CPU's thread, ~400 lines in a start | `platform/3ds/main.cpp` | Azahar: the start's long frame 2.18 → 2.12 s (Azahar charges little for SD writes; on hardware each line was an FS call). |
+| The save file's CRC-16 native (`OSCalcCRC16`, 0x802DD830): computed half a byte at a time through a table of 16 over the 480 KB save when it is read and when it is written; now a byte at a time through a table of 256 made from the game's 16 (the same steps, by construction) | `engine/os/crc.cpp` | Measured, Azahar, with the two rows below (one run): the room-making frame 1.65 → 1.48 s, the main thread's share of it 633 → 540 ms. `NOMA_SELFTEST=crc` against the loop (400 blocks up to 1 MB, any alignment; mutations caught); the host save byte-identical. |
+| Small files read whole: when a read of at most 32 bytes starts an archive file of at most 32 KB (CNT's size query reads a compressed file's header, then the file from its start, rounded up to 32 bytes; csv files come 32 bytes at a time), the I/O thread reads the file once and copies what follows of it from there (the archives' tables come from the guest's own read of them; 4 files kept, 128 KB at most) | `runtime/hw/ios/ios.cpp` | Host with the SD card's latency modelled (`NOMA_READ_MBPS=5 NOMA_READ_US=520`): room-making reads 654 → 521 ms. Azahar: the bodies' reads (186 in a start) take no SD time now, but Azahar charges a file-sized read about what the two did; the guest's waits for reads in the room-making frame 540 → 507 ms. |
+| A content's file kept open when the channel closes it, for its next open (content 2 is opened 3 times in a start; an open and a close cost ~19 ms of SD access in Azahar) | `runtime/hw/ios/es.cpp` | Azahar: the file system's waits in the start's long frame 397 → 333 ms; that frame 2.12 → 2.01 s (with the two rows above). |
 | Guest memory as large as the game needs: MEM2 48 MB, not 64 (the room and its menus run in 44, 42 can't make the room; Flash and MobiClip are left out). The 3DS heaps split by need: the normal heap (at most 128 MB of addresses, 0x08000000 on) gets all but 48 MB, the linear heap keeps 16 MB for the GPU and sound plus MEM1; MEM2 goes in the normal heap (nothing reads guest memory by DMA) | `runtime/runtime.h` (`MEM2_SIZE`), `platform/3ds/main.cpp` (`__system_allocateHeaps`, `platform_alloc_guest`) | Guest memory 96 → 72 MB; what's saved goes to the program's own heap. |
 
 ## In progress
@@ -123,9 +140,18 @@ What the program does only because it runs on a Wii, and what replaces it.
 
 ### Loading
 
+Measured state after the round above (Azahar, release, start to the room): the room is shown at 19.6
+s (25.2 s before the round); the start's long frame (2.72 → 2.01 s) is I/O-bound: the 6 MB sound
+archive alone is 1.1 s, file system jobs 0.25 s, the main thread's CPU 0.47 s; the room-making frame
+(3.15 → 1.48 s) is the sound thread ~39%, waits for reads ~15% (243 reads, 1.7 MB), LZ ~6% (1.7 →
+3.0 MB, 150 ms), the allocator's own search ~4%, the rest the scene's own code; the next frame (1.2
+s) is the GPU thread's first textures and the save written to the card.
+
 | What | Where | Expected | Effort | Exact? |
 |---|---|---|---|---|
-| Huffman: several short codes per table entry (glyph sheets average about 2 bits a symbol, so the per-symbol work dominates) | `engine/cx/uncompress.cpp` | ≈ 34 → 15 instructions a byte on glyph sheets | 1 day | Yes, with the word-boundary state kept |
+| LZ: literal runs and matches stored a word at a time where they don't overlap (now byte loops), the flag group unrolled | `engine/cx/uncompress.cpp` | 10.8 instructions a byte on the room model; est. −30%, ~50 ms per room | 1 day | Yes (`NOMA_SELFTEST=cx` game data) |
+| The channel's heap search (fn_8018978C, fn_801893A0: the expanded heap's free-list walk and its virtual calls) | `engine/system` | ~4% of the room-making frame | Days | Must choose the same blocks |
+| `svcOutputDebugString` per log line behind a switch: ~2 ms a line in Azahar (cheap on hardware), ~400 lines in a start, which distorts every Azahar timing of loading | `platform/3ds/main.cpp` | Azahar only | Minutes | — (the user's call: the Azahar log window shows it) |
 
 ### Memory and the Old 3DS
 
@@ -145,7 +171,19 @@ What the program does only because it runs on a Wii, and what replaces it.
   interpolation, has 24 channels, and gives no per-3 ms state write-back. It can't be exact and is
   hard to keep in sync. Custom Teak firmware would be weeks of work.
 - **Recompressing game data at install.** The SD card is slow and LZ data expands about 3×; fast
-  decoders get the gain without it.
+  decoders get the gain without it. Checked again (2026-10-04) with Azahar's hardware-derived SD
+  model (~183 ns a byte): the room's g3d `.lex` files are 1.97:1, so storing them expanded costs
+  ~183 ns per extra byte read against ~40 ns per output byte of LZ on the Old 3DS (10.8 instructions);
+  the one big uncompressed file of the start, the 6 MB sound archive (ADPCM), compresses to 85% at
+  best (zlib): ≤ 0.17 s at the start, for a staging step and the CPU to undo it.
+- **Reading the start's big reads ahead** (tried 2026-10-04: each start notes the reads of 512 KB or
+  more in its first 40 s in a plan file; the next reads them ahead on the I/O thread in 32-64 KB
+  pieces while no request waits, and a matching read takes the bytes). Azahar: the font and the Mii
+  parts arrived fully read ahead (their waits 566 → 94 ms), but the sound archive, asked 1.2-1.4 s
+  after the I/O thread's start, had only 1.1-1.7 of 5.9 MB: the start's long frame 2.16 → 2.05-2.09 s;
+  the room came no sooner (the opening paces the start), the opening's worst frames got worse (100
+  and 83 ms against 67 and 50: requests waiting for pieces), and it held 6 MB of host memory for
+  seconds (the Old 3DS has none to spare). Reverted.
 - **Maths that needs FMA, NEON, or correctly rounded libraries for game logic.** The ARM11 has
   none of them, and they change results.
 - **Mixing in floating point** (as engines with SIMD floats do): the ARM11's VFP has no vectors

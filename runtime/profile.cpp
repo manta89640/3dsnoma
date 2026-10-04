@@ -187,14 +187,14 @@ void profile_frame_end(bool report) {
         for (auto& kv : m)
             v.push_back({kv.second, kv.first});
         std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
-        char line[512];
+        char line[1024];
         int at = snprintf(line, sizeof(line), "lstats:   %s (%u ms):", what, samples);
         for (int i = 0; i < n && i < (int)v.size() && at < (int)sizeof(line) - 64; i++)
             at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %u%%", v[i].second, 100 * v[i].first / samples);
         log("%s", line);
     };
-    top("self ", c.self, c.samples, 8);
-    top("total", c.total, c.samples, 10);
+    top("self ", c.self, c.samples, 16);
+    top("total", c.total, c.samples, 24);
     if (gpu.samples)
         top("gpu  ", gpu.self, gpu.samples, 6);
 }
