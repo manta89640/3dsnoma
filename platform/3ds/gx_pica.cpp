@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "engine/gx/tev_combiner.h"
 #include "runtime/hw/gx/raster.h"
 #include "runtime/hw/gx/regs.h"
 #include "runtime/hw/gx/texture.h"
@@ -880,482 +881,67 @@ void collect_textures() {
 }
 
 // ---------------------------------------------------------------- TEV -> texture combiners
-// A value a GX stage reads, as a PICA combiner source and operand.
-struct In {
-    enum Kind { ZERO, ONE, CONST, SRC } kind = ZERO;
-    GPU_TEVSRC src = GPU_PRIMARY_COLOR;
-    int op = 0;              // operand (GPU_TEVOP_RGB_* or GPU_TEVOP_A_*)
-    u32 value = 0;           // CONST: 0xAABBGGRR (the combiner constant's layout)
-    bool pair_prev = false;  // PREVIOUS meaning the first stage of a two-stage pair
-};
+// The translation is engine/gx/tev_combiner's (the native g3d's materials go through it too, so a
+// material looks the same either way): GX's d +- lerp(a, b, c) with bias and scale as one or two
+// PICA stages, register constants and konst colours in each stage's constant colour, results kept
+// across stages in the combiner buffer. Here: its input from the registers the stream set, its
+// stages as citro3d's texenvs.
+namespace tev = engine::gx;
 
-u32 pack(const s32* c) {
-    auto u = [](s32 v) { return (u32)(v < 0 ? 0 : v > 255 ? 255 : v); };
-    return u(c[0]) | u(c[1]) << 8 | u(c[2]) << 16 | u(c[3]) << 24;
-}
+u32 s_unsupported;  // TEV configurations approximated (the translation's count, summed)
 
-const s32 k_konst[8] = {255, 223, 191, 159, 128, 96, 64, 32};
-
-struct Builder {
-    C3D_TexEnv env[6];  // the combiner stages it sets up
-    int stage = 0;  // next PICA stage
-    bool overflow = false;
-    // where the GX registers live: kind CONST (never written) or the stage that wrote them
-    int reg_stage[4][2];  // [register][0 color, 1 alpha] -> PICA stage index, -1 = constant
-    int prev_written = -1;  // last PICA stage that produced output
-    u32 buf_rgb_mask = 0, buf_a_mask = 0;
-    struct Unit {
-        int map = -1, coord = -1;
-    } units[3];
-};
-
-// texture unit for (map, coord), or -1
-int unit_for(Builder& b, u32 map, u32 coord) {
-    for (int i = 0; i < 3; i++)
-        if (b.units[i].map == (int)map && b.units[i].coord == (int)coord)
-            return i;
-    for (int i = 0; i < 3; i++)
-        if (b.units[i].map < 0) {
-            b.units[i].map = map, b.units[i].coord = coord;
-            return i;
-        }
-    return -1;
-}
-
-GPU_TEVSRC tex_src(int unit) {
-    return unit == 0 ? GPU_TEXTURE0 : unit == 1 ? GPU_TEXTURE1 : GPU_TEXTURE2;
-}
-
-struct StageCtx {
-    int tex_unit;   // -1: no texture
-    s32 konst_c[3], konst_a;
-};
-
-// a register written by stage `s` is read by stage `at`: PREVIOUS or the combiner buffer
-In reg_source(Builder& b, int s, int at, bool alpha, int channel_op) {
-    In in;
-    in.kind = In::SRC;
-    if (s == at - 1) {
-        in.src = GPU_PREVIOUS;
-    } else {
-        in.src = GPU_PREVIOUS_BUFFER;
-        if (s <= 3) {
-            if (alpha)
-                b.buf_a_mask |= 1u << s;
-            else
-                b.buf_rgb_mask |= 1u << s;
-        }
-    }
-    in.op = channel_op;
-    return in;
-}
-
-// GX color argument -> In
-In color_arg(Builder& b, u32 arg, const StageCtx& sc, int at) {
-    In in;
-    auto from_reg = [&](int r, bool alpha_of) -> In {
-        int s = b.reg_stage[r][alpha_of ? 1 : 0];
-        if (s < 0) {
-            In c;
-            c.kind = In::CONST;
-            const s32* v = g_gx.tev_reg[r];
-            s32 rgba[4] = {alpha_of ? v[3] : v[0], alpha_of ? v[3] : v[1], alpha_of ? v[3] : v[2], v[3]};
-            c.value = pack(rgba);
-            return c;
-        }
-        return reg_source(b, s, at, alpha_of, alpha_of ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR);
-    };
-    switch (arg) {
-    case 0: return from_reg(0, false);
-    case 1: return from_reg(0, true);
-    case 2: return from_reg(1, false);
-    case 3: return from_reg(1, true);
-    case 4: return from_reg(2, false);
-    case 5: return from_reg(2, true);
-    case 6: return from_reg(3, false);
-    case 7: return from_reg(3, true);
-    case 8:
-    case 9:
-        if (sc.tex_unit < 0) {
-            in.kind = In::ONE;
-            return in;
-        }
-        in.kind = In::SRC;
-        in.src = tex_src(sc.tex_unit);
-        in.op = arg == 8 ? GPU_TEVOP_RGB_SRC_COLOR : GPU_TEVOP_RGB_SRC_ALPHA;
-        return in;
-    case 10:
-    case 11:
-        in.kind = In::SRC;
-        in.src = GPU_PRIMARY_COLOR;
-        in.op = arg == 10 ? GPU_TEVOP_RGB_SRC_COLOR : GPU_TEVOP_RGB_SRC_ALPHA;
-        return in;
-    case 12: in.kind = In::ONE; return in;
-    case 13: {
-        in.kind = In::CONST;
-        s32 h[4] = {128, 128, 128, 128};
-        in.value = pack(h);
-        return in;
-    }
-    case 14: {
-        in.kind = In::CONST;
-        s32 k[4] = {sc.konst_c[0], sc.konst_c[1], sc.konst_c[2], sc.konst_a};
-        in.value = pack(k);
-        return in;
-    }
-    default: return in;  // ZERO
-    }
-}
-
-In alpha_arg(Builder& b, u32 arg, const StageCtx& sc, int at) {
-    In in;
-    auto from_reg = [&](int r) -> In {
-        int s = b.reg_stage[r][1];
-        if (s < 0) {
-            In c;
-            c.kind = In::CONST;
-            s32 v = g_gx.tev_reg[r][3];
-            s32 rgba[4] = {v, v, v, v};
-            c.value = pack(rgba);
-            return c;
-        }
-        return reg_source(b, s, at, true, GPU_TEVOP_A_SRC_ALPHA);
-    };
-    switch (arg) {
-    case 0: return from_reg(0);
-    case 1: return from_reg(1);
-    case 2: return from_reg(2);
-    case 3: return from_reg(3);
-    case 4:
-        if (sc.tex_unit < 0) {
-            in.kind = In::ONE;
-            return in;
-        }
-        in.kind = In::SRC;
-        in.src = tex_src(sc.tex_unit);
-        in.op = GPU_TEVOP_A_SRC_ALPHA;
-        return in;
-    case 5:
-        in.kind = In::SRC;
-        in.src = GPU_PRIMARY_COLOR;
-        in.op = GPU_TEVOP_A_SRC_ALPHA;
-        return in;
-    case 6: {
-        in.kind = In::CONST;
-        s32 k[4] = {sc.konst_a, sc.konst_a, sc.konst_a, sc.konst_a};
-        in.value = pack(k);
-        return in;
-    }
-    default: return in;
-    }
-}
-
-// One channel (color or alpha) of a PICA stage being built.
-struct Half {
-    GPU_COMBINEFUNC func = GPU_REPLACE;
-    In s[3];
-    GPU_TEVSCALE scale = GPU_TEVSCALE_1;
-    bool used = false;
-};
-
-// a channel's part of a constant input (rgb or alpha): the stage's constant color holds both
-u32 channel_mask(bool alpha) { return alpha ? 0xFF000000u : 0x00FFFFFFu; }
-u32 const_value(const In& i) { return i.kind == In::ONE ? 0xFFFFFFFF : i.kind == In::ZERO ? 0 : i.value; }
-bool is_zero(const In& i, bool alpha) {
-    return i.kind == In::ZERO || (i.kind == In::CONST && (i.value & channel_mask(alpha)) == 0);
-}
-bool is_one(const In& i, bool alpha) {
-    return i.kind == In::ONE || (i.kind == In::CONST && (alpha ? (i.value >> 24) == 255 : (i.value & 0xFFFFFF) == 0xFFFFFF));
-}
-
-// Plan one GX combiner (a, b, c, d, op, bias, scale) as <= 2 PICA halves. Returns the number of
-// PICA stages it takes (1 or 2); the second stage reads the first as PREVIOUS.
-int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half out[2]) {
-    In prev;
-    prev.kind = In::SRC;
-    prev.src = GPU_PREVIOUS;
-    prev.op = alpha ? GPU_TEVOP_A_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-    prev.pair_prev = true;
-    // lerp(a, b, c) simplified to x (single term) or a product, or a full interpolation
-    In x;
-    enum { NONE, SINGLE, PRODUCT, LERP } shape;
-    In p0, p1;
-    if (a.kind != In::SRC && b.kind != In::SRC && c.kind != In::SRC) {
-        // all constants: one constant (as GX computes it)
-        u32 va = const_value(a), vb = const_value(b), vc = const_value(c), v = 0;
-        for (int sh = 0; sh < 32; sh += 8) {
-            u32 ka = va >> sh & 255, kb = vb >> sh & 255, kc = (vc >> sh & 255) + (vc >> sh >> 7 & 1);
-            v |= (ka * (256 - kc) + kb * kc) >> 8 << sh;
-        }
-        x.kind = In::CONST, x.value = v;
-        shape = is_zero(x, alpha) ? NONE : SINGLE;
-    } else if (is_zero(c, alpha)) {
-        shape = is_zero(a, alpha) ? NONE : SINGLE, x = a;
-    } else if (is_one(c, alpha)) {
-        shape = is_zero(b, alpha) ? NONE : SINGLE, x = b;
-    } else if (is_zero(a, alpha)) {
-        if (is_zero(b, alpha))
-            shape = NONE;
-        else if (is_one(b, alpha))
-            shape = SINGLE, x = c;
-        else
-            shape = PRODUCT, p0 = b, p1 = c;
-    } else if (is_zero(b, alpha)) {
-        // a * (1 - c)
-        shape = PRODUCT, p0 = a, p1 = c;
-        p1.op = alpha ? (p1.op == GPU_TEVOP_A_SRC_ALPHA ? GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA : p1.op)
-                      : (p1.op == GPU_TEVOP_RGB_SRC_COLOR ? GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR
-                                                          : GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA);
-        if (p1.kind == In::CONST) {  // 1 - constant
-            u32 v = p1.value;
-            p1.value = (255 - (v & 255)) | (255 - ((v >> 8) & 255)) << 8 | (255 - ((v >> 16) & 255)) << 16 |
-                       (255 - (v >> 24)) << 24;
-            p1.op = alpha ? GPU_TEVOP_A_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-        }
-    } else {
-        shape = LERP;
-    }
-    bool has_d = !is_zero(d, alpha);
-    // A stage has one constant color: a lerp between two different constants (the year
-    // picker's digits: lerp(C0, C1, texture)) takes one of them from a stage of its own first
-    auto distinct_consts = [&](const In& p, const In& q) {
-        return p.kind != In::SRC && q.kind != In::SRC &&
-               ((const_value(p) ^ const_value(q)) & channel_mask(alpha)) != 0;
-    };
-    bool hoist_a = false, hoist_b = false;
-    if (shape == LERP && !sub && !has_d) {
-        if (distinct_consts(a, b) || distinct_consts(a, c))
-            hoist_a = true;
-        else if (distinct_consts(b, c))
-            hoist_b = true;
-    }
-    GPU_TEVSCALE sc = scale == 1 ? GPU_TEVSCALE_2 : scale == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1;
-    int n = 0;
-    auto half = [&](GPU_COMBINEFUNC f, In s0, In s1 = In(), In s2 = In()) {
-        out[n].func = f;
-        out[n].s[0] = s0, out[n].s[1] = s1, out[n].s[2] = s2;
-        out[n].used = true;
-        n++;
-    };
-    if (sub) {
-        // d - x
-        if (shape == NONE)
-            half(GPU_REPLACE, d);
-        else if (shape == SINGLE)
-            half(GPU_SUBTRACT, d, x);
-        else {
-            if (shape == PRODUCT)
-                half(GPU_MODULATE, p0, p1);
-            else
-                half(GPU_INTERPOLATE, b, a, c);
-            half(GPU_SUBTRACT, d, prev);
-        }
-    } else if (bias == 2 && has_d && shape == SINGLE) {
-        half(GPU_ADD_SIGNED, d, x);  // d + x - 0.5
-        bias = 0;
-    } else {
-        switch (shape) {
-        case NONE: half(GPU_REPLACE, d); break;
-        case SINGLE:
-            if (has_d)
-                half(GPU_ADD, d, x);
-            else
-                half(GPU_REPLACE, x);
-            break;
-        case PRODUCT:
-            if (has_d)
-                half(GPU_MULTIPLY_ADD, p0, p1, d);
-            else
-                half(GPU_MODULATE, p0, p1);
-            break;
-        case LERP:
-            if (hoist_a)
-                half(GPU_REPLACE, a), half(GPU_INTERPOLATE, b, prev, c);
-            else if (hoist_b)
-                half(GPU_REPLACE, b), half(GPU_INTERPOLATE, prev, a, c);
-            else
-                half(GPU_INTERPOLATE, b, a, c);
-            if (has_d)
-                half(GPU_ADD, prev, d);
-            break;
-        }
-    }
-    if (bias == 1 || bias == 2) {  // +-0.5 that couldn't be folded: one more stage
-        In h;
-        h.kind = In::CONST;
-        h.value = 0x80808080;
-        if (n < 2)
-            half(bias == 1 ? GPU_ADD : GPU_SUBTRACT, prev, h);
-    }
-    if (n)
-        out[n - 1].scale = sc;
-    return n ? n : (half(GPU_REPLACE, d), 1);
-}
-
-// the constants a half uses (ZERO and ONE included), merged into the stage's one constant
-// color; false if they conflict. have: 1 = rgb set, 2 = alpha set
-int used_inputs(GPU_COMBINEFUNC f) {
-    switch (f) {
-    case GPU_REPLACE: return 1;
-    case GPU_INTERPOLATE:
-    case GPU_MULTIPLY_ADD:
-    case GPU_ADD_MULTIPLY: return 3;
-    default: return 2;
-    }
-}
-
-bool merge_consts(const Half& h, bool alpha, u32* color, u32* have) {
-    for (int i = 0; i < used_inputs(h.func); i++) {
-        const In& in = h.s[i];
-        if (in.kind == In::SRC)
-            continue;
-        u32 v = const_value(in);
-        u32 mask = channel_mask(alpha);
-        u32 bit = alpha ? 2 : 1;
-        if ((*have & bit) && ((*color ^ v) & mask))
-            return false;
-        *color = (*color & ~mask) | (v & mask);
-        *have |= bit;
-    }
-    return true;
-}
-
-void apply_half(C3D_TexEnv* env, const Half& h, bool alpha) {
-    GPU_TEVSRC src[3];
-    int ops[3];
-    for (int i = 0; i < 3; i++) {
-        const In& in = h.s[i];
-        if (in.kind == In::SRC) {
-            src[i] = in.src;
-            ops[i] = in.op;
-        } else {
-            // constants and ONE come from the stage's constant color; ZERO is the "one minus"
-            // of a constant one... use the constant with an operand that gives 0: there is
-            // none, so a zero input only appears where the function ignores it
-            src[i] = GPU_CONSTANT;
-            ops[i] = alpha ? GPU_TEVOP_A_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-        }
-    }
-    if (alpha) {
-        C3D_TexEnvSrc(env, C3D_Alpha, src[0], src[1], src[2]);
-        C3D_TexEnvOpAlpha(env, (GPU_TEVOP_A)ops[0], (GPU_TEVOP_A)ops[1], (GPU_TEVOP_A)ops[2]);
-        C3D_TexEnvFunc(env, C3D_Alpha, h.func);
-        C3D_TexEnvScale(env, C3D_Alpha, h.scale);
-    } else {
-        C3D_TexEnvSrc(env, C3D_RGB, src[0], src[1], src[2]);
-        C3D_TexEnvOpRgb(env, (GPU_TEVOP_RGB)ops[0], (GPU_TEVOP_RGB)ops[1], (GPU_TEVOP_RGB)ops[2]);
-        C3D_TexEnvFunc(env, C3D_RGB, h.func);
-        C3D_TexEnvScale(env, C3D_RGB, h.scale);
-    }
-}
-
-u32 s_unsupported;
-
-// The PICA texture combiners for the current TEV configuration (in b.env, with the combiner
-// buffer masks); fills units[] with the (map, coord) pair each texture unit samples.
-void tev_to_texenv(Builder& b) {
+// the TEV registers as the command stream set them
+tev::TevRegs tev_regs_now() {
     const u32* bp = g_gx.bp;
-    u32 num = bits(bp[BP_GENMODE], 10, 4) + 1;
-    for (int r = 0; r < 4; r++)
-        b.reg_stage[r][0] = b.reg_stage[r][1] = -1;
-    int last_c = -1, last_a = -1;  // the PICA stages holding the last GX stage's results
-    for (u32 i = 0; i < num && !b.overflow; i++) {
-        u32 ce = bp[BP_TEV_COLOR_ENV + 2 * i], ae = bp[BP_TEV_COLOR_ENV + 2 * i + 1];
-        u32 tref = bp[BP_TREF + i / 2] >> ((i & 1) * 12);
-        u32 ksel = bp[BP_TEV_KSEL + i / 2] >> ((i & 1) * 10);
-        StageCtx sc;
-        sc.tex_unit = bits(tref, 6, 1) ? unit_for(b, bits(tref, 0, 3), bits(tref, 3, 3)) : -1;
-        u32 kc = bits(ksel, 4, 5), ka = bits(ksel, 9, 5);
-        for (int k = 0; k < 3; k++) {
-            if (kc < 8)
-                sc.konst_c[k] = k_konst[kc];
-            else if (kc >= 12 && kc < 16)
-                sc.konst_c[k] = g_gx.tev_konst[kc - 12][k];
-            else if (kc >= 16)
-                sc.konst_c[k] = g_gx.tev_konst[(kc - 16) & 3][(kc - 16) >> 2];
-            else
-                sc.konst_c[k] = 0;
-        }
-        sc.konst_a = ka < 8 ? k_konst[ka] : ka >= 16 ? g_gx.tev_konst[(ka - 16) & 3][(ka - 16) >> 2] : 0;
+    tev::TevRegs r;
+    r.n_stages = bits(bp[BP_GENMODE], 10, 4) + 1;
+    for (u32 i = 0; i < r.n_stages; i++)
+        r.color_env[i] = bp[BP_TEV_COLOR_ENV + 2 * i], r.alpha_env[i] = bp[BP_TEV_COLOR_ENV + 2 * i + 1];
+    for (u32 i = 0; i < 8; i++)
+        r.tref[i] = bp[BP_TREF + i], r.ksel[i] = bp[BP_TEV_KSEL + i];
+    memcpy(r.reg, g_gx.tev_reg, sizeof(r.reg));
+    memcpy(r.konst, g_gx.tev_konst, sizeof(r.konst));
+    return r;
+}
 
-        int at = b.stage;
-        Half ch[2], ah[2];
-        int nc, na;
-        if (bits(ce, 16, 2) == 3 || bits(ae, 16, 2) == 3)
-            s_unsupported++;  // compare modes: approximated by the regular formula
-        nc = plan(color_arg(b, bits(ce, 12, 4), sc, at), color_arg(b, bits(ce, 8, 4), sc, at),
-                  color_arg(b, bits(ce, 4, 4), sc, at), color_arg(b, bits(ce, 0, 4), sc, at), bits(ce, 18, 1),
-                  bits(ce, 16, 2) == 3 ? 0 : bits(ce, 16, 2), bits(ce, 16, 2) == 3 ? 0 : bits(ce, 20, 2), false, ch);
-        na = plan(alpha_arg(b, bits(ae, 13, 3), sc, at), alpha_arg(b, bits(ae, 10, 3), sc, at),
-                  alpha_arg(b, bits(ae, 7, 3), sc, at), alpha_arg(b, bits(ae, 4, 3), sc, at), bits(ae, 18, 1),
-                  bits(ae, 16, 2) == 3 ? 0 : bits(ae, 16, 2), bits(ae, 16, 2) == 3 ? 0 : bits(ae, 20, 2), true, ah);
-        int n = std::max(nc, na);
-        if (b.stage + n > 6) {
-            b.overflow = true;
-            s_unsupported++;
-            break;
-        }
-        for (int k = 0; k < n; k++) {
-            C3D_TexEnv* env = &b.env[b.stage + k];
-            C3D_TexEnvInit(env);
-            u32 konst = 0;
-            bool have = false;
-            // the half that is shorter passes its result on
-            Half c = k < nc ? ch[k] : Half(), a = k < na ? ah[k] : Half();
-            // (its PREVIOUS is this pair's first stage, not the stage before the pair)
-            if (k >= nc) {
-                c.func = GPU_REPLACE;
-                c.s[0].kind = In::SRC, c.s[0].src = GPU_PREVIOUS, c.s[0].op = GPU_TEVOP_RGB_SRC_COLOR;
-                c.s[0].pair_prev = true;
-            }
-            if (k >= na) {
-                a.func = GPU_REPLACE;
-                a.s[0].kind = In::SRC, a.s[0].src = GPU_PREVIOUS, a.s[0].op = GPU_TEVOP_A_SRC_ALPHA;
-                a.s[0].pair_prev = true;
-            }
-            if (k == 1) {
-                // the second stage of a pair: PREVIOUS now means the first stage's result; an
-                // input that meant the stage before the pair reads it from the combiner buffer
-                // (which a stage sees with one stage of delay)
-                for (Half* h : {&c, &a})
-                    for (In& x : h->s)
-                        if (x.kind == In::SRC && x.src == GPU_PREVIOUS && !x.pair_prev) {
-                            if (at - 1 >= 0 && at - 1 <= 3) {
-                                x.src = GPU_PREVIOUS_BUFFER;
-                                if (h == &a)
-                                    b.buf_a_mask |= 1u << (at - 1);
-                                else
-                                    b.buf_rgb_mask |= 1u << (at - 1);
-                            } else {
-                                s_unsupported++;
-                            }
-                        }
-            }
-            u32 have_bits = 0;
-            // (both always: a conflict in the color half mustn't leave the alpha's constant out)
-            bool merged_c = merge_consts(c, false, &konst, &have_bits);
-            bool merged_a = merge_consts(a, true, &konst, &have_bits);
-            if (!merged_c || !merged_a)
-                s_unsupported++;  // two different constants in one stage: one of them wins
-            (void)have;
-            apply_half(env, c, false);
-            apply_half(env, a, true);
-            C3D_TexEnvColor(env, konst);
-        }
-        b.stage += n;
-        // where this GX stage's outputs went
-        u32 cdest = bits(ce, 22, 2), adest = bits(ae, 22, 2);
-        last_c = last_a = b.stage - 1;
-        b.reg_stage[cdest][0] = last_c;
-        b.reg_stage[adest][1] = last_a;
+// a combiner stage as citro3d's texenv (C3D_TexEnvInit, then its setters)
+void to_texenv(const tev::CombinerStage& s, C3D_TexEnv* e) {
+    e->srcRgb = GPU_TEVSOURCES(s.src_rgb[0], s.src_rgb[1], s.src_rgb[2]);
+    e->srcAlpha = GPU_TEVSOURCES(s.src_a[0], s.src_a[1], s.src_a[2]);
+    e->opAll = 0;
+    e->opRgb = GPU_TEVOPERANDS(s.op_rgb[0], s.op_rgb[1], s.op_rgb[2]);
+    e->opAlpha = GPU_TEVOPERANDS(s.op_a[0], s.op_a[1], s.op_a[2]);
+    e->funcRgb = s.func_rgb, e->funcAlpha = s.func_a;
+    e->color = s.konst;
+    e->scaleRgb = s.scale_rgb, e->scaleAlpha = s.scale_a;
+}
+
+// The PICA texture combiners for the current TEV configuration: the stages (both forms), the
+// combiner buffer masks and the (map, coord) pair each texture unit samples.
+void translate_tev(tev::Combiners* comb, C3D_TexEnv env[6]) {
+    tev::tev_to_combiners(tev_regs_now(), *comb);
+    s_unsupported += comb->unsupported;
+    for (int i = 0; i < 6; i++)
+        to_texenv(comb->stage[i], &env[i]);
+}
+
+// The combiners as a draw's textures need them: a texture kept as luminance only (L4, L8: GX's I4
+// and I8) samples with alpha 1, where GX's intensity texture has alpha = intensity: what reads its
+// alpha reads its red instead (tev::remap_luminance)
+void combiners_for(const tev::Combiners& comb, const C3D_TexEnv env[6], C3D_Tex* const tex[3], C3D_TexEnv out[6]) {
+    u32 lum = 0;  // units with a luminance texture
+    for (int u = 0; u < 3; u++)
+        if (tex[u] && (tex[u]->fmt == GPU_L4 || tex[u]->fmt == GPU_L8))
+            lum |= 1u << u;
+    if (!lum) {
+        memcpy(out, env, sizeof(C3D_TexEnv) * 6);
+        return;
     }
-    // unused stages pass the result on
-    for (int s = b.stage; s < 6; s++) {
-        C3D_TexEnv* env = &b.env[s];
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-    }
+    tev::CombinerStage st[6];
+    memcpy(st, comb.stage, sizeof(st));
+    tev::remap_luminance(st, lum);
+    for (int i = 0; i < 6; i++)
+        to_texenv(st[i], &out[i]);
 }
 
 // ---------------------------------------------------------------- combiner setups, kept
@@ -1364,9 +950,8 @@ void tev_to_texenv(Builder& b) {
 struct TevSetup {
     u32 key[1 + 32 + 16 + 32];  // stages; their color and alpha stages; TREF and KSEL; registers
     u32 nkey = 0;
-    C3D_TexEnv env[6];
-    u32 buf_rgb = 0, buf_a = 0;
-    Builder::Unit units[3];
+    tev::Combiners comb;
+    C3D_TexEnv env[6];          // comb's stages as texenvs
 };
 TevSetup s_tev_setups[256];  // by a hash of the key
 
@@ -1391,48 +976,11 @@ const TevSetup& tev_setup() {
     if (e.nkey == n && memcmp(e.key, key, n * 4) == 0)
         return e;
     T.tev_misses++;
-    Builder b;
-    tev_to_texenv(b);
+    translate_tev(&e.comb, e.env);
     memcpy(e.key, key, n * 4);
     e.nkey = n;
-    memcpy(e.env, b.env, sizeof(e.env));
-    e.buf_rgb = b.buf_rgb_mask, e.buf_a = b.buf_a_mask;
-    memcpy(e.units, b.units, sizeof(e.units));
     return e;
 }
-
-// The combiners as a draw's textures need them: a texture kept as luminance only (L4, L8: GX's I4
-// and I8) samples with alpha 1, where GX's intensity texture has alpha = intensity: what reads its
-// alpha reads its red instead
-void remap_luminance(const C3D_TexEnv in[6], C3D_Tex* const tex[3], C3D_TexEnv out[6]) {
-    memcpy(out, in, sizeof(C3D_TexEnv) * 6);
-    u32 lum = 0;  // units with a luminance texture
-    for (int u = 0; u < 3; u++)
-        if (tex[u] && (tex[u]->fmt == GPU_L4 || tex[u]->fmt == GPU_L8))
-            lum |= 1u << u;
-    if (!lum)
-        return;
-    for (int i = 0; i < 6; i++) {
-        C3D_TexEnv& e = out[i];
-        u32 op_rgb = e.opRgb, op_a = e.opAlpha;
-        for (int k = 0; k < 3; k++) {
-            u32 src = (e.srcRgb >> (4 * k)) & 0xF;
-            if (src >= GPU_TEXTURE0 && src <= GPU_TEXTURE2 && (lum >> (src - GPU_TEXTURE0) & 1)) {
-                u32 op = (op_rgb >> (4 * k)) & 0xF;
-                if (op == GPU_TEVOP_RGB_SRC_ALPHA || op == GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA)
-                    op_rgb = (op_rgb & ~(0xFu << (4 * k))) | ((op + 2) << (4 * k));  // -> SRC_R, ONE_MINUS_SRC_R
-            }
-            src = (e.srcAlpha >> (4 * k)) & 0xF;
-            if (src >= GPU_TEXTURE0 && src <= GPU_TEXTURE2 && (lum >> (src - GPU_TEXTURE0) & 1)) {
-                u32 op = (op_a >> (4 * k)) & 0xF;
-                if (op == GPU_TEVOP_A_SRC_ALPHA || op == GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA)
-                    op_a = (op_a & ~(0xFu << (4 * k))) | ((op + 2) << (4 * k));  // -> SRC_R, ONE_MINUS_SRC_R
-            }
-        }
-        e.opRgb = op_rgb, e.opAlpha = op_a;
-    }
-}
-
 // ---------------------------------------------------------------- pixel state
 GPU_TESTFUNC test_func(u32 f) {
     static const GPU_TESTFUNC map[8] = {GPU_NEVER, GPU_LESS, GPU_EQUAL, GPU_LEQUAL,
@@ -1754,18 +1302,18 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 NOMA_PROF_SCOPE("(gx textures)");
                 Timed timed(Timers::TEXTURES);
                 for (int u = 0; u < 3; u++) {
-                    if (e.units[u].map < 0)
+                    if (e.comb.unit[u].map < 0)
                         continue;
-                    tex[u] = texture_for(e.units[u].map, &su.sx[u], &su.sy[u]);
-                    su.texgen[u] = (s8)e.units[u].coord;
+                    tex[u] = texture_for(e.comb.unit[u].map, &su.sx[u], &su.sy[u]);
+                    su.texgen[u] = (s8)e.comb.unit[u].coord;
                 }
             }
             C3D_TexEnv env[6];
-            remap_luminance(e.env, tex, env);
-            bool same = P.env_valid && memcmp(P.env, env, sizeof(P.env)) == 0 && P.buf_rgb == e.buf_rgb &&
-                        P.buf_a == e.buf_a;
+            combiners_for(e.comb, e.env, tex, env);
+            bool same = P.env_valid && memcmp(P.env, env, sizeof(P.env)) == 0 && P.buf_rgb == e.comb.buf_rgb &&
+                        P.buf_a == e.comb.buf_a;
             for (int u = 0; u < 3 && same; u++)  // (units the combiners don't read don't matter)
-                same = e.units[u].map < 0 ||
+                same = e.comb.unit[u].map < 0 ||
                        (tex[u] == P.tex[u] && (!tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) == 0) &&
                         su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u]);
             if (!same) {
@@ -1778,12 +1326,12 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                         P.env[i] = env[i];
                         st_texenv(i, &P.env[i]);
                     }
-                if (!P.env_valid || P.buf_rgb != e.buf_rgb || P.buf_a != e.buf_a)
-                    st_texenv_buf(e.buf_rgb, e.buf_a);
-                P.buf_rgb = e.buf_rgb, P.buf_a = e.buf_a;
+                if (!P.env_valid || P.buf_rgb != e.comb.buf_rgb || P.buf_a != e.comb.buf_a)
+                    st_texenv_buf(e.comb.buf_rgb, e.comb.buf_a);
+                P.buf_rgb = e.comb.buf_rgb, P.buf_a = e.comb.buf_a;
                 bool bound = false;
                 for (int u = 0; u < 3; u++) {
-                    if (e.units[u].map >= 0 && tex[u] &&
+                    if (e.comb.unit[u].map >= 0 && tex[u] &&
                         (!P.env_valid || tex[u] != P.tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) != 0))
                         st_tex(u, tex[u]), bound = true;
                     P.tex[u] = tex[u];

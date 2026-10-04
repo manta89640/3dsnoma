@@ -66,6 +66,7 @@ set(ENGINE_SOURCES
   engine/lyt/quad.cpp
   engine/lyt/material.cpp
   engine/gx/gx_sdk.cpp
+  engine/gx/tev_combiner.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
   engine/math/mtx.cpp
