@@ -32,7 +32,8 @@
 //      slides along a shore or a ledge;
 //   3. the spheres at the new height must be free, or the step is refused (a low ceiling).
 // Falling and sliding: gravity (9.8 m/s^2: Wii no Ma's units are about centimetres) until walkable
-// ground is reached; on steep ground the Mii slides down the slope at run speed; in the air it keeps
+// ground is reached; on steep ground the Mii slides down the slope at run speed, keeping to it (a face
+// upright enough to be a wall it drops away from instead, as off a ledge); in the air it keeps
 // going forward, but only over somewhere it can land. A fall that hasn't ended in 10 s (a hole in the
 // collision, a pit of steep slopes) puts the Mii back where it last stood.
 //
@@ -275,15 +276,16 @@ bool Player::try_step(Vec3 d) {
     if (steep && g.y > pos_.y + 1e-3f)
         return false;  // too steep to climb
     if (!g.found || steep) {
-        // a drop, or a slope to slide down
-        p.y = pos_.y;
+        // a drop, or a slope to slide down (from its surface, within a step down, unless it is
+        // upright enough to be a wall to the body)
+        p.y = steep && g.n.y >= p_.wall_ny ? g.y : pos_.y;
         if (!landing_ok(p.x, p.z, pos_.y) || ((p.y != slid_at || !free) && overlap(p) > tol))
             return false;
         last_ground_ = pos_;
         pos_ = p;
         start_fall(false);
         if (steep)
-            sliding_ = true, slide_dir_from(g.n);
+            ride_slope(g.n);
         return true;
     }
     if (g.attr == KCL_LAVA)
@@ -300,16 +302,23 @@ bool Player::try_step(Vec3 d) {
 
 void Player::start_fall(bool slide) {
     airborne_ = true;
-    sliding_ = slide;
+    sliding_ = false;
     vy_ = 0;
     air_ticks_ = 0;
     if (slide)
-        slide_dir_from(ground_n_);
+        ride_slope(ground_n_);
 }
 
-void Player::slide_dir_from(Vec3 n) {
+// Down the slope of normal n: on x/z straight down it at the slide speed, and down as fast as that
+// takes the slope's surface, so that the next tick's fall reaches the slope again (from rest, gravity
+// takes most of a second to catch up with a 60-degree slope: the Mii hopped down it, floating most of
+// its height over it). A face upright enough to be a wall to the body (under wall_ny) isn't followed:
+// the knee sphere would be in it; the Mii drops away from it from rest, as off a ledge.
+void Player::ride_slope(Vec3 n) {
+    sliding_ = true;
     f32 l = std::sqrt(n.x * n.x + n.z * n.z);
     slide_x_ = l > 1e-4f ? n.x / l : 0, slide_z_ = l > 1e-4f ? n.z / l : 0;
+    vy_ = n.y >= p_.wall_ny ? std::max(-p_.slide_speed * 60.0f * l / n.y, -p_.max_fall_speed) : 0;
 }
 
 void Player::fall(f32 f) {
@@ -336,9 +345,7 @@ void Player::fall(f32 f) {
     } else if (g.found) {
         // on a steep slope: down it
         p.y = g.y;
-        vy_ = 0;
-        sliding_ = true;
-        slide_dir_from(g.n);
+        ride_slope(g.n);
     } else {
         p.y = y;
     }

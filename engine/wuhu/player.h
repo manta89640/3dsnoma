@@ -103,7 +103,7 @@ private:
     void walk(f32 frames);
     bool try_step(Vec3 d);
     void start_fall(bool slide);
-    void slide_dir_from(Vec3 n);
+    void ride_slope(Vec3 n);
     void fall(f32 frames);
 
     const engine::collision::World& world_;

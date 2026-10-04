@@ -183,7 +183,9 @@ void input_script_apply(WiimoteInput& in) {
     static bool s_off;                 // the pointer is off the screen (P(off), until P(x;y))
     s_moved.resize(s.size());
     // each stick follows the latest of its events to have started (the later one in the script if
-    // two start together); once a timed one is over, it is let go
+    // two start together); once a timed one is over, the stick is the platform's own again (centred
+    // on the host; on the 3DS the circle pad and the C-stick, which writing 0 here would have kept
+    // dead for the rest of the run, as P(x;y) leaves the pointer to the touch screen)
     const ScriptEvent* stick[3] = {nullptr, nullptr, nullptr};
     double stick_at[3] = {0, 0, 0};
     for (size_t i = 0; i < s.size(); i++) {
@@ -214,14 +216,12 @@ void input_script_apply(WiimoteInput& in) {
     }
     for (u8 k : {STICK_MOVE, STICK_CAMERA}) {
         const ScriptEvent* ev = stick[k];
-        if (!ev)
+        if (!ev || !(ev->until_next || t < stick_at[k] + ev->len))
             continue;
-        bool held = ev->until_next || t < stick_at[k] + ev->len;
-        float x = held ? ev->x : 0.0f, y = held ? ev->y : 0.0f;
         if (k == STICK_MOVE)
-            in.stick_x = x, in.stick_y = y;
+            in.stick_x = ev->x, in.stick_y = ev->y;
         else
-            in.cam_x = x, in.cam_y = y;
+            in.cam_x = ev->x, in.cam_y = ev->y;
     }
     if (s_off)
         in.pointing = false;

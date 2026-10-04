@@ -27,10 +27,11 @@
 // memory: 2.68 MB (2.23 MB of triangles, 0.45 MB of grid).
 //
 // Measured with NOMA_SELFTEST=walk (platform/host/selftest_walk.cpp) on the island: ground() agrees
-// with the research tools' raster of the top surface at 12 000 of 12 000 points (within 0.0005);
-// on the host a query takes 110-240 ns. On the 3DS (devkitARM, -O2) a candidate the plane rejects
-// is 25 instructions, half of them VFP in a dependent multiply-add chain: an estimated 40-80 cycles
-// with its two cache lines (not measured on hardware).
+// with the research tools' raster of the top surface at 12 000 of 12 000 points (within 0.0002; one
+// of them at the lip of a cliff, where the raster has the face just under it); on the host a query
+// takes 110-240 ns. On the 3DS (devkitARM, -O2) a candidate the plane rejects is 25 instructions,
+// half of them VFP in a dependent multiply-add chain: an estimated 40-80 cycles with its two cache
+// lines (not measured on hardware).
 #include "engine/collision/kcl.h"
 
 #include <algorithm>
@@ -56,6 +57,12 @@ constexpr u32 MAX_CELLS_PER_TRIANGLE = 4;
 // how far outside a column a footprint may pass and still be listed in it (rounding of the exact
 // test; the island's coordinates reach 50 000, where a float step is 0.004)
 constexpr f32 MARGIN = 0.05f;
+// How far outside a flat triangle's footprint a point still has the triangle under it (ground()). Two
+// prisms that share an edge each rebuild it from their own height and normals, and the two copies
+// can lie a thousandth of a unit apart (the island's rock slope and the sand at its foot, east of
+// the volcano): a point in between was under neither, and a Mii sliding down that slope sampled the
+// same point every tick and stuck there. Within MARGIN, so the grid lists the triangle there too.
+constexpr f32 EDGE_TOL = 0.01f;
 
 enum : u16 { TRI_VALID = 1 };
 
@@ -108,6 +115,26 @@ bool footprint_touches(const Tri& t, f32 x0, f32 z0, f32 x1, f32 z1) {
             return false;
     }
     return true;
+}
+
+// Is (x, z) in the triangle's footprint, or within EDGE_TOL times its normal's y of it (so that the
+// plane's height there is at most EDGE_TOL off its height at the edge, however steep it is)? Each
+// edge's function on x/z is its length times the point's distance from the edge's line, positive
+// inside for a footprint wound that way; the three sum to twice the footprint's signed area wherever
+// the point is, which gives the winding.
+bool under(const Tri& t, f32 x, f32 z) {
+    const f32 e0 = (t.b.x - t.a.x) * (z - t.a.z) - (t.b.z - t.a.z) * (x - t.a.x);
+    const f32 e1 = (t.c.x - t.b.x) * (z - t.b.z) - (t.c.z - t.b.z) * (x - t.b.x);
+    const f32 e2 = (t.a.x - t.c.x) * (z - t.c.z) - (t.a.z - t.c.z) * (x - t.c.x);
+    const bool cw = e0 + e1 + e2 < 0;
+    const f32 tol2 = EDGE_TOL * EDGE_TOL * t.n.y * t.n.y;
+    auto out = [&](f32 e, const Vec3& p, const Vec3& q) {
+        if (cw ? e <= 0 : e >= 0)
+            return false;
+        const f32 ex = q.x - p.x, ez = q.z - p.z;
+        return e * e > tol2 * (ex * ex + ez * ez);
+    };
+    return !out(e0, t.a, t.b) && !out(e1, t.b, t.c) && !out(e2, t.c, t.a);
 }
 
 // the point of the triangle closest to p (Ericson, Real-Time Collision Detection 5.1.5)
@@ -372,8 +399,9 @@ bool World::cast(Vec3 a, Vec3 b, Hit* hit) const {
 }
 
 // A vertical ray: one column per file. A triangle is skipped by its vertices' heights first (all
-// above the ray's start, or all below the best hit so far), then by its footprint (the three edge
-// functions on x/z, inclusive, either winding); only then is its height at (x, z) worked out.
+// above the ray's start, or all below the best hit so far), then by its footprint (under(), a
+// hair's breadth beyond its edges, either winding); only then is its height at (x, z) worked out,
+// kept within the triangle's own heights (a steep one's rounding).
 bool World::ground_(f32 x, f32 z, f32 from_y, f32 to_y, Pred p, const void* ctx, Hit* hit) const {
     stats_.grounds++;
     f32 best = to_y;
@@ -392,16 +420,8 @@ bool World::ground_(f32 x, f32 z, f32 from_y, f32 to_y, Pred p, const void* ctx,
             const Tri& t = m.tris[*it];
             if ((t.a.y > from_y && t.b.y > from_y && t.c.y > from_y) || (t.a.y < best && t.b.y < best && t.c.y < best))
                 continue;
-            if (std::fabs(t.n.y) < 1e-3f)
-                continue;  // upright: no height under a point
-            f32 e0 = (t.b.x - t.a.x) * (z - t.a.z) - (t.b.z - t.a.z) * (x - t.a.x);
-            f32 e1 = (t.c.x - t.b.x) * (z - t.b.z) - (t.c.z - t.b.z) * (x - t.b.x);
-            if ((e0 < 0 && e1 > 0) || (e0 > 0 && e1 < 0))
-                continue;
-            f32 e2 = (t.a.x - t.c.x) * (z - t.c.z) - (t.a.z - t.c.z) * (x - t.c.x);
-            if ((e2 < 0 && (e0 > 0 || e1 > 0)) || (e2 > 0 && (e0 < 0 || e1 < 0)))
-                continue;
-            // the plane's height here, kept within the triangle's own (a steep one's rounding)
+            if (std::fabs(t.n.y) < 1e-3f || !under(t, x, z))
+                continue;  // (upright: no height under a point)
             f32 y = t.a.y - (t.n.x * (x - t.a.x) + t.n.z * (z - t.a.z)) / t.n.y;
             y = std::min(std::max(y, min3(t.a.y, t.b.y, t.c.y)), max3(t.a.y, t.b.y, t.c.y));
             if (y > from_y || y < best || (found && y == best) || !p(ctx, t.attr, t.n))

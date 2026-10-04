@@ -20,12 +20,13 @@
 // The walks, each for a Mii at both k: from the town's spawn north into the coin-toss fountain (its
 // rim and basin stop the Mii), into a building's wall by the plaza, up the volcano's dirt trail
 // (waypoints), into a tree's trunk, a rock shore and a beach into the sea (the shore stops it, at
-// most knee-deep), off a grass ledge north of the plaza (it falls and lands), across the suspension
-// bridge (ハラハラつり橋), and random walking (10 minutes from the spawn, 5 on the hills, 5 on a
-// beach) with the camera turned now and then. Every tick of every walk checks that the Mii stands
-// on the ground when not falling, is in no wall, isn't in deep water, didn't pass through a wall
-// since the last tick, and that nothing stands between the camera and the Mii's head, nor water
-// over the camera. Then the queries are timed.
+// most knee-deep), off a grass ledge north of the plaza (it falls and lands), down a rock slope too
+// steep to stand on (it slides down it, keeping to it), across the suspension bridge (ハラハラつり橋),
+// and random walking (10 minutes from the spawn, 5 on the hills, 5 on a beach) with the camera
+// turned now and then. Every tick of every walk checks that the Mii stands on the ground when not
+// falling, is in no wall, isn't in deep water, didn't pass through a wall since the last tick, and
+// that nothing stands between the camera and the Mii's head, nor water over the camera. Then the
+// queries are timed.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -128,8 +129,24 @@ void check_rasters(const World& w, const std::string& dir) {
         const Raster& ref = pass == 0 ? g : wt;
         bool (*accept)(u16, Vec3) = pass == 0 ? +[](u16 a, Vec3) { return !kcl_is_water(a); }
                                               : +[](u16 a, Vec3) { return kcl_is_water(a); };
-        u32 n = 0, agree = 0, both_none = 0, wrong = 0, logged = 0;
+        u32 n = 0, agree = 0, both_none = 0, at_lips = 0, wrong = 0, logged = 0;
         f32 worst = 0;
+        // A point a hair's breadth outside a triangle's edge still has it under it (kcl.cpp's EDGE_TOL),
+        // so at the lip of a cliff ground() may give the lip where the raster has the face just under
+        // it: the raster's height is then the next surface down, and the lip's surface ends within 0.02.
+        auto at_lip = [&](f32 x, f32 z, f32 ours, f32 want) {
+            Hit b;
+            if (want >= ours || !w.ground(x, z, ours - 0.001f, -1e9f, accept, &b) ||
+                std::fabs(b.point.y - want) >= 0.01f)
+                return false;
+            for (int a = 0; a < 4; a++) {
+                Hit g;
+                f32 dx = a == 0 ? 0.02f : a == 1 ? -0.02f : 0, dz = a == 2 ? 0.02f : a == 3 ? -0.02f : 0;
+                if (!w.ground(x + dx, z + dz, 1e9f, -1e9f, accept, &g) || std::fabs(g.point.y - ours) > 0.05f)
+                    return true;
+            }
+            return false;
+        };
         for (u32 tries = 0; n < 12000 && tries < 10000000; tries++) {
             u32 r = rng.next() % ref.rows, c = rng.next() % ref.cols;
             f32 want = ref.at(r, c);
@@ -145,6 +162,8 @@ void check_rasters(const World& w, const std::string& dir) {
             } else if (got && want_some && std::fabs(h.point.y - want) < 0.01f) {
                 agree++;
                 worst = std::max(worst, std::fabs(h.point.y - want));
+            } else if (got && want_some && at_lip(x, z, h.point.y, want)) {
+                agree++, at_lips++;
             } else {
                 wrong++;
                 if (logged++ < 8)
@@ -154,8 +173,9 @@ void check_rasters(const World& w, const std::string& dir) {
             }
         }
         log("selftest walk: ground() vs research raster kcl_%s.npy: %u of %u points agree (%u on a surface within "
-            "%.4f, %u with none), %u differ: %s",
-            pass ? "water" : "ground", agree, n, agree - both_none, worst, both_none, wrong, wrong ? "MISMATCH" : "ok");
+            "%.4f, %u at a lip with the raster's surface just under it, %u with none), %u differ: %s",
+            pass ? "water" : "ground", agree, n, agree - both_none - at_lips, worst, at_lips, both_none, wrong,
+            wrong ? "MISMATCH" : "ok");
     }
 }
 
@@ -172,6 +192,7 @@ struct Tally {
     int max_state = 0;
     u32 cam_pulled = 0;    // ticks the terrain held the camera in
     f32 cam_min = 1e30f;
+    f32 max_over_slope = 0;  // the feet's height over a slope too steep to stand on, falling or sliding
     bool broken() const { return off_ground || in_wall || deep || tunnel || cam_blocked || cam_wet; }
 };
 
@@ -226,6 +247,10 @@ public:
             if (pl.airborne()) {
                 t.fell = true;
                 t.max_air = std::max(t.max_air, ++t.air);
+                Hit h;
+                if (w_.ground(p.x, p.z, p.y + 0.01f, -1e9f, floor_of, &h) && h.normal.y >= pp_.wall_ny &&
+                    h.normal.y < pp_.walkable_ny)
+                    t.max_over_slope = std::max(t.max_over_slope, p.y - h.point.y);
             } else {
                 t.air = 0;
                 Hit h;
@@ -386,6 +411,25 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
             return true;
         });
         wk.report("cliff", pl, t, t.fell && !pl.airborne() && std::fabs(pl.position().y - 69) < 1, "fell and landed");
+    }
+    {  // off a grass top on the east coast (y 238) onto its rock slope (64 degrees: too steep to stand
+       // on), down which it slides, keeping to the slope, onto the sand (y 60)
+        Player pl(w, pp);
+        const f32 yaw = 12.2f;  // the slope's fall line
+        bool slid = false;
+        Tally t = wk.run("slope", Vec3{9144.5f, 239, 5575.6f}, yaw, 15, pl, [&](const Player& p, u32, Drive& d) {
+            slid |= p.airborne();
+            if (slid && !p.airborne())
+                return false;  // down
+            d.world = true, d.wx = 0.5f * std::sin(yaw * PI / 180), d.wz = 0.5f * std::cos(yaw * PI / 180);
+            return true;
+        });
+        char what[96];
+        snprintf(what, sizeof(what), "slid down and landed, at most %.2f over the slope", t.max_over_slope);
+        wk.report("slope", pl, t,
+                  t.fell && !pl.airborne() && std::fabs(pl.position().y - 60) < 1 &&
+                      t.max_over_slope < 0.1f * pp.height,
+                  what);
     }
     {  // across the suspension bridge (deck about y 699..766), east to west
         Player pl(w, pp);
