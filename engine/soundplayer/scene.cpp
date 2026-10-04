@@ -191,6 +191,8 @@ const char* const CLASS_NAME = "scene::SoundPlayerScene";
 void make_lasting() {
     engine::system::host_scene_factory(CLASS_NAME, &make_scene);
     engine::system::hookable_button_class(game::VTABLE_LAYOUT_BUTTON, game::LAYOUT_BUTTON_SLOTS);
+    // layout::movie::PlayButton (the controls' play/pause disc): 21 virtuals, as layout::Button's
+    engine::system::hookable_button_class(GA_lbl_80796B4C, 21);
 }
 
 }  // namespace
