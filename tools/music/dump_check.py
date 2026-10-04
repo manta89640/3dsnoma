@@ -105,11 +105,12 @@ def cmd_score(a):
     # levels and onsets by section, the passes the recording holds
     print('%-10s %8s %8s %6s %7s %7s' % ('section', 'dump dB', 'model dB', 'diff', 'onsets', 'found'))
     diffs = []
+    bar = check.bar_ticks(score)
     for p in range(a.passes):
         for name, first, bars in ns['SECTIONS']:
             if name == 'intro' and p:
                 continue
-            b0, b1 = tsec(first * 4 * 96), tsec((first + bars) * 4 * 96)
+            b0, b1 = tsec(first * bar), tsec((first + bars) * bar)
             if name != 'intro':
                 b0, b1 = b0 + p * period_s, b1 + p * period_s
             seg_d = dump[:, s0 + int(b0 * RATE):s0 + int(b1 * RATE)]
