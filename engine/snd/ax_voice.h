@@ -54,6 +54,7 @@ struct RemoteMixParam {
 };
 
 u32 ax_manager();  // nw4r::snd::detail::AxManager::GetInstance()
+u8* ax_manager_ptr();  // ... in host memory
 
 void ax_set_src(GuestObj ax, bool initial, f32 pitch);
 void ax_set_ve(GuestObj ax, f32 volume, f32 init_volume);

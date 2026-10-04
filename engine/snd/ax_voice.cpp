@@ -18,6 +18,12 @@ u32 ax_manager() {
         s_instance = g::nw4r_snd_detail_AxManager_GetInstance(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     return s_instance;
 }
+u8* ax_manager_ptr() {
+    static u8* s_p;
+    if (!s_p)
+        s_p = GuestObj(ax_manager()).p;
+    return s_p;
+}
 
 // AXPBMIX order of a MixParam's volumes (MixParam: L R S per bus; AXPBMIX: the L R pairs of all
 // buses first, then the S of each)
@@ -131,30 +137,69 @@ void ax_set_ve(GuestObj ax, f32 volume, f32 init_volume) {
     ax.set16(AXV_VE_TARGET, v);
 }
 
-// the mix volumes: each ramps toward its target over AX frames, by whole steps per sample
+// big-endian 16-bit words in pairs: a word's bytes swapped in each half (REV16)
+static inline u32 rev16(u32 v) { return (v & 0x00FF00FFu) << 8 | (v >> 8 & 0x00FF00FFu); }
+static inline u32 load_pair(const u8* p) {
+    u32 v;
+    memcpy(&v, p, 4);
+    return rev16(v);  // (the first word in the low half)
+}
+static inline void store_pair(u8* p, u32 lo, u32 hi) {
+    u32 v = rev16((lo & 0xFFFF) | hi << 16);
+    memcpy(p, &v, 4);
+}
+
+// the mix volumes: each ramps toward its target over AX frames, by whole steps per sample. (Its
+// volumes and steps, AxVoiceParamBlock::SetVoiceMix's, go to the AXVPB a pair of words at a time.)
 bool ax_set_mix(GuestObj ax, const MixParam& mix) {
     GuestObj pb(ax.get32(AXV_PB));
     if (!pb)
         return false;
+    u8* axm = ax.p + AXV_MIX;
     if (ax.get8(AXV_MIX_FIRST) || pb.get16(PB_STATE) != 1) {  // no ramp: start at the targets
-        for (int k = 0; k < 12; k++)
-            ax.set16(AXV_MIX + 2 * k, mix.v[k]);
+        for (int k = 0; k < 12; k += 2)
+            store_pair(axm + 2 * k, mix.v[k], mix.v[k + 1]);
         ax.set8(AXV_MIX_FIRST, 0);
     }
-    bool changed = false;
     u16 cur[12];
     s32 step[12];
-    u16 axmix[24];
-    for (int k = 0; k < 12; k++) {
-        cur[k] = ax.get16(AXV_MIX + 2 * k);
-        changed |= cur[k] != mix.v[k];
-        step[k] = cur[k] == mix.v[k] ? 0 : div96((s32)mix.v[k] - (s32)cur[k]);
-        axmix[2 * kMixToAx[k]] = cur[k];
-        axmix[2 * kMixToAx[k] + 1] = (u16)(s16)step[k];
+    bool changed = false;
+    for (int k = 0; k < 12; k += 2) {
+        u32 two = load_pair(axm + 2 * k);
+        cur[k] = (u16)two, cur[k + 1] = (u16)(two >> 16);
+        changed |= two != ((u32)mix.v[k] | (u32)mix.v[k + 1] << 16);
     }
-    pb_set_voice_mix(ax, axmix, false);
-    for (int k = 0; k < 12; k++)
-        ax.set16(AXV_MIX + 2 * k, mix.v[k] == 0 || step[k] == 0 ? mix.v[k] : (u16)(cur[k] + step[k] * 0x60));
+    u32 ctrl = 0;
+    u8* pbm = pb.p + PB_MIX;
+    if (!changed) {  // (as a rule: at the targets, no steps, and the volumes reached stay)
+        for (int k = 0; k < 12; k++) {
+            u32 i = kMixToAx[k];
+            store_pair(pbm + 4 * i, cur[k], 0);
+            if (cur[k])
+                ctrl |= kMixerCtrlBits[2 * i];
+        }
+        pb.set32(PB_MIXER_CTRL, ctrl);
+        ax.or32(AXV_SYNC, 0x12);
+        return false;
+    }
+    for (int k = 0; k < 12; k++) {
+        u32 c = cur[k], m = mix.v[k];
+        s32 d = c == m ? 0 : div96((s32)m - (s32)c);
+        step[k] = d;
+        u32 i = kMixToAx[k];
+        store_pair(pbm + 4 * i, c, (u32)(u16)(s16)d);
+        if (c)
+            ctrl |= kMixerCtrlBits[2 * i];
+        if ((u16)d)
+            ctrl |= kMixerCtrlBits[2 * i + 1];
+    }
+    pb.set32(PB_MIXER_CTRL, ctrl);
+    ax.or32(AXV_SYNC, 0x12);
+    for (int k = 0; k < 12; k += 2) {
+        u32 a = mix.v[k] == 0 || step[k] == 0 ? mix.v[k] : (u16)(cur[k] + step[k] * 0x60);
+        u32 b = mix.v[k + 1] == 0 || step[k + 1] == 0 ? mix.v[k + 1] : (u16)(cur[k + 1] + step[k + 1] * 0x60);
+        store_pair(axm + 2 * k, a, b);
+    }
     return changed;
 }
 
@@ -275,7 +320,6 @@ void ax_sync(GuestObj ax) {
     if (!pb)
         return;
     s32 cur = ax.get16(AXV_VE_VOL), target = ax.get16(AXV_VE_TARGET);
-    pb.set16(PB_VE, (u16)cur);
     s16 d = (s16)div96(target - cur);
     s32 unit = d == 0 ? -1 : 1;  // (as the original computes it)
     s32 err_unit = target - (cur + unit * 0x60), err_d = target - (cur + d * 0x60);
@@ -283,18 +327,16 @@ void ax_sync(GuestObj ax) {
         err_unit = -err_unit;
     if (err_d < 0)
         err_d = -err_d;
-    pb.set16(PB_VE + 2, (u16)(err_d < err_unit ? d : unit));
-    s32 end = cur + pb.gets16(PB_VE + 2) * 0x60;
+    s16 delta = (s16)(err_d < err_unit ? d : unit);
+    s32 end = cur + delta * 0x60;
     if (end < 0)
-        pb.set16(PB_VE + 2, (u16)(s16)div96(-cur));
+        delta = (s16)div96(-cur);
     else if (end > 0xFFFF)
-        pb.set16(PB_VE + 2, (u16)(s16)div96(0xFFFF - cur));
-    if (pb.gets16(PB_VE + 2) == 0 && ax.gets16(AXV_VE_DELTA) == 0)
-        pb.set16(PB_VE, (u16)target);
+        delta = (s16)div96(0xFFFF - cur);
+    u16 ve = delta == 0 && ax.gets16(AXV_VE_DELTA) == 0 ? (u16)target : (u16)cur;
+    store_pair(pb.p + PB_VE, ve, (u16)delta);
     u32 sync = (ax.get32(AXV_SYNC) & ~0x200u) | 0x100;
-    ax.set32(AXV_SYNC, sync);
-    ax.set16(AXV_VE_VOL, pb.get16(PB_VE));
-    ax.set16(AXV_VE_DELTA, pb.get16(PB_VE + 2));
+    store_pair(ax.p + AXV_VE_VOL, ve, (u16)delta);
     pb.or32(PB_SYNC, sync);
     ax.set32(AXV_SYNC, 0);
 }

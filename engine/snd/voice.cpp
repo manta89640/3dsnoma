@@ -119,17 +119,60 @@ void calc_dpl2_pan(f32 pan, f32 span, f32& out_pan, f32& out_span) {
     out_span = out_span + 1.0f;
 }
 
-// a level (0..) as an AX volume: 1.0 = 0x8000, at most 0xFFFF
+// a level (0..) as an AX volume: 1.0 = 0x8000, at most 0xFFFF (and a NaN 0xFFFF, as fp2u makes it)
 inline u16 ax_volume(f32 x) {
-    if (!(x > 0.0f) && x == x)
-        return 0;
-    u32 v = fp2u(32768.0f * x);
-    return (u16)(v < 0xFFFF ? v : 0xFFFF);
+    if (!(x > 0.0f))
+        return x == x ? 0 : 0xFFFF;
+    f32 y = 32768.0f * x;
+    return y < 65535.0f ? (u16)(u32)y : 0xFFFF;
 }
 
 // Voice::CalcMixParam: one AX voice's volumes on each bus and remote speaker, from the voice's
 // volumes, sends, pan and span and the output mode
+void calc_mix_param_now(const Voice& vo, s32 ch, s32 out, MixParam& mix, RemoteMixParam& rmt);
+
+// calc_mix_param's results, kept per voice, channel and output with the bits of every input they
+// came from: the game's player hands every voice its parameters each frame, flagging its mix to be
+// made again, though they rarely change. The same inputs give the same results.
+struct MixMemo {
+    u32 voice;  // (0: empty)
+    s32 ch, out;
+    u32 in[19];  // the inputs' words as guest memory holds them
+    MixParam mix;
+    RemoteMixParam rmt;
+};
+MixMemo s_mix_memo[64];
+
+void mix_inputs(const Voice& vo, s32 out, u32 (&in)[19]) {
+    const u8* p = vo.v.p;
+    memcpy(in, p + V_OUTPUT_LINE, 40);                        // output line, main volume and send, fx sends, remotes
+    memcpy(in + 10, p + V_PAN, 8);                            // pan, span
+    memcpy(in + 12, p + V_PAN_MODE, 8);                       // pan mode, pan curve
+    memcpy(in + 14, p + V_CHANNELS, 4);
+    memcpy(in + 15, p + V_OUT + out * 0x18 + 0x8, 12);        // the output's pan, span, fx send
+    memcpy(in + 18, ax_manager_ptr() + AM_OUTPUT_MODE, 4);
+}
+
+inline bool same_words(const u32* a, const u32* b, u32 n) {
+    u32 diff = 0;
+    for (u32 i = 0; i < n; i++)
+        diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
 void calc_mix_param(const Voice& vo, s32 ch, s32 out, MixParam& mix, RemoteMixParam& rmt) {
+    u32 in[19];
+    mix_inputs(vo, out, in);
+    MixMemo& m = s_mix_memo[(vo.v.addr >> 4 ^ vo.v.addr >> 10 ^ (u32)ch * 5 ^ (u32)out * 3) & 63];
+    if (m.voice != vo.v.addr || m.ch != ch || m.out != out || !same_words(m.in, in, 19)) {
+        calc_mix_param_now(vo, ch, out, m.mix, m.rmt);
+        m.voice = vo.v.addr, m.ch = ch, m.out = out;
+        memcpy(m.in, in, sizeof(in));
+    }
+    mix = m.mix, rmt = m.rmt;
+}
+
+void calc_mix_param_now(const Voice& vo, s32 ch, s32 out, MixParam& mix, RemoteMixParam& rmt) {
     GuestObj v = vo.v;
     f32 main = 0, send = 0, fx_a = 0, fx_b = 0, fx_c = 0;
     u32 line = v.get32(V_OUTPUT_LINE);

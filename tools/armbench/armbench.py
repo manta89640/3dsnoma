@@ -5,6 +5,7 @@
     tools/armbench/armbench.py --cx [FILE...]
     tools/armbench/armbench.py --frame [VOICES...]
     tools/armbench/armbench.py --snd [VOICES...]
+    tools/armbench/armbench.py --snd-diff [REV]
 
 Builds tools/armbench/ax_bench.cpp and engine/audio/ax_render.cpp with devkitARM and the 3DS
 build's code generation flags, then
@@ -17,6 +18,8 @@ build's code generation flags, then
 SETUP, the voices, OUTPUT) with that many voices like the room's, instructions and cycles.
 --snd: nw4r::snd's voice update (tools/armbench/snd_bench.cpp: engine/snd/voice.cpp's
 UpdateAllVoices over that many voices, each recalculated every frame as the game makes it).
+--snd-diff: engine/snd's voice update in the working tree against git revision REV's (default
+HEAD) on random scenarios: the state after every frame must be the same.
 --cycles: with the instruction counts, an estimate of ARM11 cycles (tools/armbench/arm11_timing.py:
 the ARM11 MPCore TRM's issue cycles, result latencies and interlocks, the branch predictor; every
 access an L1 hit), with --lines per source line too.
@@ -203,6 +206,32 @@ def bench_frame(counts):
                                                                 m.call("frame", n, 4, 1)), flush=True)
 
 
+def snd_diff(rev, seeds=200):
+    """engine/snd's voice update (tools/armbench/snd_bench.cpp's random scenarios) as the working tree
+    has it against git revision `rev`'s: the same state after every frame, or the seeds that differ"""
+    with tempfile.TemporaryDirectory() as out:
+        old_root = os.path.join(out, "old")
+        os.makedirs(os.path.join(old_root, "engine", "snd"))
+        for f in ("voice.cpp", "ax_voice.cpp", "tables.cpp", "voice.h", "ax_voice.h", "guest_obj.h", "tables.h"):
+            data = subprocess.run(["git", "-C", ROOT, "show", "%s:engine/snd/%s" % (rev, f)], capture_output=True).stdout
+            open(os.path.join(old_root, "engine", "snd", f), "wb").write(data)
+        builds = []
+        for name, root in (("old", old_root), ("new", ROOT)):
+            d = os.path.join(out, name + "_build")
+            os.makedirs(d)
+            srcs = ["tools/armbench/snd_bench.cpp"] + [os.path.relpath(os.path.join(root, "engine", "snd", f), ROOT)
+                                                       for f in ("voice.cpp", "ax_voice.cpp", "tables.cpp")]
+            builds.append(Machine(build(d, srcs, ("snd_random",)), ("snd_random",)))
+        bad = []
+        for seed in range(1, seeds + 1):
+            a, b = (m.call("snd_random", seed, 6 + seed % 10, 12) for m in builds)
+            if a != b:
+                bad.append(seed)
+        print("engine/snd against %s: %d random scenarios (6-15 voices, 12 frames each): %s" % (
+            rev, seeds, "the same" if not bad else "DIFFERENT in seeds %s" % bad[:10]))
+        sys.exit(1 if bad else 0)
+
+
 def bench_snd(counts):
     """nw4r::snd's voice update (tools/armbench/snd_bench.cpp: engine/snd's UpdateAllVoices, every
     voice recalculated as the game's player makes it each frame): per voice, by voice count"""
@@ -224,6 +253,7 @@ def main():
     ap.add_argument("--cycles", action="store_true")
     ap.add_argument("--frame", type=int, nargs="*", metavar="VOICES")
     ap.add_argument("--snd", type=int, nargs="*", metavar="VOICES")
+    ap.add_argument("--snd-diff", nargs="?", const="HEAD", metavar="REV")
     args = ap.parse_args()
     if args.cx is not None:
         return bench_cx(args.cx)
@@ -231,6 +261,8 @@ def main():
         return bench_frame(args.frame or [0, 1, 8, 24, 37])
     if args.snd is not None:
         return bench_snd(args.snd or [1, 8, 20])
+    if args.snd_diff is not None:
+        return snd_diff(args.snd_diff)
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out))
         if args.lines is not None:
