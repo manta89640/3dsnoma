@@ -563,9 +563,11 @@ def _raster(sx, sy, sz, sw, W, H, keep):
         if not inside.any():
             continue
         b0, b1, b2 = w0[inside] / A, w1[inside] / A, w2[inside] / A
-        z = b0 * sz[t, 0] + b1 * sz[t, 1] + b2 * sz[t, 2]
         q0, q1, q2 = b0 * sw[t, 0], b1 * sw[t, 1], b2 * sw[t, 2]
         qs = q0 + q1 + q2
+        # the view depth: 1/w is what is linear on the screen, not w (a big triangle, the sea's, gets
+        # the depth of its far corners at its near pixels otherwise, and their fog)
+        z = 1.0 / qs
         tri_l.append(np.full(len(z), t, np.int64))
         pix_l.append((Y[inside] - 0.5).astype(np.int64) * W + (X[inside] - 0.5).astype(np.int64))
         bar_l.append(np.stack([q0 / qs, q1 / qs, q2 / qs], 1).astype(np.float32))
