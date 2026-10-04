@@ -13,6 +13,8 @@
 #include "engine/audio/ax_render.h"
 #include "engine/cx/cx_reference.h"
 #include "hw/gx/raster.h"
+#include "hw/gx/texture.h"
+#include "platform/3ds/pica_tex.h"
 
 namespace guest {
 
@@ -1036,6 +1038,108 @@ static void selftest_efb() {
     log("selftest efb: %u copies, %s", n, bad ? "DIFFERENT" : "ok");
 }
 
+// The 3DS renderer's texture conversions (platform/3ds/pica_tex.h): straight from the GX tiles must
+// give the texture memory that decoding then tiling gives, for every format, size and palette; CMPR
+// as ETC1/ETC1A4 is lossy: decoded with the PICA's layout (as Azahar's decoder reads it) it must
+// stay close to the CMPR texels, and its alpha exact
+static void selftest_tex() {
+    using namespace pica_tex;
+    u32 rng = 7;
+    auto next = [&] { return rng = rng * 1103515245u + 12345u, rng >> 8 ^ rng << 13; };
+    auto p2 = [](u32 v) { u32 p = 8; while (p < v && p < 1024) p <<= 1; return p; };
+    auto fmt_of = [](u32 f, u32 tlut) -> Fmt {
+        if (f == 8 || f == 9 || f == 10) return tlut == 0 ? LA8 : tlut == 1 ? RGB565 : RGBA8;
+        switch (f) { case 0: return L4; case 1: return L8; case 2: return LA4; case 3: return LA8; case 4: return RGB565; case 14: return RGBA5551; default: return RGBA8; }
+    };
+    const u32 fmts[] = {0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 14};
+    u8* tmem = gx_tmem_for_tests();
+    std::vector<u8> src, a, b;
+    std::vector<u32> rgba;
+    u32 bad = 0, n = 0;
+    for (int t = 0; t < 2000; t++) {
+        u32 f = fmts[t % 11], w = 1 + next() % (t % 7 == 0 ? 400 : 120), h = 1 + next() % (t % 5 == 0 ? 300 : 100);
+        u32 W = p2(w), H = p2(h), tlut_fmt = next() % 3, tlut_addr = (next() % 1500) << 9;
+        for (u32 i = 0; i < 0x10000; i++) tmem[(tlut_addr + i) & ((1u << 20) - 1)] = (u8)next();
+        src.resize(gx_texture_bytes(f, w, h));
+        for (u8& c : src) c = (u8)next();
+        Fmt pf = fmt_of(f, tlut_fmt);
+        size_t nb = (size_t)W * H * texel_bits(pf) / 8;
+        a.assign(nb, 0xCD), b.assign(nb, 0xCD), rgba.assign((size_t)w * h, 0);
+        gx_decode_texture_tlut(src.data(), f, w, h, tlut_addr, tlut_fmt, rgba.data());
+        from_rgba(rgba.data(), w, h, a.data(), W, H, pf, false);
+        bool ok = from_gx(src.data(), f, w, h, tmem, GX_TMEM_MASK, tlut_addr, tlut_fmt, b.data(), W, H, pf);
+        n++;
+        if ((!ok || a != b) && bad++ < 4) log("selftest tex: format %u %ux%u differs", f, w, h);
+    }
+    log("selftest tex: %u textures straight from GX tiles, %s", n, bad ? "DIFFERENT" : "ok");
+    // ETC1: texture-like CMPR (endpoints a few steps apart, now and then flat or three-color)
+    static const int MODT[8][2] = {{2, 8}, {5, 17}, {9, 29}, {13, 42}, {18, 60}, {24, 80}, {33, 106}, {47, 183}};
+    double se = 0;
+    long samples = 0;
+    int flat_max = 0, alpha_bad = 0;
+    for (int t = 0; t < 120; t++) {
+        u32 w = 8 * (1 + next() % 24), h = 8 * (1 + next() % 16), W = p2(w), H = p2(h);
+        const bool flat = t % 4 == 0;
+        src.assign((size_t)(w / 8) * (h / 8) * 32, 0);
+        for (size_t i = 0; i < src.size(); i += 8) {
+            u32 c0 = next() & 0xFFFF;
+            int r = (c0 >> 11) & 31, g = (c0 >> 5) & 63, bl = c0 & 31;
+            u32 c1 = flat ? c0 : (u32)(std::min(31, r + (int)(next() % 4)) << 11 | std::min(63, g + (int)(next() % 8)) << 5 | std::min(31, bl + (int)(next() % 4)));
+            if (c0 < c1) std::swap(c0, c1);
+            if (t % 7 == 3 && (i / 8) % 3 == 0) std::swap(c0, c1);
+            src[i] = (u8)(c0 >> 8), src[i + 1] = (u8)c0, src[i + 2] = (u8)(c1 >> 8), src[i + 3] = (u8)c1;
+            for (int k = 4; k < 8; k++) src[i + k] = (u8)next();
+        }
+        const bool alpha = cmpr_has_alpha(src.data(), w, h);
+        std::vector<u8> out(alpha ? (size_t)W * H : (size_t)W * H / 2);
+        from_gx(src.data(), 14, w, h, nullptr, 0, 0, 0, out.data(), W, H, alpha ? ETC1A4 : ETC1);
+        for (u32 y = 0; y < H; y++)
+            for (u32 x = 0; x < W; x++) {
+                // the source texel (edge texels repeated past the image), and the ETC1 one at its place
+                u32 ix = std::min(x, w - 1), iy = std::min(y, h - 1);
+                const u8* q = cmpr_sub_block(src.data(), w, ix, iy);
+                u32 pal[4];
+                cmpr_palette(q, pal);
+                const u32 c = pal[cmpr_index(q, ix, iy)];
+                const u32 mx = x, my = H - 1 - y;
+                const u8* blk = out.data() + (((my / 8) * (W / 8) + mx / 8) * 4 + ((mx % 8) / 4) + 2 * ((my % 8) / 4)) * (alpha ? 16 : 8);
+                const u32 fx = mx % 4, fy = my % 4, texel = 4 * fx + fy;
+                if (alpha) {
+                    u64 av;
+                    memcpy(&av, blk, 8), blk += 8;
+                    alpha_bad += (int)((av >> (4 * texel)) & 15) * 17 != (int)(c >> 24 >> 4) * 17;
+                }
+                u64 v;
+                memcpy(&v, blk, 8);
+                u32 xx = fx, yy = fy;
+                if ((v >> 32) & 1) std::swap(xx, yy);
+                const bool diff = (v >> 33) & 1;
+                int tbl = xx < 2 ? (int)((v >> 37) & 7) : (int)((v >> 34) & 7);
+                int m = MODT[tbl][(v >> texel) & 1];
+                if ((v >> (16 + texel)) & 1) m = -m;
+                for (int k = 0; k < 3; k++) {
+                    const int at = 56 - 8 * k;
+                    int q8;
+                    if (diff) {
+                        int base = (int)((v >> (at + 3)) & 31), d = (int)((v >> at) & 7);
+                        if (d >= 4) d -= 8;
+                        int q5 = xx >= 2 ? base + d : base;
+                        q8 = q5 << 3 | q5 >> 2;
+                    } else {
+                        q8 = (xx < 2 ? (int)((v >> (at + 4)) & 15) : (int)((v >> at) & 15)) * 17;
+                    }
+                    const int e = std::min(255, std::max(0, q8 + m)) - (int)((c >> (8 * k)) & 255);
+                    if (flat) flat_max = std::max(flat_max, std::abs(e));
+                    else se += e * e, samples++;
+                }
+            }
+    }
+    const double psnr = 10 * std::log10(255.0 * 255.0 * samples / se);
+    const bool etc_ok = flat_max <= 3 && psnr >= 35.0 && !alpha_bad;
+    log("selftest tex: CMPR as ETC1: flat blocks within %d, texture-like %.1f dB, %d alpha differences: %s", flat_max, psnr,
+        alpha_bad, etc_ok ? "ok" : "WORSE THAN EXPECTED");
+}
+
 static void selftest_crc() {
     axref::Rng rnd{1616};
     const u32 base = 0x90200000;
@@ -1094,6 +1198,8 @@ bool run_selftest(const std::string& name) {
         selftest_crc();
     else if (name == "efb")
         selftest_efb();
+    else if (name == "tex")
+        selftest_tex();
     else if (name == "all") {
         selftest_rfl();
         selftest_time();
@@ -1109,6 +1215,7 @@ bool run_selftest(const std::string& name) {
         selftest_fill();
         selftest_crc();
         selftest_efb();
+        selftest_tex();
     }
     else
         return false;
