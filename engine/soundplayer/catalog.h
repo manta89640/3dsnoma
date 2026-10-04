@@ -18,8 +18,9 @@ struct Track {
 // sound effects. Music is what plays on the archive's BGM player as a sequence with a SEQ_BGM_
 // label (the channel's own naming), less the silent placeholder and the one sequence filed twice;
 // jingles are the short pieces the channel plays for company logos and Miis' feelings. Their
-// names are the channel's labels put into words (the archive has no other names). Made once,
-// the first time it's asked for, in the list's order: by where the channel plays them.
+// names are the channel's labels put into words (the archive has no other names). The island's
+// music, the port's own (engine/wuhu/music.h), is listed with the places of the room's bar. Made
+// once, the first time it's asked for, in the list's order: by where the channel plays them.
 const std::vector<Track>& catalog();
 
 }  // namespace engine::soundplayer

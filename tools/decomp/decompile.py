@@ -227,6 +227,10 @@ PATCHED_NAMES = {
     # the way out timed by the clock, not in frames: its fade and wait took 4x as long at 15 fps
     # (runtime/patches/wii_parts.cpp)
     "app_Exit_Update",
+    # the island's music (engine/wuhu/music.cpp): sound::SoundManager's start plays the port's own
+    # sequence for its virtual ID (to be named sound_SoundManager_StartSound); the BGM manager's
+    # frame step (sound_BGMManager_Update) runs the music test (NOMA_WUHU_MUSIC_TEST)
+    "fn_802A0BD0", "fn_802A23A0",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes

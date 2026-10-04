@@ -142,6 +142,7 @@ Useful environment variables:
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
+| `NOMA_WUHU_MUSIC_TEST=N,M` | the island's music without the island: at game time N s the room's music pauses, a second later 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
@@ -213,4 +214,10 @@ what each Mii plays, every frame.
 - `platform/host`, `platform/3ds` — entry points, presentation, input; `gx_pica.cpp` is the GX
   renderer on the 3DS GPU.
 - `tools/` — WAD extraction, signature inference, the decompilation driver.
+- `tools/music/` — the port's own music: the island's score (`hiroi_sekai.py`), an RSEQ assembler,
+  disassembler and score compiler (`rseq.py`; `rseq.py header` makes `engine/wuhu/hiroi_sekai_seq.h`),
+  a reader of the channel's sound archive and a model of its sequencer (`brsar.py`), a preview
+  renderer with the channel's own instruments (`sndrender.py`), checks of a score and of a
+  recording of the port playing it (`check.py`, `dump_check.py`). They read the channel's
+  `snd/douga.brsar` from your own extraction.
 - `config/HCIJ` — dtk configuration and symbols.

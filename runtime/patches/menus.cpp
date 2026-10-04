@@ -15,6 +15,7 @@
 
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
+#include "engine/wuhu/music.h"
 #include "hw/ios/net.h"
 #include "noma_decomp.h"
 
@@ -151,10 +152,12 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
 }
 
 // The application's scene factories, made at the start (one block of them): the Sound Player's
-// is made with them (engine/soundplayer: its guest objects last as long as the program).
+// is made with them (engine/soundplayer: its guest objects last as long as the program), and the
+// island's music puts its sequence into guest memory (engine/wuhu/music.cpp).
 void app_SceneFactories_ctor(u32 r3) {
     app_SceneFactories_ctor_orig(r3);
     engine::soundplayer::boot();
+    engine::wuhu::music_boot();
 }
 
 // controller::living::SceneTransit::Go(To): the scene a room bar button leads to, once the room

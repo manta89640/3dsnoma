@@ -94,6 +94,7 @@ set(ENGINE_SOURCES
   engine/system/keyboard.cpp
   engine/system/thread.cpp
   engine/ut/font.cpp
+  engine/wuhu/music.cpp
 )
 
 # ---- the Wii runtime (memory, threads, interrupts, hardware and IOS emulation) ----
