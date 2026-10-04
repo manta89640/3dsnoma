@@ -190,6 +190,9 @@ struct World::Impl {
     std::vector<VisInst> vis_insts;
     std::vector<Mtx34> finals;
     WorldStats* stats = nullptr;
+    // the triangles each pass's last packet holds (stats->triangles is their sum: a world that isn't
+    // culled again -- frozen, the camera still -- must not count a pass twice)
+    u32 pass_tris[2] = {0, 0};
 
     // ---- packet building scratch
     struct Cand {
@@ -389,6 +392,7 @@ void World::Impl::cull() {
     vis_insts.clear();
     finals.clear();
     *stats = WorldStats();
+    pass_tris[0] = pass_tris[1] = 0;
     stats->cells_total = pkg.cells().count;
     stats->instances_total = pkg.instances().count;
     const Vec3 eye = cam.eye;
@@ -562,7 +566,8 @@ void World::Impl::build(Pass pass, Packet* p) {
         tris += c.tris;
     }
     (pass == Pass::OPAQUE ? stats->items_opaque : stats->items_translucent) = (u32)p->items.size();
-    stats->triangles += tris;
+    pass_tris[pass == Pass::TRANSLUCENT] = tris;
+    stats->triangles = pass_tris[0] + pass_tris[1];
 }
 
 // ---------------------------------------------------------------- World

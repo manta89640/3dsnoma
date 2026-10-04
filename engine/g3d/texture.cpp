@@ -91,7 +91,9 @@ void etc1_block(uint64_t v, u32* px) {
                     int base = (int)((v >> (at + 3)) & 31), d = (int)((v >> at) & 7);
                     if (d >= 4)
                         d -= 8;
-                    const int q5 = second ? base + d : base;
+                    // (base + delta outside 0-31 is an invalid block: wrapped to 5 bits, as an
+                    // adder that wide would, rather than shifting a negative value)
+                    const int q5 = (second ? base + d : base) & 31;
                     q8 = (q5 << 3) | (q5 >> 2);
                 } else {
                     q8 = (second ? (int)((v >> at) & 15) : (int)((v >> (at + 4)) & 15)) * 17;

@@ -99,7 +99,7 @@ public:
     int find_anim(const char* name) const;
     const fmt::Marker* find_marker(const char* name) const;
 
-    // the backend's resources for this package (backend.h), owned by the backend
+    // the backend's resources for this package (native_draw.h's Backend), owned by the backend
     void* backend_data = nullptr;
 
 private:

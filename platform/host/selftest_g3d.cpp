@@ -3,8 +3,8 @@
 // pica_tex.h to its PICA format, decoded back and compared with runtime/hw/gx/texture.cpp's GX
 // decode; CMPR as ETC1 by PSNR), the PICA tiling round trip, animation curves against hand-computed
 // values, materials, a world's culling, detail levels and draw order, and the native-draw packet ring
-// (order, wrap-around, a renderer that never runs, release). With NOMA_G3D_PACKAGE=path (default: the
-// staged wuhu/island.ng3d under --data, if there) the real package is loaded and drawn from each of
+// (order, wrap-around, a renderer that never runs, release). With NOMA_G3D_PACKAGE=path (default:
+// wuhu/island.ng3d in the working directory, if there) the real package is loaded and drawn from each of
 // its view_* markers, and its WorldStats are logged. NOMA_G3D_WRITE_TEST=path writes the test
 // scene's package (for tools/ng3d_bake).
 #include <algorithm>
@@ -908,6 +908,14 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
     expect(st.items_opaque == opa.items.size() && st.items_translucent == xlu.items.size() && st.triangles ==
            (opa.items.size() + xlu.items.size()) * 12, "stats: %u + %u items, %u triangles", st.items_opaque,
            st.items_translucent, st.triangles);
+    // a frozen world (no update, the camera still: not culled again) counts each pass once
+    {
+        g3::Packet o2, x2;
+        w.build_packet(g3::Pass::OPAQUE, &o2);
+        w.build_packet(g3::Pass::TRANSLUCENT, &x2);
+        expect(w.stats().triangles == st.triangles && o2.items.size() == opa.items.size(),
+               "a frozen world's next frame: %u triangles (%u before)", w.stats().triangles, st.triangles);
+    }
     // the opaque order front to back: check with the camera moved so the cells' distances differ
     {
         g3::Camera c2 = cam;
