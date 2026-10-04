@@ -170,7 +170,8 @@ static void write16(u32 off, u16 v) {
     case 0x0A: {
         u16 old = s_dspcr;
         u16 acks = v & CR_ACK_BITS;
-        if ((acks & CR_AIDINT) && (s_dspcr & CR_AIDINT) && getenv("NOMA_DEBUG_AX")) {
+        static const bool s_debug_ax = getenv("NOMA_DEBUG_AX") != nullptr;  // (once: an AI interrupt each 3 ms)
+        if ((acks & CR_AIDINT) && (s_dspcr & CR_AIDINT) && s_debug_ax) {
             extern u64 g_aid_raised;
             static u64 s_sum, s_n, s_max;
             u64 lat = host_time_us() - g_aid_raised;
