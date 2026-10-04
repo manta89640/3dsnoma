@@ -36,6 +36,9 @@ struct GxStats {
     u32 draws, vertices, bp, cp, xf, dl, copies, finish, tokens, unknown;
 };
 static GxStats s_stats;
+GxDecodeCounts gx_decode_counts() {
+    return {s_stats.draws, s_stats.vertices, s_stats.bp, s_stats.cp, s_stats.xf, s_stats.dl};
+}
 static bool s_debug = getenv("NOMA_DEBUG_GX") != nullptr;
 
 static u32 be16(const u8* p) { return (u32)p[0] << 8 | p[1]; }
@@ -63,8 +66,12 @@ void platform_backtrace(const char* why);
 static u32 s_dl_addr;        // the display list running (guest address) ...
 static const u8* s_dl_host;  // ... and our copy of it
 static u32 s_cur_prim;       // the draw command being executed (for the draw path's statistics)
+static u32 s_dl_size, s_dl_offset;  // the list's size, the draw command's offset in it
 bool gx_in_display_list() { return s_dl_host != nullptr; }
 u32 gx_current_prim() { return s_cur_prim; }
+u32 gx_display_list_addr() { return s_dl_addr; }
+u32 gx_display_list_size() { return s_dl_size; }
+u32 gx_display_list_offset() { return s_dl_offset; }
 static void check_nan(u32 addr, u32 v, const u8* from = nullptr) {
     static bool s_on = getenv("NOMA_DEBUG_GX_NAN") != nullptr;
     static int s_left = 4;
@@ -191,9 +198,10 @@ static void call_display_list(u32 addr, u32 size) {
         read_g(s_list.data(), a, size);
         list = s_list.data();
     }
-    s_dl_addr = a, s_dl_host = list;
+    s_dl_addr = a, s_dl_host = list, s_dl_size = size;
     u32 done = 0;
     while (done < size) {
+        s_dl_offset = done;
         u32 used = gx_decode(list + done, size - done, true);
         if (!used)
             break;  // a truncated command at the end of the list is dropped, as on hardware

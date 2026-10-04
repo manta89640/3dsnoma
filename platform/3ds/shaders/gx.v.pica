@@ -1,33 +1,247 @@
-; Vertex shader for the GX renderer (platform/3ds/gx_pica.cpp). Vertices arrive transformed by
-; the emulated GX transform unit (clip space, colors 0-255, texture coordinates); xform maps GX
-; clip space to the 3DS: the GX viewport, the frame buffer scaled to 400x240, the rotated
-; render target and the depth range.
+; The GX transform unit as a PICA200 vertex shader (platform/3ds/gx_pica.cpp, runtime/hw/gx/tnl.cpp).
+;
+; A vertex arrives in model space, as the game's vertex arrays hold it (the CPU only decodes the
+; stream and follows the indices): position, normal, color 0, the three texgen sources the
+; combiners sample (texture coordinate, position or normal, with z or 1 as the third component)
+; and the palette slots of its matrices. The shader does what xform.cpp's gx_transform does:
+;   * position -> eye space with the position matrix (3 palette rows), -> clip space with the
+;     projection, folded with the GX viewport, the 400x240 screen, the rotated render target
+;     and the depth range (proj);
+;   * color channel 0: material and ambient from the register or the vertex (selmat/selamb:
+;     1 where the vertex color is used), the GX light sum over the lights the material uses
+;     (spot attenuation, or none; diffuse clamped, signed or none; the alpha channel's lights are
+;     the same set or none: lcfg), clamped and applied where the channel is lit (sellit);
+;   * texgens: the source times the texgen matrix (3 palette rows; a 2x4 matrix has (0 0 0 1)
+;     as its third), normalised and/or through the post matrix when the texgen has one, s and t
+;     over q for stq texgens, times the texture's scale (its image padded to a power of two).
+; Uniforms are 24-bit floats; the palette holds matrix rows the CPU copies from XF memory as the
+; draws use them, found again by the slot index each vertex carries.
 
-.fvec xform[4]
+; ---- uniforms (96 vectors in all; the order fixes the registers: proj at c0)
+.fvec proj[4]              ; GX projection x 3DS transform, times (eye x, y, z, 1)
+.fvec matc                 ; material color 0 where it comes from the register (else 0), 0-1
+.fvec ambc                 ; ambient color 0 where it comes from the register (else 0)
+.fvec selmat               ; 1 per component: material from the vertex color
+.fvec selamb               ; 1 per component: ambient from the vertex color
+.fvec sellit               ; 1 per component: lit (the light sum applies)
+.fvec lcfg                 ; x: diffuse floor (0 clamped, -huge signed); y: 1 if the diffuse
+                           ; dot is used (0: diffuse off); z: 1 - y; w: alpha light weight
+.fvec tcscale[2]           ; (s, t) scale of texture units 0 and 1; 2 (and unused)
+.fvec lights[32]           ; 4 per light: (cosatt, r) (distatt, g) (position, b) (direction, a)
+.fvec post[9]              ; post-transform matrices of texgens 0-2, 3 rows each
+.fvec pal[42]              ; palette: matrix rows
+.constf consts(0.0, 1.0, 0.00392156862745098, 1e-30)
 
-.constf consts(1.0, 0.00392156862745098, 0.0, 0.0)
-.alias inv255 consts.yyyy
+.ivec nlights              ; x: lights - 1; y: 0; z: 4 (the loop steps a light)
 
-.out outpos position
-.out outclr color
-.out outtc0 texcoord0
-.out outtc1 texcoord1
-.out outtc2 texcoord2
+.bool lit                  ; b0: a channel is lit
+.bool haslights            ; b1: ... with lights (else ambient only)
+.bool spot                 ; b2: spot attenuation (else none)
+.bool stq0, stq1, stq2     ; b3-b5: divide by q
+.bool post0, post1, post2  ; b6-b8: post matrix
+.bool pnrm0, pnrm1, pnrm2  ; b9-b11: normalise before the post matrix
+.bool tg1, tg2             ; b12-b13: texgens 1 and 2 are used
 
-.alias inpos v0
-.alias inclr v1
-.alias intc0 v2
-.alias intc1 v3
-.alias intc2 v4
+; ---- inputs
+.alias pos v0              ; model-space position (x, y, z)
+.alias nrm v1              ; model-space normal
+.alias clr v2              ; color 0, 0-255 per component
+.alias idx v3              ; palette slots: position matrix, texgen 0-2 matrices
+.alias tc0 v4              ; texgen sources (x, y, z): texture coordinate, position or normal
+.alias tc1 v5
+.alias tc2 v6
+
+; ---- outputs
+.out opos position
+.out oclr color
+.out otc0 texcoord0
+.out otc1 texcoord1
+.out otc2 texcoord2
+
+; one texgen's matrix: r12 = source (x y z 1), a0.y = its matrix slot; result r13 (s t q)
+.proc texgen_mtx
+  dp4 r13.x, pal[a0.y], r12
+  dp4 r13.y, pal[a0.y+1], r12
+  dp4 r13.z, pal[a0.y+2], r12
+.end
+
+.proc normalize13
+  dp3 r14.x, r13, r13
+  max r14.x, consts.wwww, r14.x
+  rsq r14.x, r14.x
+  mul r13.xyz, r14.xxxx, r13
+.end
+
+; s, t over q (q = 0 counts as 1, as the GX does)
+.proc divide_q
+  cmp consts.xx, eq, eq, r13.zz
+  ifc cmp.x
+    mov r13.z, consts.yyyy
+  .end
+  rcp r14.x, r13.z
+  mul r13.xy, r14.xxxx, r13
+.end
+
+.proc post0_apply
+  ifu pnrm0
+    call normalize13
+  .end
+  mov r13.w, consts.yyyy
+  dp4 r14.x, post[0], r13
+  dp4 r14.y, post[1], r13
+  dp4 r14.z, post[2], r13
+  mov r13.xyz, r14
+.end
+
+.proc post1_apply
+  ifu pnrm1
+    call normalize13
+  .end
+  mov r13.w, consts.yyyy
+  dp4 r14.x, post[3], r13
+  dp4 r14.y, post[4], r13
+  dp4 r14.z, post[5], r13
+  mov r13.xyz, r14
+.end
+
+.proc post2_apply
+  ifu pnrm2
+    call normalize13
+  .end
+  mov r13.w, consts.yyyy
+  dp4 r14.x, post[6], r13
+  dp4 r14.y, post[7], r13
+  dp4 r14.z, post[8], r13
+  mov r13.xyz, r14
+.end
+
+; the light sum: r1 = eye position, r5 = eye normal, r4 = accumulator (rgba)
+.proc light_sum
+  for nlights
+    ; direction to the light, its distance
+    add r6.xyz, lights[aL+2], -r1
+    dp3 r7.x, r6, r6
+    max r7.x, consts.wwww, r7.x
+    rsq r7.y, r7.x
+    mul r6.xyz, r7.yyyy, r6
+    ifu spot
+      mul r7.z, r7.x, r7.y
+      ; t = max(0, dir . light direction); num = cosatt . (1 t t^2)
+      dp3 r8.x, lights[aL+3], r6
+      max r8.x, consts.xxxx, r8.x
+      mul r8.y, r8.x, r8.x
+      mov r9.x, consts.yyyy
+      mov r9.yz, r8.xxyx
+      dp3 r8.z, lights[aL], r9
+      ; den = distatt . (1 d d^2)
+      mov r9.yz, r7.zzxx
+      dp3 r8.w, lights[aL+1], r9
+      max r8.z, consts.xxxx, r8.z
+      rcp r8.w, r8.w
+      mul r10.x, r8.z, r8.w
+    .else
+      mov r10.x, consts.yyyy
+    .end
+    ; diffuse: the dot with the normal, floored (clamped or signed), or 1
+    dp3 r10.y, r6, r5
+    max r10.y, lcfg.xxxx, r10.y
+    mul r10.y, lcfg.yyyy, r10.y
+    add r10.y, lcfg.zzzz, r10.y
+    mul r10.x, r10.x, r10.y
+    ; the light's color (alpha weighted)
+    mov r11.x, lights[aL].wwww
+    mov r11.y, lights[aL+1].wwww
+    mov r11.z, lights[aL+2].wwww
+    mov r11.w, lights[aL+3].wwww
+    mul r11.w, lcfg.wwww, r11.w
+    mad r4, r10.xxxx, r11, r4
+  .end
+.end
 
 .proc main
-  dp4 outpos.x, xform[0], inpos
-  dp4 outpos.y, xform[1], inpos
-  dp4 outpos.z, xform[2], inpos
-  dp4 outpos.w, xform[3], inpos
-  mul outclr, inv255, inclr
-  mov outtc0, intc0
-  mov outtc1, intc1
-  mov outtc2, intc2
+  ; ---- position: eye space (palette rows a0.x .. a0.x + 2), then clip space
+  mova a0.x, idx.xxxx
+  mov r0.xyz, pos
+  mov r0.w, consts.yyyy
+  dp4 r1.x, pal[a0.x], r0
+  dp4 r1.y, pal[a0.x+1], r0
+  dp4 r1.z, pal[a0.x+2], r0
+  mov r1.w, consts.yyyy
+  dp4 opos.x, proj[0], r1
+  dp4 opos.y, proj[1], r1
+  dp4 opos.z, proj[2], r1
+  dp4 opos.w, proj[3], r1
+
+  ; ---- color 0: material (register or vertex), lit where the channel is lit
+  mul r2, consts.zzzz, clr
+  mul r3, selmat, r2
+  add r3, matc, r3
+  ifu lit
+    ; ambient, then the lights
+    mul r4, selamb, r2
+    add r4, ambc, r4
+    ifu haslights
+      ; eye-space normal (palette rows a0.x + 3 .. 5), normalised
+      dp3 r5.x, pal[a0.x+3], nrm
+      dp3 r5.y, pal[a0.x+4], nrm
+      dp3 r5.z, pal[a0.x+5], nrm
+      dp3 r6.x, r5, r5
+      max r6.x, consts.wwww, r6.x
+      rsq r6.x, r6.x
+      mul r5.xyz, r6.xxxx, r5
+      call light_sum
+    .end
+    ; clamp, and 1 where the channel is not lit: 1 + (sum - 1) * sellit
+    max r4, consts.xxxx, r4
+    min r4, consts.yyyy, r4
+    add r4, -consts.yyyy, r4
+    mul r4, sellit, r4
+    add r4, consts.yyyy, r4
+    mul r3, r3, r4
+  .end
+  mov oclr, r3
+
+  ; ---- texgen 0
+  mova a0.y, idx.yyyy
+  mov r12.xyz, tc0
+  mov r12.w, consts.yyyy
+  call texgen_mtx
+  ifu post0
+    call post0_apply
+  .end
+  ifu stq0
+    call divide_q
+  .end
+  mul otc0.xy, tcscale[0].xyxy, r13
+
+  ; ---- texgen 1
+  ifu tg1
+    mova a0.y, idx.zzzz
+    mov r12.xyz, tc1
+    mov r12.w, consts.yyyy
+    call texgen_mtx
+    ifu post1
+      call post1_apply
+    .end
+    ifu stq1
+      call divide_q
+    .end
+    mul otc1.xy, tcscale[0].zwzw, r13
+  .end
+
+  ; ---- texgen 2
+  ifu tg2
+    mova a0.y, idx.wwww
+    mov r12.xyz, tc2
+    mov r12.w, consts.yyyy
+    call texgen_mtx
+    ifu post2
+      call post2_apply
+    .end
+    ifu stq2
+      call divide_q
+    .end
+    mul otc2.xy, tcscale[1].xyxy, r13
+  .end
   end
 .end

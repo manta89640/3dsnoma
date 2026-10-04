@@ -22,9 +22,9 @@ struct GxState {
     // moves on when the lighting setup may have changed (light memory 0x600-0x7FF, the color
     // channel registers 0x1009-0x1011): the draw path keeps its light plans until then
     u32 light_serial;
-    // move on when XF memory (matrices, lights: below 0x1000) or an XF register changed: the
-    // draw path keeps its plan for a draw until then
-    u32 xf_mem_serial, xf_reg_serial;
+    // move on when XF memory (matrices, lights: below 0x1000), the post-transform matrices
+    // (0x500-0x5FF) or an XF register changed: the draw path keeps its plan for a draw until then
+    u32 xf_mem_serial, xf_post_serial, xf_reg_serial;
 };
 // the XF words [addr, addr + count) were written with new values
 static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
@@ -32,6 +32,8 @@ static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
         s.light_serial++;
     if (addr < 0x1000)
         s.xf_mem_serial++;
+    if (addr < 0x600 && addr + count > 0x500)
+        s.xf_post_serial++;
     if (addr + count > 0x1000)
         s.xf_reg_serial++;
 }
@@ -84,6 +86,15 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list);
 // while a renderer's draw() runs: whether the draw came from a display list, and its primitive
 bool gx_in_display_list();
 u32 gx_current_prim();
+// ... and the list (guest address, size) and the draw command's offset in it
+u32 gx_display_list_addr();
+u32 gx_display_list_size();
+u32 gx_display_list_offset();
+// what the decoder has executed so far (totals; a renderer's statistics take differences)
+struct GxDecodeCounts {
+    u32 draws, vertices, bp, cp, xf, dl;
+};
+GxDecodeCounts gx_decode_counts();
 
 // pe events
 void pe_finish();               // BP 0x45 (draw done)

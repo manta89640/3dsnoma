@@ -1,13 +1,15 @@
 // The GX renderer on the 3DS GPU (PICA200, through citro3d).
 //
-// The emulated transform unit (runtime/hw/gx/xform.cpp, gx_transform_draw) turns each GX vertex
-// into clip space, lit color 0 and the texture coordinates the combiners sample, written once
-// into the vertex buffer; triangles go to the PICA as 16-bit indices (quads, strips and fans
-// expanded, back faces culled on the CPU), and draws in a row with unchanged GX state as one.
+// The GX transform unit runs as the PICA's vertex shader (shaders/gx.v.pica): the CPU only decodes
+// the vertex stream into model-space vertices (runtime/hw/gx/tnl.cpp), written once into the
+// vertex buffer with the palette slots of their matrices, and sets the shader's uniforms (the
+// projection, lights, material, texgens; matrix rows in the palette as the draws need them).
+// Triangles go to the PICA as 16-bit indices (quads, strips and fans expanded), culled by the GPU,
+// and draws in a row with unchanged GX state and uniforms as one.
 // When a GX register changes, the pixel pipeline state becomes PICA state:
 //   * the GX viewport (in the 640x456 frame) folded into one matrix with the scale to the
-//     400x240 top screen, the rotated render target and the GX depth range (the vertex shader
-//     applies it to the clip-space positions);
+//     400x240 top screen, the rotated render target and the GX depth range, folded in turn into
+//     the shader's projection;
 //   * the TEV stages become texture combiner stages (tev_to_texenv: GX's d +- lerp(a, b, c)
 //     with bias and scale maps to one or two PICA stages; register constants and konst colors
 //     use each stage's constant color, results kept across stages use the combiner buffer);
@@ -34,6 +36,7 @@
 #include "runtime/hw/gx/raster.h"
 #include "runtime/hw/gx/regs.h"
 #include "runtime/hw/gx/texture.h"
+#include "runtime/hw/gx/tnl.h"
 #include "runtime/hw/gx/vertex.h"
 #include "runtime/runtime.h"
 #include "gx_pica.h"
@@ -47,19 +50,48 @@ namespace guest {
 namespace {
 
 const float FRAME_W = 640.0f, FRAME_H = 456.0f;  // the game's frame buffer
-// vertices are written once per draw and drawn through 16-bit indices, so the vertex buffer is
-// used in segments of 65536 vertices (the attribute buffer is moved to each segment's start)
-const u32 VBUF_VERTICES = 72 << 10;  // ~3 MB
+// The vertex pool: one 16-bit index space. [0, IMM_VERTICES) holds the frame's immediate draws
+// (written again every frame), the rest the display lists' vertices, kept from frame to frame
+// (the display-list cache below). The palette slots are a buffer of their own beside it, so that
+// a list's vertices stay untouched when its matrices get other slots.
+const u32 POOL_VERTICES = 65536;     // 4 MB + 256 KB of slots
+const u32 IMM_VERTICES = 28 << 10;
 const u32 IBUF_INDICES = 384 << 10;  // 768 KB
-const u32 SEGMENT = 65536;
 
 #define DISPLAY_TRANSFER_FLAGS                                                                  \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-using PVertex = GxDrawVertex;  // the vertex shader's inputs: v0 position, v1 color, v2-v4 texcoords
-static_assert(sizeof(PVertex) == 44, "PVertex layout");
+using PVertex = GxTnlVertex;  // the vertex shader's inputs (tnl.h)
+static_assert(sizeof(PVertex) == 64, "PVertex layout");
+
+// ---- the display-list cache: a list's draws, with their vertices in the pool, found again by
+// the list and the draw command's offset in it; valid while the list's bytes, the vertex arrays
+// they index (by write generation), the CP registers they were decoded with and what the shader
+// wants of a vertex (the recipe) stay the same
+struct DlRange {
+    u32 attr, addr, size, gen;
+};
+struct DlRecord {
+    u32 offset = 0;            // the draw command's offset in the list
+    u32 first = 0, count = 0;  // pool vertices
+    u32 prim = 0, vat = 0;
+    u32 regs[5] = {};          // VCD lo/hi, the VAT's A/B/C
+    u32 nranges = 0;
+    DlRange ranges[12];
+    u32 arrays[12][2];         // base, stride
+    u8 recipe[12] = {};
+    GxTnlSlots slots = {};     // the slots all its vertices were given (fixed-matrix draws)
+    u32 slots_frame = 0;       // the frame they were written in (0: never)
+};
+struct DlEntry {
+    u32 addr = 0, size = 0;  // the list (0: free)
+    u32 gen = 0;             // its bytes' write generation when the records were made
+    u32 last_frame = 0;
+    std::vector<DlRecord> recs;
+};
+const u32 DL_ENTRIES = 1024;
 
 struct TexEntry {
     C3D_Tex tex;
@@ -75,13 +107,30 @@ struct State {
     C3D_RenderTarget* top = nullptr;
     DVLB_s* dvlb = nullptr;
     shaderProgram_s prog;
-    int u_xform = -1;
-    PVertex* vbuf = nullptr;
+    int u_nlights = -1;         // the shader's integer uniform
+    f32 clip[4][4] = {};        // GX clip space -> PICA clip space (set_xform), folded into the projection
+    // the shader's uniforms as the GPU has them: the pending batch's constants, the palette
+    GxTnlConsts consts;
+    bool consts_valid = false;
+    u32 consts_plan = 0;        // the serial of the plan the constants came from (0: none)
+    u32 setup_serial = 1, clip_serial = 1;  // moved on when setup / clip change (the plan cache's keys)
+    GxTnlPalette pal;
+    u32 cull = ~0u;             // the GX cull mode the GPU is set to
+    PVertex* vbuf = nullptr;   // the pool
+    GxTnlSlots* slots = nullptr;
+    GxTnlRows* rows = nullptr;  // (CPU only: the lists' vertices' matrix rows)
     u16* ibuf = nullptr;
-    u32 vused = 0, iused = 0;  // vertices and indices used this frame
-    u32 seg_base = 0;          // the vertex the attribute buffer starts at
+    u32 vused = 0, iused = 0;  // immediate vertices and indices used this frame
+    u32 cache_next = IMM_VERTICES;  // the pool's first free cache vertex
+    bool cache_full = false;   // (lists go the immediate way until the cache starts over)
     u32 vmax = 0, imax = 0;    // ... at most, since the last report
     u32 draws = 0, batches = 0, setups = 0;  // this frame
+    u32 cached_draws = 0, cached_vertices = 0, built_vertices = 0;  // this frame
+    u32 rebuilt_arrays = 0, rebuilt_regs = 0, drawn_twice = 0, no_room = 0;  // why list draws were built
+    // what the GPU must see of memory the CPU wrote this frame: slot and cache vertex ranges
+    u32 slots_lo = ~0u, slots_hi = 0, cache_lo = ~0u, cache_hi = 0;
+    DlEntry* dl = nullptr;     // the display-list cache
+    u32 dl_addr = 0, dl_offset = ~0u;  // the list call being drawn (its generation checked)
     bool in_frame = false;
     bool resume = false;  // the frame goes on (its first part went to the GPU before an applet)
     u32 frame = 0;
@@ -89,40 +138,218 @@ struct State {
     std::vector<C3D_Tex> dead;                   // freed after the GPU finished the frame
     u32 warned = 0;
     u32 evicted = 0, failed = 0;                 // textures dropped for memory; not made
-    // The PICA state a draw needs comes from GX registers: it is set up again only after one of
-    // them changed (state_serial moves on), and the draws in between go to the GPU as one draw.
+    // The PICA state a draw needs comes from GX registers: a part of it is worked out again only
+    // after one of its registers changed (dirty: DIRTY_* bits), and the draws in between go to
+    // the GPU as one draw, as do draws after a change that leaves the PICA state as it was.
     u32 bp_shadow[256] = {};
-    u32 state_serial = 1;
-    u32 setup_serial = 0;                  // the serial the PICA state was set up for
+    u32 dirty = ~0u;
     u32 batch_first = 0, batch_count = 0;  // indices drawn with it, not submitted yet
     GxDrawSetup setup;                     // its texture coordinates
+    // what the PICA has now (env_valid false: unknown, set again in full)
+    bool env_valid = false;
+    C3D_TexEnv env[6];
+    u32 buf_rgb = 0, buf_a = 0;
+    C3D_Tex* tex[3] = {};
+    C3D_Tex tex_was[3];  // as they were bound (a texture made again or rewrapped is bound again)
 };
+enum : u32 {
+    DIRTY_TEV = 1,     // combiners: GENMODE, TREF, the TEV stages, registers and constants, KSEL
+    DIRTY_TEX = 2,     // textures (modes, images, palettes)
+    DIRTY_PIXEL = 4,   // depth, blending, logic op, write masks, alpha test
+    DIRTY_XFORM = 8,   // viewport and scissor
+};
+// the part of the PICA state each BP register is part of (0: none)
+u8 s_bp_dirty[256];
+void init_bp_dirty() {
+    s_bp_dirty[BP_GENMODE] = DIRTY_TEV;
+    for (u32 r = BP_TREF; r < BP_TREF + 8; r++)
+        s_bp_dirty[r] = DIRTY_TEV;
+    for (u32 r = BP_TEV_COLOR_ENV; r < 0xE8; r++)  // stages 0xC0-0xDF, registers 0xE0-0xE7
+        s_bp_dirty[r] = DIRTY_TEV;
+    for (u32 r = BP_TEV_KSEL; r < BP_TEV_KSEL + 8; r++)
+        s_bp_dirty[r] = DIRTY_TEV;
+    for (u32 r = 0x60; r <= BP_LOADTLUT1; r++)  // TMEM preloads, palette loads
+        s_bp_dirty[r] = DIRTY_TEX;
+    for (u32 r = BP_TX_SETMODE0; r < 0xBC; r++)
+        s_bp_dirty[r] = DIRTY_TEX;
+    s_bp_dirty[BP_ZMODE] = s_bp_dirty[BP_CMODE0] = s_bp_dirty[BP_ZCONTROL] = DIRTY_PIXEL;
+    s_bp_dirty[BP_ALPHACOMPARE] = DIRTY_PIXEL;
+    s_bp_dirty[BP_SCISSOR_TL] = s_bp_dirty[BP_SCISSOR_BR] = DIRTY_XFORM;
+}
 State P;
 
-// the draws with the current state so far, as one
+// ---- NOMA_GX_TIMERS=N (env.txt): the GPU thread's time in each part of the draw path, as
+// milliseconds per frame over N frames, with counts (svcGetSystemTick around every part costs
+// something itself, so only when asked); the profiler's scopes cover the same parts for free
+struct Timers {
+    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, N };
+    u64 ticks[N] = {};
+    u32 calls[N] = {};
+    u64 frame_t0 = 0, wall = 0;
+    u32 frames = 0;
+    u32 consts_vectors = 0, pal_slots = 0, pieces = 0, tev_misses = 0, plan_misses0 = 0;
+    GxDecodeCounts dec0 = {};
+    int every = -2;
+} T;
+inline bool timers_on() {
+    if (T.every == -2)
+        T.every = getenv("NOMA_GX_TIMERS") ? std::max(1, atoi(getenv("NOMA_GX_TIMERS"))) : 0;
+    return T.every > 0;
+}
+struct Timed {
+    int k;
+    u64 t0;
+    explicit Timed(int which) : k(which), t0(timers_on() ? svcGetSystemTick() : 0) {}
+    ~Timed() {
+        if (t0)
+            T.ticks[k] += svcGetSystemTick() - t0, T.calls[k]++;
+    }
+};
+static const char* const k_timer_names[Timers::N] = {"plan", "consts", "vertices", "slots", "submit", "flush", "tev",
+                                                     "textures", "bind", "pixel", "xform", "frame", "end", "clear", "readback"};
+
+// at a frame's end: the frame's wall time; every N frames the averages
+void timers_frame_end() {
+    if (!timers_on())
+        return;
+    u64 now = svcGetSystemTick();
+    if (T.frame_t0)
+        T.wall += now - T.frame_t0, T.frames++;
+    T.frame_t0 = now;
+    if (T.frames < (u32)T.every)
+        return;
+    const double ms = 1000.0 / SYSCLOCK_ARM11 / T.frames;
+    char line[640];
+    int n = snprintf(line, sizeof(line), "gx timers: %u frames, %.1f ms each:", T.frames, (double)T.wall * ms);
+    u64 sum = 0;
+    for (int k = 0; k < Timers::N; k++) {
+        sum += T.ticks[k];
+        if (T.calls[k])
+            n += snprintf(line + n, sizeof(line) - n, " %s %.2f (%u)", k_timer_names[k], (double)T.ticks[k] * ms,
+                          T.calls[k] / T.frames);
+    }
+    GxDecodeCounts d = gx_decode_counts();
+    snprintf(line + n, sizeof(line) - n, "; rest %.2f | per frame: %u draws %u vertices %u bp %u xf %u cp %u lists, %u const vectors, %u palette slots, %u pieces, %u tev misses, %u plan misses",
+             (double)(T.wall > sum ? T.wall - sum : 0) * ms, (d.draws - T.dec0.draws) / T.frames,
+             (d.vertices - T.dec0.vertices) / T.frames, (d.bp - T.dec0.bp) / T.frames, (d.xf - T.dec0.xf) / T.frames,
+             (d.cp - T.dec0.cp) / T.frames, (d.dl - T.dec0.dl) / T.frames, T.consts_vectors / T.frames,
+             T.pal_slots / T.frames, T.pieces / T.frames, T.tev_misses / T.frames,
+             (gx_tnl_plan_misses() - T.plan_misses0) / T.frames);
+    log("%s", line);
+    memset(T.ticks, 0, sizeof(T.ticks));
+    memset(T.calls, 0, sizeof(T.calls));
+    T.wall = 0, T.frames = 0;
+    T.consts_vectors = T.pal_slots = T.pieces = T.tev_misses = 0;
+    T.dec0 = d;
+    T.plan_misses0 = gx_tnl_plan_misses();
+}
+
+// a float uniform vector (citro3d keeps the components w first, as the GPU takes them)
+inline void set_fvec(int reg, const f32* v) {
+    C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, reg, 1);
+    u->x = v[0], u->y = v[1], u->z = v[2], u->w = v[3];
+}
+
+// the shader's constants for the next draws: what changed goes to the GPU
+void set_consts(const GxTnlConsts& c) {
+    Timed timed(Timers::CONSTS);
+    const f32* a = (const f32*)&c;
+    const f32* b = (const f32*)&P.consts;
+    for (u32 i = 0; i < TNL_CONST_VECTORS; i++)
+        if (!P.consts_valid || memcmp(a + 4 * i, b + 4 * i, 16) != 0) {
+            set_fvec((int)i, a + 4 * i);
+            T.consts_vectors++;
+        }
+    if (!P.consts_valid || c.nlights != P.consts.nlights)
+        C3D_IVUnifSet(GPU_VERTEX_SHADER, P.u_nlights, c.nlights ? (int)c.nlights - 1 : 0, 0, 4, 0);
+    if (!P.consts_valid || c.bools != P.consts.bools) {
+        C3D_BoolUnifs[GPU_VERTEX_SHADER] = (u16)c.bools;
+        C3D_BoolUnifsDirty[GPU_VERTEX_SHADER] = true;
+    }
+    P.consts = c;
+    P.consts_valid = true;
+}
+
+// the palette rows written since the last upload
+void upload_palette() {
+    for (u64 d = P.pal.dirty; d; d &= d - 1) {
+        u32 slot = (u32)__builtin_ctzll(d);
+        set_fvec((int)(TNL_PAL_BASE + slot), P.pal.rows[slot]);
+        T.pal_slots++;
+    }
+    P.pal.dirty = 0;
+}
+
+// NOMA_DUMP_BATCHES=N (env.txt): frame N's draw calls go to sdmc:/3ds/noma/batches.bin as the GPU
+// gets them (uniforms, vertices, indices), for tools/pica_replay on the host
+FILE* s_dump;
+int s_dump_frame = -2;
+void dump_batch(u32 nverts, const PVertex* verts, const GxTnlSlots* slots, u32 nidx, const u16* idx, u32 base) {
+    if (s_dump_frame == -2)
+        s_dump_frame = getenv("NOMA_DUMP_BATCHES") ? atoi(getenv("NOMA_DUMP_BATCHES")) : -1;
+    if ((int)P.frame != s_dump_frame)
+        return;
+    if (!s_dump && !(s_dump = fopen("sdmc:/3ds/noma/batches.bin", "wb")))
+        return;
+    u32 hdr[8] = {0x42415443, nverts, nidx, P.consts.bools, P.consts.nlights, P.cull, base, 0};
+    fwrite(hdr, 4, 8, s_dump);
+    for (int i = 0; i < 96; i++) {
+        const C3D_FVec& u = C3D_FVUnif[GPU_VERTEX_SHADER][i];
+        f32 v[4] = {u.x, u.y, u.z, u.w};
+        fwrite(v, 4, 4, s_dump);
+    }
+    for (u32 i = 0; i < nverts; i++) {  // (the vertex with its slots, as tools/pica_replay reads them)
+        fwrite(&verts[i], sizeof(PVertex), 1, s_dump);
+        fwrite(&slots[i], sizeof(GxTnlSlots), 1, s_dump);
+    }
+    fwrite(idx, 2, nidx, s_dump);
+}
+
+// the draws with the current state so far, as one; the palette's slots are free again after
 void flush_batch() {
     if (P.batch_count) {
+        NOMA_PROF_SCOPE("(gx flush)");
+        Timed timed(Timers::FLUSH);
+        upload_palette();
+        if ((int)P.frame == s_dump_frame || s_dump_frame == -2) {
+            // the vertices the indices reach (one segment: indices are relative to its start)
+            u32 lo = ~0u, hi = 0;
+            for (u32 i = 0; i < P.batch_count; i++)
+                lo = std::min<u32>(lo, P.ibuf[P.batch_first + i]), hi = std::max<u32>(hi, P.ibuf[P.batch_first + i]);
+            if (lo <= hi)
+                dump_batch(hi - lo + 1, P.vbuf + lo, P.slots + lo, P.batch_count, P.ibuf + P.batch_first, lo);
+        }
         C3D_DrawElements(GPU_TRIANGLES, P.batch_count, C3D_UNSIGNED_SHORT, P.ibuf + P.batch_first);
         P.batch_count = 0;
         P.batches++;
     }
+    P.pal.flushed();
 }
 
-// the attribute buffer starts at vertex `base`
-void bind_vertices(u32 base) {
-    P.seg_base = base;
+// the attribute buffers: the pool (position, normal, color, texgen sources) and the slots
+void bind_vertices() {
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
-    BufInfo_Add(bi, P.vbuf + base, sizeof(PVertex), 5, 0x43210);
+    BufInfo_Add(bi, P.vbuf, sizeof(PVertex), 6, 0x654210);
+    BufInfo_Add(bi, P.slots, sizeof(GxTnlSlots), 1, 0x3);
 }
 
-// the frame's vertices and indices, written by the CPU, go to memory for the GPU (citro3d's
-// C3D_FrameEnd(0) would flush the whole linear heap: the guest's memory is in it)
+inline void slots_written(u32 first, u32 n) {
+    P.slots_lo = std::min(P.slots_lo, first), P.slots_hi = std::max(P.slots_hi, first + n);
+}
+
+// what the CPU wrote this frame goes to memory for the GPU (citro3d's C3D_FrameEnd(0) would
+// flush the whole linear heap: the guest's memory is in it)
 void flush_geometry() {
     if (P.vused)
         GSPGPU_FlushDataCache(P.vbuf, P.vused * sizeof(PVertex));
+    if (P.cache_lo < P.cache_hi)
+        GSPGPU_FlushDataCache(P.vbuf + P.cache_lo, (P.cache_hi - P.cache_lo) * sizeof(PVertex));
+    if (P.slots_lo < P.slots_hi)
+        GSPGPU_FlushDataCache(P.slots + P.slots_lo, (P.slots_hi - P.slots_lo) * sizeof(GxTnlSlots));
     if (P.iused)
         GSPGPU_FlushDataCache(P.ibuf, P.iused * sizeof(u16));
+    P.cache_lo = P.slots_lo = ~0u, P.cache_hi = P.slots_hi = 0;
 }
 
 void end_frame() {
@@ -338,6 +565,7 @@ u32 pack(const s32* c) {
 const s32 k_konst[8] = {255, 223, 191, 159, 128, 96, 64, 32};
 
 struct Builder {
+    C3D_TexEnv env[6];  // the combiner stages it sets up
     int stage = 0;  // next PICA stage
     bool overflow = false;
     // where the GX registers live: kind CONST (never written) or the stage that wrote them
@@ -691,8 +919,8 @@ void apply_half(C3D_TexEnv* env, const Half& h, bool alpha) {
 
 u32 s_unsupported;
 
-// Set up the PICA texture combiners for the current TEV configuration; fills units[] with
-// the (map, coord) pair each texture unit samples.
+// The PICA texture combiners for the current TEV configuration (in b.env, with the combiner
+// buffer masks); fills units[] with the (map, coord) pair each texture unit samples.
 void tev_to_texenv(Builder& b) {
     const u32* bp = g_gx.bp;
     u32 num = bits(bp[BP_GENMODE], 10, 4) + 1;
@@ -736,7 +964,7 @@ void tev_to_texenv(Builder& b) {
             break;
         }
         for (int k = 0; k < n; k++) {
-            C3D_TexEnv* env = C3D_GetTexEnv(b.stage + k);
+            C3D_TexEnv* env = &b.env[b.stage + k];
             C3D_TexEnvInit(env);
             u32 konst = 0;
             bool have = false;
@@ -791,13 +1019,54 @@ void tev_to_texenv(Builder& b) {
     }
     // unused stages pass the result on
     for (int s = b.stage; s < 6; s++) {
-        C3D_TexEnv* env = C3D_GetTexEnv(s);
+        C3D_TexEnv* env = &b.env[s];
         C3D_TexEnvInit(env);
         C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
         C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
     }
-    C3D_TexEnvBufUpdate(C3D_RGB, b.buf_rgb_mask);
-    C3D_TexEnvBufUpdate(C3D_Alpha, b.buf_a_mask);
+}
+
+// ---------------------------------------------------------------- combiner setups, kept
+// The layouts switch between a few materials all the time: each TEV configuration is
+// translated once and kept, found again by the registers the translation reads.
+struct TevSetup {
+    u32 key[1 + 32 + 16 + 32];  // stages; their color and alpha stages; TREF and KSEL; registers
+    u32 nkey = 0;
+    C3D_TexEnv env[6];
+    u32 buf_rgb = 0, buf_a = 0;
+    Builder::Unit units[3];
+};
+TevSetup s_tev_setups[256];  // by a hash of the key
+
+const TevSetup& tev_setup() {
+    Timed timed(Timers::TEV);
+    const u32* bp = g_gx.bp;
+    u32 key[sizeof(TevSetup::key) / 4];
+    u32 n = 0, num = bits(bp[BP_GENMODE], 10, 4) + 1;
+    key[n++] = num;
+    for (u32 i = 0; i < 2 * num; i++)
+        key[n++] = bp[BP_TEV_COLOR_ENV + i];
+    for (u32 i = 0; i < (num + 1) / 2; i++)
+        key[n++] = bp[BP_TREF + i], key[n++] = bp[BP_TEV_KSEL + i];
+    memcpy(key + n, g_gx.tev_reg, sizeof(g_gx.tev_reg));
+    n += 16;
+    memcpy(key + n, g_gx.tev_konst, sizeof(g_gx.tev_konst));
+    n += 16;
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < n; i++)
+        h = (h ^ key[i]) * 16777619u;
+    TevSetup& e = s_tev_setups[(h ^ h >> 16) & 255];
+    if (e.nkey == n && memcmp(e.key, key, n * 4) == 0)
+        return e;
+    T.tev_misses++;
+    Builder b;
+    tev_to_texenv(b);
+    memcpy(e.key, key, n * 4);
+    e.nkey = n;
+    memcpy(e.env, b.env, sizeof(e.env));
+    e.buf_rgb = b.buf_rgb_mask, e.buf_a = b.buf_a_mask;
+    memcpy(e.units, b.units, sizeof(e.units));
+    return e;
 }
 
 // ---------------------------------------------------------------- pixel state
@@ -821,6 +1090,7 @@ GPU_BLENDFACTOR blend_factor(u32 f, bool src) {
 }
 
 void pixel_state() {
+    Timed timed(Timers::PIXEL);
     const u32* bp = g_gx.bp;
     u32 zmode = bp[BP_ZMODE], cm = bp[BP_CMODE0];
     u32 pixfmt = bits(bp[BP_ZCONTROL], 0, 3);
@@ -874,24 +1144,29 @@ void pixel_state() {
 
 // ---------------------------------------------------------------- geometry
 // GX clip space -> PICA clip space: viewport into the 640x456 frame, scaled to 400x240, rotated
-// for the 240x400 render target (citro3d's Mtx_OrthoTilt convention), GX depth range
+// for the 240x400 render target (citro3d's Mtx_OrthoTilt convention), GX depth range. The shader
+// gets it folded into the projection (gx_tnl_plan).
 void set_xform() {
+    Timed timed(Timers::XFORM);
     float vsx = xf_f32(XF_VIEWPORT + 0), vsy = xf_f32(XF_VIEWPORT + 1), vsz = xf_f32(XF_VIEWPORT + 2);
     float vox = xf_f32(XF_VIEWPORT + 3), voy = xf_f32(XF_VIEWPORT + 4), voz = xf_f32(XF_VIEWPORT + 5);
     float kx = 400.0f / FRAME_W, ky = 240.0f / FRAME_H;
-    C3D_Mtx m;
-    Mtx_Zeros(&m);
+    f32 m[4][4];
+    memset(m, 0, sizeof(m));
     // x' = 1 - Y/120, Y = (y/w * vsy + voy - 342) * ky
-    m.r[0].y = -vsy * ky / 120.0f;
-    m.r[0].w = 1.0f - (voy - 342.0f) * ky / 120.0f;
+    m[0][1] = -vsy * ky / 120.0f;
+    m[0][3] = 1.0f - (voy - 342.0f) * ky / 120.0f;
     // y' = 1 - X/200, X = (x/w * vsx + vox - 342) * kx
-    m.r[1].x = -vsx * kx / 200.0f;
-    m.r[1].w = 1.0f - (vox - 342.0f) * kx / 200.0f;
+    m[1][0] = -vsx * kx / 200.0f;
+    m[1][3] = 1.0f - (vox - 342.0f) * kx / 200.0f;
     // the PICA keeps depth -z'/w: the GX window depth, 0-1
-    m.r[2].z = -vsz / 16777215.0f;
-    m.r[2].w = -voz / 16777215.0f;
-    m.r[3].w = 1.0f;
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, P.u_xform, &m);
+    m[2][2] = -vsz / 16777215.0f;
+    m[2][3] = -voz / 16777215.0f;
+    m[3][3] = 1.0f;
+    if (memcmp(m, P.clip, sizeof(m)) != 0) {
+        memcpy(P.clip, m, sizeof(m));
+        P.clip_serial++;
+    }
 
     // scissor, in the rotated frame buffer
     const u32* bp = g_gx.bp;
@@ -904,22 +1179,18 @@ void set_xform() {
                    (u32)std::ceil(400 - X0));
 }
 
-// Back-face culling as GX does it, on the clip-space positions (homogeneous: no division).
-// cull: GENMODE's mode; the viewport's signs flip which side is the back.
-struct Culler {
-    bool cull_back, cull_front, flip;
-    explicit Culler(u32 cull) {
-        cull_back = cull == 2 || cull == 3, cull_front = cull == 1 || cull == 3;
-        flip = (xf_f32(XF_VIEWPORT + 1) > 0) != (xf_f32(XF_VIEWPORT + 0) < 0);
+// The piece of a draw's vertices that can be drawn when only `n` of those left were built (the
+// palette was full): whole primitives; a strip's piece has an even count, so that the next piece,
+// starting two vertices back, keeps the winding (fans aren't split).
+u32 piece(u32 prim, u32 n) {
+    switch (prim) {
+    case 0x80:
+    case 0x88: return n & ~3u;
+    case 0x90: return n - n % 3;
+    case 0x98: return n < 4 ? 0 : n & ~1u;
+    default: return 0;
     }
-    bool culled(const PVertex& v0, const PVertex& v1, const PVertex& v2) const {
-        const f32 *p0 = v0.pos, *p1 = v1.pos, *p2 = v2.pos;
-        f32 nz = (p0[0] * p2[3] - p2[0] * p0[3]) * p1[1] + (p2[0] * p0[1] - p0[0] * p2[1]) * p1[3] +
-                 (p2[1] * p0[3] - p0[1] * p2[3]) * p1[0];
-        bool back = (nz <= 0) != flip;
-        return back ? cull_back : cull_front;
-    }
-};
+}
 
 void begin_frame() {
     if (P.in_frame)
@@ -931,6 +1202,8 @@ void begin_frame() {
         NOMA_PROF_SCOPE("(gx wait)");
         C3D_FrameBegin(0);
     }
+    NOMA_PROF_SCOPE("(gx frame)");
+    Timed timed(Timers::FRAME);
     collect_textures();
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB];
@@ -943,10 +1216,65 @@ void begin_frame() {
     P.imax = std::max(P.imax, P.iused);
     P.vused = P.iused = 0;
     P.draws = P.batches = P.setups = 0;
+    P.cached_draws = P.cached_vertices = P.built_vertices = 0;
+    P.rebuilt_arrays = P.rebuilt_regs = P.drawn_twice = P.no_room = 0;
     P.batch_count = 0;
-    P.setup_serial = 0;
-    bind_vertices(0);
+    P.dirty = ~0u;
+    P.env_valid = false;
+    // the GPU has finished the frame before: a full cache starts over now
+    if (P.cache_full) {
+        for (u32 i = 0; i < DL_ENTRIES; i++)
+            P.dl[i] = DlEntry();
+        P.cache_next = IMM_VERTICES;
+        P.cache_full = false;
+    }
+    P.dl_offset = ~0u;
     P.in_frame = true;
+}
+
+// ---------------------------------------------------------------- the display-list cache
+// the entry for a list, made (or taken from the oldest of its neighbours) if there is none
+DlEntry* dl_entry(u32 addr, u32 size) {
+    u32 h = ((addr * 2654435761u) ^ (size * 40503u)) >> 10;
+    DlEntry* victim = nullptr;
+    for (u32 k = 0; k < 8; k++) {
+        DlEntry& e = P.dl[(h + k) & (DL_ENTRIES - 1)];
+        if (e.addr == addr && e.size == size)
+            return &e;
+        if (!victim || !e.addr || (victim->addr && e.last_frame < victim->last_frame))
+            victim = &e;
+    }
+    *victim = DlEntry();
+    victim->addr = addr, victim->size = size;
+    return victim;
+}
+
+void dl_recipe(const GxTnlPlan& plan, u8 out[12]) {
+    memset(out, 0, 12);
+    out[0] = plan.need_nrm;
+    for (int k = 0; k < 3; k++)
+        out[1 + 3 * k] = plan.tc[k].src, out[2 + 3 * k] = plan.tc[k].tex, out[3 + 3 * k] = plan.tc[k].z;
+}
+
+// the record still describes the draw: registers, recipe, and the arrays unchanged (0), or
+// what changed: 1 registers or recipe, 2 the arrays
+int dl_record_stale(const DlRecord& r, u32 vat, const GxTnlPlan& plan) {
+    const u32* cp = g_gx.cp;
+    if (r.vat != vat || r.regs[0] != cp[CP_VCD_LO] || r.regs[1] != cp[CP_VCD_HI] || r.regs[2] != cp[CP_VAT_A + vat] ||
+        r.regs[3] != cp[CP_VAT_B + vat] || r.regs[4] != cp[CP_VAT_C + vat])
+        return 1;
+    u8 recipe[12];
+    dl_recipe(plan, recipe);
+    if (memcmp(recipe, r.recipe, sizeof(recipe)) != 0)
+        return 1;
+    for (u32 i = 0; i < r.nranges; i++) {
+        const DlRange& g = r.ranges[i];
+        if (cp[CP_ARRAY_BASE + g.attr] != r.arrays[i][0] || cp[CP_ARRAY_STRIDE + g.attr] != r.arrays[i][1])
+            return 1;
+        if (mem_generation(g.addr, g.size) != g.gen)
+            return 2;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -962,20 +1290,34 @@ bool PicaRenderer::init() {
     shaderProgramInit(&P.prog);
     shaderProgramSetVsh(&P.prog, &P.dvlb->DVLE[0]);
     C3D_BindProgram(&P.prog);
-    P.u_xform = shaderInstanceGetUniformLocation(P.prog.vertexShader, "xform");
+    // the uniforms where tnl.h lays them out
+    int u_proj = shaderInstanceGetUniformLocation(P.prog.vertexShader, "proj");
+    int u_pal = shaderInstanceGetUniformLocation(P.prog.vertexShader, "pal");
+    P.u_nlights = shaderInstanceGetUniformLocation(P.prog.vertexShader, "nlights");
+    if (u_proj != 0 || u_pal != (int)TNL_PAL_BASE || P.u_nlights < 0) {
+        log("pica: the shader's uniforms are not where tnl.h expects them (proj %d, pal %d, nlights %d)", u_proj,
+            u_pal, P.u_nlights);
+        return false;
+    }
     C3D_AttrInfo* attr = C3D_GetAttrInfo();
     AttrInfo_Init(attr);
-    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);          // position (clip space)
-    AttrInfo_AddLoader(attr, 1, GPU_UNSIGNED_BYTE, 4);  // color
-    AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);          // texture coordinates 0-2
-    AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 4, GPU_FLOAT, 2);
-    P.vbuf = (PVertex*)linearAlloc(VBUF_VERTICES * sizeof(PVertex));
+    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 3);          // position (model space)
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 3);          // normal
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4);  // color 0
+    AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4);  // palette slots
+    AttrInfo_AddLoader(attr, 4, GPU_FLOAT, 3);          // texgen sources 0-2
+    AttrInfo_AddLoader(attr, 5, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(attr, 6, GPU_FLOAT, 3);
+    P.vbuf = (PVertex*)linearAlloc(POOL_VERTICES * sizeof(PVertex));
+    P.slots = (GxTnlSlots*)linearAlloc(POOL_VERTICES * sizeof(GxTnlSlots));
+    P.rows = (GxTnlRows*)malloc(POOL_VERTICES * sizeof(GxTnlRows));
     P.ibuf = (u16*)linearAlloc(IBUF_INDICES * sizeof(u16));
-    if (!P.vbuf || !P.ibuf)
+    P.dl = new DlEntry[DL_ENTRIES];
+    if (!P.vbuf || !P.slots || !P.rows || !P.ibuf)
         return false;
-    bind_vertices(0);
+    bind_vertices();
     C3D_CullFace(GPU_CULL_NONE);
+    init_bp_dirty();
     P.ready = true;
     log("pica: renderer ready");
     return true;
@@ -994,100 +1336,330 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     case 0xA0: max_indices = count >= 3 ? (count - 2) * 3 : 0; break;
     default: return;
     }
-    if (!max_indices || count > SEGMENT || bits(g_gx.bp[BP_GENMODE], 14, 2) == 3)  // (3: all culled)
+    const u32 cull = bits(g_gx.bp[BP_GENMODE], 14, 2);
+    if (!max_indices || count >= IMM_VERTICES || cull == 3)  // (3: all culled)
         return;
     begin_frame();
-    if (P.vused + count > VBUF_VERTICES || P.iused + max_indices > IBUF_INDICES) {
+    // (a strip drawn in pieces builds two vertices more per piece: some room beyond count)
+    const u32 room = count + 2 * (count / 4 + 1);
+    if (P.vused + room > IMM_VERTICES || P.iused + max_indices > IBUF_INDICES) {
         if (P.warned++ < 4)
             log("pica: vertex buffer full");
         return;
     }
     P.draws++;
-    if (P.vused + count - P.seg_base > SEGMENT) {
-        flush_batch();
-        bind_vertices(P.vused);
-    }
 
-    // state: set up again only when a register it comes from changed since the last draw
-    if (P.setup_serial != P.state_serial) {
-        flush_batch();
+    // state: the parts whose registers changed since the last draw
+    if (P.dirty) {
         NOMA_PROF_SCOPE("(gx state)");
-        P.setups++;
-        Builder b;
-        tev_to_texenv(b);
-        P.setup = GxDrawSetup();
-        for (int u = 0; u < 3; u++) {
-            if (b.units[u].map < 0)
-                continue;
-            C3D_Tex* t = texture_for(b.units[u].map, &P.setup.sx[u], &P.setup.sy[u]);
-            C3D_TexBind(u, t);
-            P.setup.texgen[u] = (s8)b.units[u].coord;
+        u32 d = P.dirty;
+        P.dirty = 0;
+        if (d & (DIRTY_TEV | DIRTY_TEX)) {
+            // combiners and textures: the batch goes on if they come out the same
+            const TevSetup& e = tev_setup();
+            GxDrawSetup su;
+            C3D_Tex* tex[3] = {};
+            {
+                NOMA_PROF_SCOPE("(gx textures)");
+                Timed timed(Timers::TEXTURES);
+                for (int u = 0; u < 3; u++) {
+                    if (e.units[u].map < 0)
+                        continue;
+                    tex[u] = texture_for(e.units[u].map, &su.sx[u], &su.sy[u]);
+                    su.texgen[u] = (s8)e.units[u].coord;
+                }
+            }
+            bool same = P.env_valid && memcmp(P.env, e.env, sizeof(P.env)) == 0 && P.buf_rgb == e.buf_rgb &&
+                        P.buf_a == e.buf_a;
+            for (int u = 0; u < 3 && same; u++)  // (units the combiners don't read don't matter)
+                same = e.units[u].map < 0 ||
+                       (tex[u] == P.tex[u] && (!tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) == 0) &&
+                        su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u]);
+            if (!same) {
+                flush_batch();
+                NOMA_PROF_SCOPE("(gx bind)");
+                Timed timed(Timers::BIND);
+                P.setups++;
+                for (int i = 0; i < 6; i++)
+                    if (!P.env_valid || memcmp(&P.env[i], &e.env[i], sizeof(C3D_TexEnv)) != 0) {
+                        P.env[i] = e.env[i];
+                        C3D_SetTexEnv(i, &P.env[i]);
+                    }
+                if (!P.env_valid || P.buf_rgb != e.buf_rgb)
+                    C3D_TexEnvBufUpdate(C3D_RGB, e.buf_rgb);
+                if (!P.env_valid || P.buf_a != e.buf_a)
+                    C3D_TexEnvBufUpdate(C3D_Alpha, e.buf_a);
+                P.buf_rgb = e.buf_rgb, P.buf_a = e.buf_a;
+                for (int u = 0; u < 3; u++) {
+                    if (e.units[u].map >= 0 &&
+                        (!P.env_valid || tex[u] != P.tex[u] ||
+                         (tex[u] && memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) != 0)))
+                        C3D_TexBind(u, tex[u]);
+                    P.tex[u] = tex[u];
+                    if (tex[u])
+                        P.tex_was[u] = *tex[u];
+                }
+                P.env_valid = true;
+                bool same_setup = true;
+                for (int u = 0; u < 3; u++)
+                    same_setup &= su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u];
+                if (!same_setup) {
+                    P.setup = su;
+                    P.setup_serial++;
+                }
+            }
         }
-        pixel_state();
-        set_xform();
-        P.setup_serial = P.state_serial;
+        if (d & DIRTY_PIXEL) {
+            flush_batch();
+            pixel_state();
+        }
+        if (d & DIRTY_XFORM) {
+            flush_batch();
+            set_xform();
+        }
     }
 
-    PVertex* v = P.vbuf + P.vused;
+    // the draw as the shader takes it: its constants (a change ends the batch), the GPU's culling
+    // (GX front faces are counter-clockwise on the screen, like the PICA's)
+    const GxTnlPlan* planp;
     {
-        NOMA_PROF_SCOPE("(gx vertices)");
-        gx_transform_draw(vat, count, data, P.setup, v);
+        NOMA_PROF_SCOPE("(gx plan)");
+        Timed timed(Timers::PLAN);
+        planp = &gx_tnl_plan(vat, P.setup, P.setup_serial, P.clip, P.clip_serial);
+    }
+    const GxTnlPlan& plan = *planp;
+    if (cull != P.cull) {
+        flush_batch();
+        static const GPU_CULLMODE k_cull[3] = {GPU_CULL_NONE, GPU_CULL_FRONT_CCW, GPU_CULL_BACK_CCW};
+        C3D_CullFace(k_cull[cull]);
+        P.cull = cull;
+    }
+    // the constants: the same plan as the batch's means the same constants
+    if (!P.consts_valid || plan.serial != P.consts_plan) {
+        NOMA_PROF_SCOPE("(gx consts)");
+        if (!P.consts_valid || memcmp(&plan.consts, &P.consts, sizeof(P.consts)) != 0) {
+            flush_batch();
+            set_consts(plan.consts);
+        }
+        P.consts_plan = plan.serial;
     }
 
-    NOMA_PROF_SCOPE("(gx submit)");
-    u16* idx = P.ibuf + P.iused;
-    u16* const idx0 = idx;
-    const u32 base = P.vused - P.seg_base;
-    u32 cull = bits(g_gx.bp[BP_GENMODE], 14, 2);
-    auto emit = [&](u32 a, u32 b, u32 c) {
-        idx[0] = (u16)(base + a), idx[1] = (u16)(base + b), idx[2] = (u16)(base + c);
-        idx += 3;
-    };
-    auto tri = [&](u32 a, u32 b, u32 c) {
-        emit(a, b, c);
-    };
-    Culler culler(cull);
-    auto tri_culled = [&](u32 a, u32 b, u32 c) {
-        if (!culler.culled(v[a], v[b], v[c]))
-            emit(a, b, c);
-    };
-    auto expand = [&](auto&& t) {
+    // the indices of a piece [done, done + n) of the draw, its vertices at pool index `base`
+    auto submit = [&](u32 base, u32 n) {
+        NOMA_PROF_SCOPE("(gx submit)");
+        Timed timed(Timers::SUBMIT);
+        u16* idx = P.ibuf + P.iused;
+        u16* const idx0 = idx;
+        auto tri = [&](u32 a, u32 b, u32 c) {
+            idx[0] = (u16)(base + a), idx[1] = (u16)(base + b), idx[2] = (u16)(base + c);
+            idx += 3;
+        };
         switch (prim) {
         case 0x80:
         case 0x88:
-            for (u32 i = 0; i + 3 < count; i += 4)
-                t(i, i + 1, i + 2), t(i, i + 2, i + 3);
+            for (u32 i = 0; i + 3 < n; i += 4)
+                tri(i, i + 1, i + 2), tri(i, i + 2, i + 3);
             break;
         case 0x90:
-            for (u32 i = 0; i + 2 < count; i += 3)
-                t(i, i + 1, i + 2);
+            for (u32 i = 0; i + 2 < n; i += 3)
+                tri(i, i + 1, i + 2);
             break;
         case 0x98:
-            for (u32 i = 0; i + 2 < count; i++) {
+            for (u32 i = 0; i + 2 < n; i++) {
                 if (i & 1)
-                    t(i + 1, i, i + 2);
+                    tri(i + 1, i, i + 2);
                 else
-                    t(i, i + 1, i + 2);
+                    tri(i, i + 1, i + 2);
             }
             break;
         case 0xA0:
-            for (u32 i = 1; i + 1 < count; i++)
-                t(0, i, i + 1);
+            for (u32 i = 1; i + 1 < n; i++)
+                tri(0, i, i + 1);
             break;
         }
+        u32 ni = (u32)(idx - idx0);
+        if (ni) {
+            if (!P.batch_count)
+                P.batch_first = P.iused;
+            P.batch_count += ni;
+            P.iused += ni;
+        }
+        return ni;
     };
-    if (cull)
-        expand(tri_culled);
-    else
-        expand(tri);
-    u32 n = (u32)(idx - idx0);
-    if (!n)
-        return;  // (the vertices' space is used again)
-    if (!P.batch_count)
-        P.batch_first = P.iused;
-    P.batch_count += n;
-    P.iused += n;
-    P.vused += count;
+    // the next piece of a draw after one of n vertices from `done`, or count when it is over
+    auto next_piece = [&](u32 done, u32 n) -> u32 {
+        if (done + n >= count)
+            return count;
+        if (prim == 0xA0) {  // (a fan's later vertices would need its first again)
+            if (P.warned++ < 4)
+                log("pica: a fan's %u vertices don't fit the palette at once: %u drawn", count, n);
+            return count;
+        }
+        return done + (prim == 0x98 ? n - 2 : n);
+    };
+
+    // ---- a display list's draw: its vertices from the cache, or into it
+    if (gx_in_display_list() && !P.cache_full) {
+        const u32 addr = gx_display_list_addr(), size = gx_display_list_size(), offset = gx_display_list_offset();
+        DlEntry* e = dl_entry(addr, size);
+        // a new call of a list: its bytes' generation decides whether its records still hold
+        if (addr != P.dl_addr || offset <= P.dl_offset) {
+            u32 gen = mem_generation(addr, size);
+            if (e->gen != gen) {
+                e->recs.clear();
+                e->gen = gen;
+            }
+            P.dl_addr = addr;
+        }
+        P.dl_offset = offset;
+        e->last_frame = P.frame;
+        DlRecord* r = nullptr;
+        for (DlRecord& x : e->recs)
+            if (x.offset == offset) {
+                r = &x;
+                break;
+            }
+        if (r && r->count) {
+            int stale = dl_record_stale(*r, vat, plan);
+            if (stale) {
+                (stale == 2 ? P.rebuilt_arrays : P.rebuilt_regs)++;
+                *r = DlRecord();  // (its pool vertices are given up: the record is made again below)
+                r->offset = offset;
+            }
+        }
+        if (r && r->count == count && r->slots_frame == P.frame)
+            P.drawn_twice++;
+        if (r && r->count == count && r->slots_frame != P.frame) {
+            // the vertices are there: only the slots
+            NOMA_PROF_SCOPE("(gx slots)");
+            Timed timed(Timers::SLOTS);
+            if (gx_tnl_rows_vary(plan)) {
+                for (u32 done = 0; done < count;) {
+                    u32 left = count - done;
+                    u32 n = gx_tnl_slots(plan, P.rows + r->first + done, left, P.pal, P.slots + r->first + done);
+                    if (n < left && !(n = piece(prim, n))) {
+                        T.pieces++;
+                        flush_batch();
+                        n = gx_tnl_slots(plan, P.rows + r->first + done, left, P.pal, P.slots + r->first + done);
+                        if (n < left)
+                            n = piece(prim, n);
+                        if (!n) {
+                            if (P.warned++ < 4)
+                                log("pica: a draw's matrices don't fit the palette (%u vertices, primitive %02X)", count, prim);
+                            return;
+                        }
+                    }
+                    slots_written(r->first + done, n);
+                    submit(r->first + done, n);
+                    done = next_piece(done, n);
+                }
+            } else {
+                GxTnlSlots fs;
+                const GxTnlSlots* hint = r->slots_frame ? &r->slots : nullptr;
+                if (!gx_tnl_fixed_slots(plan, P.pal, hint, &fs)) {
+                    flush_batch();
+                    if (!gx_tnl_fixed_slots(plan, P.pal, hint, &fs))
+                        return;
+                }
+                if (!r->slots_frame || memcmp(&fs, &r->slots, sizeof(fs)) != 0) {
+                    GxTnlSlots* dst = P.slots + r->first;
+                    for (u32 i = 0; i < count; i++)
+                        dst[i] = fs;
+                    r->slots = fs;
+                    slots_written(r->first, count);
+                }
+                submit(r->first, count);
+            }
+            r->slots_frame = P.frame;
+            P.cached_draws++;
+            P.cached_vertices += count;
+            return;
+        }
+        if (!r || r->count != count) {
+            // the vertices into the cache (a draw that doesn't fit the palette at once goes the
+            // immediate way: its vertices would be made in pieces)
+            bool pushed = false;
+            if (!r) {
+                e->recs.push_back(DlRecord());
+                r = &e->recs.back();
+                r->offset = offset;
+                pushed = true;
+            }
+            if (P.cache_next + count > POOL_VERTICES) {
+                P.cache_full = true;
+                P.no_room++;
+                if (pushed)
+                    e->recs.pop_back();
+            } else {
+                NOMA_PROF_SCOPE("(gx vertices)");
+                Timed timed(Timers::VERTICES);
+                u32 first = P.cache_next;
+                u32 n = gx_tnl_vertices(plan, data, 0, count, P.pal, P.vbuf + first, P.slots + first, P.rows + first);
+                if (n < count) {
+                    flush_batch();
+                    n = gx_tnl_vertices(plan, data, 0, count, P.pal, P.vbuf + first, P.slots + first, P.rows + first);
+                }
+                if (n == count) {
+                    P.cache_next += count;
+                    P.built_vertices += count;
+                    P.cache_lo = std::min(P.cache_lo, first), P.cache_hi = std::max(P.cache_hi, first + count);
+                    slots_written(first, count);
+                    r->first = first, r->count = count, r->prim = prim, r->vat = vat;
+                    const u32* cp = g_gx.cp;
+                    r->regs[0] = cp[CP_VCD_LO], r->regs[1] = cp[CP_VCD_HI];
+                    r->regs[2] = cp[CP_VAT_A + vat], r->regs[3] = cp[CP_VAT_B + vat], r->regs[4] = cp[CP_VAT_C + vat];
+                    GxTnlArrayRange ranges[12];
+                    r->nranges = gx_tnl_array_ranges(*plan.fmt, data, count, ranges);
+                    for (u32 i = 0; i < r->nranges; i++) {
+                        r->ranges[i] = {ranges[i].attr, ranges[i].addr, ranges[i].size, mem_generation(ranges[i].addr, ranges[i].size)};
+                        r->arrays[i][0] = cp[CP_ARRAY_BASE + ranges[i].attr], r->arrays[i][1] = cp[CP_ARRAY_STRIDE + ranges[i].attr];
+                    }
+                    dl_recipe(plan, r->recipe);
+                    if (!gx_tnl_rows_vary(plan))
+                        r->slots = P.slots[first];
+                    r->slots_frame = P.frame;
+                    submit(first, count);
+                    P.cached_draws++;
+                    return;
+                }
+                if (pushed)
+                    e->recs.pop_back();
+                else
+                    r->count = 0;
+            }
+        }
+        // (a record drawn twice in a frame with other matrices, or no room: the immediate way)
+    }
+
+    // ---- an immediate draw: the vertices for this frame, in pieces when the palette can't hold
+    // all their matrices at once (the pending batch goes to the GPU between pieces)
+    for (u32 done = 0; done < count;) {
+        PVertex* v = P.vbuf + P.vused;
+        const u32 left = count - done;
+        u32 n;
+        {
+            NOMA_PROF_SCOPE("(gx vertices)");
+            Timed timed(Timers::VERTICES);
+            n = gx_tnl_vertices(plan, data, done, left, P.pal, v, P.slots + P.vused, nullptr);
+            if (n < left && !(n = piece(prim, n))) {
+                T.pieces++;
+                flush_batch();
+                n = gx_tnl_vertices(plan, data, done, left, P.pal, v, P.slots + P.vused, nullptr);
+                if (n < left)
+                    n = piece(prim, n);
+                if (!n) {
+                    if (P.warned++ < 4)
+                        log("pica: a draw's matrices don't fit the palette (%u vertices, primitive %02X)", count, prim);
+                    return;
+                }
+            }
+        }
+        P.built_vertices += n;
+        slots_written(P.vused, n);
+        if (submit(P.vused, n))
+            P.vused += n;
+        done = next_piece(done, n);
+    }
 }
 
 // NOMA_SHOT_EVERY=N (env.txt): every Nth frame, the top screen goes to sdmc:/3ds/noma/shots/
@@ -1143,13 +1715,15 @@ u32* s_readback;  // the render target after read_back(), untiled: 240x400, 0xRR
 // goes on drawing over it (its end is not shown: the output is detached meanwhile)
 bool read_back() {
     NOMA_PROF_SCOPE("(gx readback)");
+    Timed timed(Timers::READBACK);
     if (!s_readback && !(s_readback = (u32*)linearAlloc(240 * 400 * 4)))
         return false;
     bool in_frame = P.in_frame;
     if (in_frame) {
         C3D_RenderTargetDetachOutput(P.top);
         end_frame();
-        P.setup_serial = 0;  // (the new frame starts without state)
+        P.dirty = ~0u;  // (the new frame starts without state)
+        P.env_valid = false;
     }
     // outside a frame this waits for the GPU's queue, then for the transfer
     C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), s_readback,
@@ -1163,9 +1737,9 @@ bool read_back() {
         C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         C3D_FrameBegin(0);
         C3D_FrameDrawOn(P.top);
-        // the frame's buffers are reused from the start (the GPU finished with them)
+        // the frame's immediate vertices and indices are reused from the start (the GPU
+        // finished with them; the lists' vertices stay)
         P.vused = P.iused = 0;
-        bind_vertices(0);
     }
     return true;
 }
@@ -1191,7 +1765,7 @@ void readback_rgba(u32 x, u32 y, s32* out) {
 // the clear that goes with a copy: a rectangle in the clear color and depth (the copy's
 // source; color, alpha and depth as their update flags allow)
 void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
-    if (P.vused + 6 > VBUF_VERTICES)
+    if (P.vused + 6 > IMM_VERTICES)
         return;
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB], cm = bp[BP_CMODE0];
@@ -1205,10 +1779,10 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
         mask |= GPU_WRITE_DEPTH;
     if (!mask)
         return;
+    Timed timed(Timers::CLEAR);
     flush_batch();
-    P.setup_serial = 0;  // (its state replaces the draws')
-    if (P.vused + 6 - P.seg_base > SEGMENT)
-        bind_vertices(P.vused);
+    P.dirty = ~0u;  // (its state replaces the draws')
+    P.env_valid = false;
     C3D_DepthTest(true, GPU_ALWAYS, (GPU_WRITEMASK)mask);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -1220,32 +1794,43 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
     C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
     for (int i = 1; i < 6; i++)
         C3D_TexEnvInit(C3D_GetTexEnv(i));
-    C3D_Mtx id;
-    Mtx_Identity(&id);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, P.u_xform, &id);
-    // corners straight in the PICA's clip space (as set_xform maps them)
+    // the shader with an identity projection and matrix (palette slots 0-2) and the vertex's
+    // color: corners straight in the PICA's clip space (as set_xform maps them)
+    GxTnlConsts c;
+    memset(&c, 0, sizeof(c));
+    for (int i = 0; i < 4; i++)
+        c.proj[i][i] = 1.0f, c.selmat[i] = 1.0f;
+    set_consts(c);
+    P.consts_plan = 0;
+    P.pal = GxTnlPalette();  // (its slots are made again as the draws after need them)
+    for (int i = 0; i < 3; i++)
+        P.pal.rows[i][i] = 1.0f;
+    P.pal.dirty = 7;
+    upload_palette();
     float z = -(float)(bp[BP_CLEAR_Z] & 0xFFFFFF) / 16777215.0f;
     auto clip = [&](u32 ex, u32 ey, PVertex& v) {
         float X = ((s32)ex + efb_off_x) * 400.0f / FRAME_W, Y = ((s32)ey + efb_off_y) * 240.0f / FRAME_H;
-        v.pos[0] = 1.0f - Y / 120.0f, v.pos[1] = 1.0f - X / 200.0f, v.pos[2] = z, v.pos[3] = 1.0f;
+        memset(&v, 0, sizeof(v));
+        v.pos[0] = 1.0f - Y / 120.0f, v.pos[1] = 1.0f - X / 200.0f, v.pos[2] = z;
         v.color[0] = (u8)ar, v.color[1] = (u8)(gb >> 8), v.color[2] = (u8)gb, v.color[3] = (u8)(ar >> 8);
-        memset(v.tc, 0, sizeof(v.tc));
     };
     PVertex* v = P.vbuf + P.vused;
     clip(sx, sy, v[0]), clip(sx + w, sy, v[1]), clip(sx + w, sy + h, v[2]);
     v[3] = v[0], v[4] = v[2], clip(sx, sy + h, v[5]);
-    C3D_DrawArrays(GPU_TRIANGLES, P.vused - P.seg_base, 6);
+    memset(P.slots + P.vused, 0, 6 * sizeof(GxTnlSlots));
+    slots_written(P.vused, 6);
+    C3D_DrawArrays(GPU_TRIANGLES, P.vused, 6);
     P.vused += 6;
 }
 
 }  // namespace
 
 void PicaRenderer::bp_write(u32 reg, u32 value) {
-    // a changed register moves the state serial on, and so do palette loads and texture
+    // a changed register makes its part of the state dirty, and so do palette loads and texture
     // preloads (TMEM changes); EFB copies set the state up again themselves (read_back)
     if (P.bp_shadow[reg] != value || reg == BP_LOADTLUT1 || reg == 0x63) {
         P.bp_shadow[reg] = value;
-        P.state_serial++;
+        P.dirty |= s_bp_dirty[reg];
     }
     if (reg == 0x45 && (value & 0xFF) == 2 && P.resume)
         begin_frame();  // (a frame an applet interrupted, with no draw since: it is shown too)
@@ -1255,25 +1840,37 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
             gx_efb_copy_test(readback_rgba, "sdmc:/3ds/noma/efbcopy_3ds");
         }
         {
-            NOMA_PROF_SCOPE("(gx wait)");
+            NOMA_PROF_SCOPE("(gx end)");
+            Timed timed(Timers::END);
             end_frame();
         }
+        timers_frame_end();
         P.in_frame = false;
+        if (s_dump && (int)P.frame == s_dump_frame) {
+            fclose(s_dump);
+            s_dump = nullptr;
+            log("pica: frame %u's draw calls dumped to batches.bin", P.frame);
+        }
         P.frame++;
         static int s_shot_every = getenv("NOMA_SHOT_EVERY") ? atoi(getenv("NOMA_SHOT_EVERY")) : 0;
         if (s_shot_every > 0 && P.frame % (u32)s_shot_every == 0)
             save_shot(P.top, P.frame);
-        if (s_unsupported && P.frame % 600 == 1)
-            log("pica: %u TEV configurations approximated", s_unsupported);
+        if ((s_unsupported || gx_tnl_approximated()) && P.frame % 600 == 1)
+            log("pica: %u TEV configurations and %u draws' lighting or texgens approximated", s_unsupported,
+                gx_tnl_approximated());
         if (P.frame % 600 == 1) {
             u32 kb = 0;
             for (auto& kv : P.textures)
                 kb += kv.second.tex.size >> 10;
             log("pica: %zu textures (%u KB), %u dropped for memory, %u not made; %u KB linear heap free, "
-                "heap %u KB used of %u KB; at most %u vertices and %u indices a frame; last frame %u draws "
-                "in %u batches, %u state setups", P.textures.size(), kb, P.evicted, P.failed,
+                "heap %u KB used of %u KB; at most %u immediate vertices and %u indices a frame; last frame %u draws "
+                "in %u batches, %u state setups, %u draws (%u vertices) from the list cache, %u vertices built "
+                "(%u list draws made again for their arrays, %u for registers, %u drawn twice, %u without room), "
+                "cache at %u of %u", P.textures.size(), kb, P.evicted, P.failed,
                 (u32)(linearSpaceFree() >> 10), (u32)(mallinfo().uordblks >> 10), __ctru_heap_size >> 10, P.vmax,
-                P.imax, P.draws, P.batches, P.setups);
+                P.imax, P.draws, P.batches, P.setups, P.cached_draws, P.cached_vertices, P.built_vertices,
+                P.rebuilt_arrays, P.rebuilt_regs, P.drawn_twice, P.no_room, P.cache_next - IMM_VERTICES,
+                POOL_VERTICES - IMM_VERTICES);
             P.vmax = P.imax = 0;
         }
     }
@@ -1281,7 +1878,7 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
 
 void PicaRenderer::xf_write(u32 addr, u32 value) {
     if (addr >= XF_VIEWPORT && addr < XF_VIEWPORT + 6)  // set_xform's transform
-        P.state_serial++;
+        P.dirty |= DIRTY_XFORM;
 }
 
 // An applet (the keyboard) takes the GPU: citro3d's own APT hook waits for what was submitted

@@ -113,8 +113,10 @@ set(RUNTIME_SOURCES
   runtime/hw/exi.cpp
   runtime/hw/gx/cp.cpp
   runtime/hw/gx/fifo.cpp
+  runtime/hw/gx/pica_vsh.cpp
   runtime/hw/gx/raster.cpp
   runtime/hw/gx/texture.cpp
+  runtime/hw/gx/tnl.cpp
   runtime/hw/gx/vertex.cpp
   runtime/hw/gx/xform.cpp
   runtime/hw/gx/xfb.cpp
@@ -132,7 +134,7 @@ set(RUNTIME_SOURCES
 
 # the GPU emulation does per-pixel work: optimise it even in debug builds
 set_source_files_properties(runtime/hw/gx/raster.cpp runtime/hw/gx/texture.cpp
-  runtime/hw/gx/vertex.cpp runtime/hw/gx/xform.cpp runtime/hw/gx/cp.cpp
+  runtime/hw/gx/vertex.cpp runtime/hw/gx/xform.cpp runtime/hw/gx/cp.cpp runtime/hw/gx/tnl.cpp
   PROPERTIES COMPILE_OPTIONS -O2)
 
 if(NINTENDO_3DS)

@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "regs.h"
+#include "vertex.h"
 
 namespace guest {
 
@@ -28,6 +29,14 @@ static inline const u8* gx_array_ptr(u32 attr, u32 index) {
     u32 base = g_gx.cp[CP_ARRAY_BASE + attr], stride = g_gx.cp[CP_ARRAY_STRIDE + attr];
     const u8* h = host_ptr(0x80000000 | ((base + index * stride) & 0x1FFFFFFF));
     return h ? h : zero;
+}
+
+// where an attribute's data is for the stream vertex at v: in the vertex (direct), or the
+// array element its 8/16-bit index names
+static inline const u8* gx_attr_data(const GxAttrFormat& a, u32 attr, const u8* v) {
+    if (a.mode == 1)
+        return v + a.offset;
+    return gx_array_ptr(attr, a.mode == 2 ? v[a.offset] : gx_be16(v + a.offset));
 }
 
 // n components of a type (u8 s8 u16 s16 f32; others read as zero bytes) times the scale
