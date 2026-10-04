@@ -144,13 +144,7 @@ static u32 cp_distance() {
 
 // decode the complete commands s_pending holds (on the decoder's thread)
 static void decode_pending() {
-    u32 done = 0;
-    while (done < s_pending.size()) {
-        u32 used = gx_decode(s_pending.data() + done, (u32)(s_pending.size() - done), false);
-        if (!used)
-            break;
-        done += used;
-    }
+    u32 done = gx_decode(s_pending.data(), (u32)s_pending.size(), false);
     s_pending.erase(s_pending.begin(), s_pending.begin() + done);
 }
 

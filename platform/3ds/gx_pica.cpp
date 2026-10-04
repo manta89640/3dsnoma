@@ -109,9 +109,19 @@ struct State {
     shaderProgram_s prog;
     int u_nlights = -1;         // the shader's integer uniform
     f32 clip[4][4] = {};        // GX clip space -> PICA clip space (set_xform), folded into the projection
-    // the shader's uniforms as the GPU has them: the pending batch's constants, the palette
+    // the shader's uniforms as the GPU has them: the pending batch's constants, the palette,
+    // and our own copy of the float uniforms c0-c94 in the GPU's word order with what changed
+    // (the shader's constant c95 is citro3d's to send)
     GxTnlConsts consts;
     bool consts_valid = false;
+    u32 uni[96][4];
+    u64 uni_dirty_lo = 0;       // c0-c63
+    u32 uni_dirty_hi = 0;       // c64-c95
+    bool uni_resend = true;     // everything again (the start, after an applet had the GPU)
+    bool bools_dirty = true, ints_dirty = true;
+    // citro3d's own state (combiners, textures, depth, scissor, culling, the frame buffer)
+    // changed: the next draw call goes through C3D_DrawElements, which binds it
+    bool c3d_touched = true;
     u32 consts_plan = 0;        // the serial of the plan the constants came from (0: none)
     u32 setup_serial = 1, clip_serial = 1;  // moved on when setup / clip change (the plan cache's keys)
     GxTnlPalette pal;
@@ -139,10 +149,11 @@ struct State {
     u32 warned = 0;
     u32 evicted = 0, failed = 0;                 // textures dropped for memory; not made
     // The PICA state a draw needs comes from GX registers: a part of it is worked out again only
-    // after one of its registers changed (dirty: DIRTY_* bits), and the draws in between go to
-    // the GPU as one draw, as do draws after a change that leaves the PICA state as it was.
-    u32 bp_shadow[256] = {};
-    u32 dirty = ~0u;
+    // after one of its registers changed (the decoder's g_gx.bp_dirty, the viewport's serial),
+    // and the draws in between go to the GPU as one draw, as do draws after a change that leaves
+    // the PICA state as it was.
+    u32 viewport_serial = ~0u;  // g_gx.xf_viewport_serial the transform was set up for
+    bool all_dirty = true;      // every part of the state (a new frame, after a clear)
     u32 batch_first = 0, batch_count = 0;  // indices drawn with it, not submitted yet
     GxDrawSetup setup;                     // its texture coordinates
     // what the PICA has now (env_valid false: unknown, set again in full)
@@ -152,30 +163,6 @@ struct State {
     C3D_Tex* tex[3] = {};
     C3D_Tex tex_was[3];  // as they were bound (a texture made again or rewrapped is bound again)
 };
-enum : u32 {
-    DIRTY_TEV = 1,     // combiners: GENMODE, TREF, the TEV stages, registers and constants, KSEL
-    DIRTY_TEX = 2,     // textures (modes, images, palettes)
-    DIRTY_PIXEL = 4,   // depth, blending, logic op, write masks, alpha test
-    DIRTY_XFORM = 8,   // viewport and scissor
-};
-// the part of the PICA state each BP register is part of (0: none)
-u8 s_bp_dirty[256];
-void init_bp_dirty() {
-    s_bp_dirty[BP_GENMODE] = DIRTY_TEV;
-    for (u32 r = BP_TREF; r < BP_TREF + 8; r++)
-        s_bp_dirty[r] = DIRTY_TEV;
-    for (u32 r = BP_TEV_COLOR_ENV; r < 0xE8; r++)  // stages 0xC0-0xDF, registers 0xE0-0xE7
-        s_bp_dirty[r] = DIRTY_TEV;
-    for (u32 r = BP_TEV_KSEL; r < BP_TEV_KSEL + 8; r++)
-        s_bp_dirty[r] = DIRTY_TEV;
-    for (u32 r = 0x60; r <= BP_LOADTLUT1; r++)  // TMEM preloads, palette loads
-        s_bp_dirty[r] = DIRTY_TEX;
-    for (u32 r = BP_TX_SETMODE0; r < 0xBC; r++)
-        s_bp_dirty[r] = DIRTY_TEX;
-    s_bp_dirty[BP_ZMODE] = s_bp_dirty[BP_CMODE0] = s_bp_dirty[BP_ZCONTROL] = DIRTY_PIXEL;
-    s_bp_dirty[BP_ALPHACOMPARE] = DIRTY_PIXEL;
-    s_bp_dirty[BP_SCISSOR_TL] = s_bp_dirty[BP_SCISSOR_BR] = DIRTY_XFORM;
-}
 State P;
 
 // ---- NOMA_GX_TIMERS=N (env.txt): the GPU thread's time in each part of the draw path, as
@@ -244,28 +231,109 @@ void timers_frame_end() {
     T.plan_misses0 = gx_tnl_plan_misses();
 }
 
-// a float uniform vector (citro3d keeps the components w first, as the GPU takes them)
+// a float uniform vector into our copy (the GPU takes the components w first)
 inline void set_fvec(int reg, const f32* v) {
-    C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, reg, 1);
-    u->x = v[0], u->y = v[1], u->z = v[2], u->w = v[3];
+    u32* d = P.uni[reg];
+    memcpy(&d[3], &v[0], 4), memcpy(&d[2], &v[1], 4), memcpy(&d[1], &v[2], 4), memcpy(&d[0], &v[3], 4);
+    if (reg < 64)
+        P.uni_dirty_lo |= 1ull << reg;
+    else
+        P.uni_dirty_hi |= 1u << (reg - 64);
 }
 
-// the shader's constants for the next draws: what changed goes to the GPU
+// ---- Draw calls of our own. citro3d's C3D_DrawElements runs its whole context update every
+// time (each of its flags, both shaders' 96 uniform dirty flags); ours writes the GPU's draw
+// commands directly, after the uniforms it knows have changed. citro3d's state is still bound
+// through its context: a draw after any of it changed goes through C3D_DrawElements once (which
+// also marks the frame as drawn to, for its end-of-frame flush).
+void upload_uniforms() {
+    if (P.uni_resend) {
+        P.uni_dirty_lo = ~0ull;
+        P.uni_dirty_hi = (1u << (TNL_PAL_BASE + TNL_PAL_SLOTS - 64)) - 1;
+        P.bools_dirty = P.ints_dirty = true;
+        P.uni_resend = false;
+    }
+    // runs of changed vectors
+    u32 i = 0;
+    while (i < 95) {
+        bool d = i < 64 ? (P.uni_dirty_lo >> i) & 1 : (P.uni_dirty_hi >> (i - 64)) & 1;
+        if (!d) {
+            i++;
+            continue;
+        }
+        u32 j = i + 1;
+        while (j < 95 && (j < 64 ? (P.uni_dirty_lo >> j) & 1 : (P.uni_dirty_hi >> (j - 64)) & 1))
+            j++;
+        GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
+        GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, &P.uni[i][0], 4 * (j - i));
+        i = j;
+    }
+    P.uni_dirty_lo = 0, P.uni_dirty_hi = 0;
+    if (P.bools_dirty) {
+        GPUCMD_AddWrite(GPUREG_VSH_BOOLUNIFORM, 0x7FFF0000 | (P.consts.bools & 0xFFFF));
+        P.bools_dirty = false;
+    }
+    if (P.ints_dirty) {
+        u32 nl = P.consts.nlights ? P.consts.nlights - 1 : 0;
+        GPUCMD_AddWrite(GPUREG_VSH_INTUNIFORM_I0, nl | 4u << 16);
+        P.ints_dirty = false;
+    }
+}
+
+void draw_elements(u32 count, const u16* indices) {
+    upload_uniforms();
+    if (P.c3d_touched) {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+        P.c3d_touched = false;
+        return;
+    }
+    // (as C3D_DrawElements writes them for GPU_TRIANGLES)
+    u32 pa = osConvertVirtToPhys(indices);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
+    GPUCMD_AddWrite(GPUREG_RESTART_PRIMITIVE, 1);
+    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, (pa - 0x18000000) | (1u << 31));
+    GPUCMD_AddWrite(GPUREG_NUMVERTICES, count);
+    GPUCMD_AddWrite(GPUREG_VERTEX_OFFSET, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
+    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 0);
+    GPUCMD_AddWrite(GPUREG_DRAWELEMENTS, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
+    GPUCMD_AddWrite(GPUREG_VTX_FUNC, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+}
+
+// an applet had the GPU: citro3d binds its own state again, we send our uniforms again
+void apt_hook(APT_HookType type, void*) {
+    if (type == APTHOOK_ONRESTORE)
+        P.uni_resend = true, P.c3d_touched = true;
+}
+aptHookCookie s_apt_cookie;
+
+// the shader's constants for the next draws: the groups that changed go to the GPU (the lights
+// are most of them and change the least)
 void set_consts(const GxTnlConsts& c) {
     Timed timed(Timers::CONSTS);
     const f32* a = (const f32*)&c;
     const f32* b = (const f32*)&P.consts;
-    for (u32 i = 0; i < TNL_CONST_VECTORS; i++)
-        if (!P.consts_valid || memcmp(a + 4 * i, b + 4 * i, 16) != 0) {
-            set_fvec((int)i, a + 4 * i);
-            T.consts_vectors++;
+    static const u32 k_groups[][2] = {{0, 4}, {4, 6}, {10, 2}, {12, 32}, {44, 9}};  // first vector, count
+    for (const u32* g : k_groups) {
+        u32 first = g[0], n = g[1];
+        if (first == 12)  // the lights: the ones in use
+            n = std::min<u32>(std::max(c.nlights, P.consts_valid ? P.consts.nlights : 8u), 8u) * 4;
+        if (!P.consts_valid || memcmp(a + 4 * first, b + 4 * first, n * 16) != 0) {
+            for (u32 i = first; i < first + n; i++)
+                set_fvec((int)i, a + 4 * i);
+            T.consts_vectors += n;
         }
-    if (!P.consts_valid || c.nlights != P.consts.nlights)
-        C3D_IVUnifSet(GPU_VERTEX_SHADER, P.u_nlights, c.nlights ? (int)c.nlights - 1 : 0, 0, 4, 0);
-    if (!P.consts_valid || c.bools != P.consts.bools) {
-        C3D_BoolUnifs[GPU_VERTEX_SHADER] = (u16)c.bools;
-        C3D_BoolUnifsDirty[GPU_VERTEX_SHADER] = true;
     }
+    if (!P.consts_valid || c.nlights != P.consts.nlights)
+        P.ints_dirty = true;
+    if (!P.consts_valid || c.bools != P.consts.bools)
+        P.bools_dirty = true;
     P.consts = c;
     P.consts_valid = true;
 }
@@ -293,9 +361,8 @@ void dump_batch(u32 nverts, const PVertex* verts, const GxTnlSlots* slots, u32 n
         return;
     u32 hdr[8] = {0x42415443, nverts, nidx, P.consts.bools, P.consts.nlights, P.cull, base, 0};
     fwrite(hdr, 4, 8, s_dump);
-    for (int i = 0; i < 96; i++) {
-        const C3D_FVec& u = C3D_FVUnif[GPU_VERTEX_SHADER][i];
-        f32 v[4] = {u.x, u.y, u.z, u.w};
+    for (int i = 0; i < 96; i++) {  // (our copy is in the GPU's order, w first)
+        u32 v[4] = {P.uni[i][3], P.uni[i][2], P.uni[i][1], P.uni[i][0]};
         fwrite(v, 4, 4, s_dump);
     }
     for (u32 i = 0; i < nverts; i++) {  // (the vertex with its slots, as tools/pica_replay reads them)
@@ -319,7 +386,7 @@ void flush_batch() {
             if (lo <= hi)
                 dump_batch(hi - lo + 1, P.vbuf + lo, P.slots + lo, P.batch_count, P.ibuf + P.batch_first, lo);
         }
-        C3D_DrawElements(GPU_TRIANGLES, P.batch_count, C3D_UNSIGNED_SHORT, P.ibuf + P.batch_first);
+        draw_elements(P.batch_count, P.ibuf + P.batch_first);
         P.batch_count = 0;
         P.batches++;
     }
@@ -1212,6 +1279,7 @@ void begin_frame() {
         C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
     P.resume = false;
     C3D_FrameDrawOn(P.top);
+    P.c3d_touched = true;
     P.vmax = std::max(P.vmax, P.vused);
     P.imax = std::max(P.imax, P.iused);
     P.vused = P.iused = 0;
@@ -1219,7 +1287,7 @@ void begin_frame() {
     P.cached_draws = P.cached_vertices = P.built_vertices = 0;
     P.rebuilt_arrays = P.rebuilt_regs = P.drawn_twice = P.no_room = 0;
     P.batch_count = 0;
-    P.dirty = ~0u;
+    P.all_dirty = true;
     P.env_valid = false;
     // the GPU has finished the frame before: a full cache starts over now
     if (P.cache_full) {
@@ -1317,7 +1385,7 @@ bool PicaRenderer::init() {
         return false;
     bind_vertices();
     C3D_CullFace(GPU_CULL_NONE);
-    init_bp_dirty();
+    aptHook(&s_apt_cookie, apt_hook, nullptr);
     P.ready = true;
     log("pica: renderer ready");
     return true;
@@ -1350,11 +1418,14 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     P.draws++;
 
     // state: the parts whose registers changed since the last draw
-    if (P.dirty) {
+    if (g_gx.bp_dirty || P.all_dirty || P.viewport_serial != g_gx.xf_viewport_serial) {
         NOMA_PROF_SCOPE("(gx state)");
-        u32 d = P.dirty;
-        P.dirty = 0;
-        if (d & (DIRTY_TEV | DIRTY_TEX)) {
+        u32 d = P.all_dirty ? ~0u : g_gx.bp_dirty;
+        if (P.viewport_serial != g_gx.xf_viewport_serial)
+            d |= GX_BP_SCISSOR;
+        g_gx.bp_dirty = 0;
+        P.all_dirty = false;
+        if (d & (GX_BP_TEV | GX_BP_TEX)) {
             // combiners and textures: the batch goes on if they come out the same
             const TevSetup& e = tev_setup();
             GxDrawSetup su;
@@ -1380,6 +1451,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 NOMA_PROF_SCOPE("(gx bind)");
                 Timed timed(Timers::BIND);
                 P.setups++;
+                P.c3d_touched = true;
                 for (int i = 0; i < 6; i++)
                     if (!P.env_valid || memcmp(&P.env[i], &e.env[i], sizeof(C3D_TexEnv)) != 0) {
                         P.env[i] = e.env[i];
@@ -1409,13 +1481,16 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 }
             }
         }
-        if (d & DIRTY_PIXEL) {
+        if (d & GX_BP_PIXEL) {
             flush_batch();
             pixel_state();
+            P.c3d_touched = true;
         }
-        if (d & DIRTY_XFORM) {
+        if (d & GX_BP_SCISSOR) {
             flush_batch();
             set_xform();
+            P.viewport_serial = g_gx.xf_viewport_serial;
+            P.c3d_touched = true;
         }
     }
 
@@ -1433,6 +1508,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         static const GPU_CULLMODE k_cull[3] = {GPU_CULL_NONE, GPU_CULL_FRONT_CCW, GPU_CULL_BACK_CCW};
         C3D_CullFace(k_cull[cull]);
         P.cull = cull;
+        P.c3d_touched = true;
     }
     // the constants: the same plan as the batch's means the same constants
     if (!P.consts_valid || plan.serial != P.consts_plan) {
@@ -1722,7 +1798,7 @@ bool read_back() {
     if (in_frame) {
         C3D_RenderTargetDetachOutput(P.top);
         end_frame();
-        P.dirty = ~0u;  // (the new frame starts without state)
+        P.all_dirty = true;  // (the new frame starts without state)
         P.env_valid = false;
     }
     // outside a frame this waits for the GPU's queue, then for the transfer
@@ -1737,6 +1813,7 @@ bool read_back() {
         C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         C3D_FrameBegin(0);
         C3D_FrameDrawOn(P.top);
+        P.c3d_touched = true;
         // the frame's immediate vertices and indices are reused from the start (the GPU
         // finished with them; the lists' vertices stay)
         P.vused = P.iused = 0;
@@ -1781,7 +1858,7 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
         return;
     Timed timed(Timers::CLEAR);
     flush_batch();
-    P.dirty = ~0u;  // (its state replaces the draws')
+    P.all_dirty = true;  // (its state replaces the draws')
     P.env_valid = false;
     C3D_DepthTest(true, GPU_ALWAYS, (GPU_WRITEMASK)mask);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -1819,22 +1896,18 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
     v[3] = v[0], v[4] = v[2], clip(sx, sy + h, v[5]);
     memset(P.slots + P.vused, 0, 6 * sizeof(GxTnlSlots));
     slots_written(P.vused, 6);
+    upload_uniforms();
     C3D_DrawArrays(GPU_TRIANGLES, P.vused, 6);
+    P.c3d_touched = true;  // (the state above is citro3d's, bound by that call; the draws after set their own)
     P.vused += 6;
 }
 
 }  // namespace
 
-void PicaRenderer::bp_write(u32 reg, u32 value) {
-    // a changed register makes its part of the state dirty, and so do palette loads and texture
-    // preloads (TMEM changes); EFB copies set the state up again themselves (read_back)
-    if (P.bp_shadow[reg] != value || reg == BP_LOADTLUT1 || reg == 0x63) {
-        P.bp_shadow[reg] = value;
-        P.dirty |= s_bp_dirty[reg];
-    }
-    if (reg == 0x45 && (value & 0xFF) == 2 && P.resume)
+void PicaRenderer::draw_done() {
+    if (P.resume)
         begin_frame();  // (a frame an applet interrupted, with no draw since: it is shown too)
-    if (reg == 0x45 && (value & 0xFF) == 2 && P.in_frame) {  // draw done: the frame is complete
+    if (P.in_frame) {  // the frame is complete
         if (gx_efb_copy_test_frame() == (int)P.frame && read_back()) {
             efb_off_x = efb_off_y = 0;  // the whole frame
             gx_efb_copy_test(readback_rgba, "sdmc:/3ds/noma/efbcopy_3ds");
@@ -1874,11 +1947,6 @@ void PicaRenderer::bp_write(u32 reg, u32 value) {
             P.vmax = P.imax = 0;
         }
     }
-}
-
-void PicaRenderer::xf_write(u32 addr, u32 value) {
-    if (addr >= XF_VIEWPORT && addr < XF_VIEWPORT + 6)  // set_xform's transform
-        P.dirty |= DIRTY_XFORM;
 }
 
 // An applet (the keyboard) takes the GPU: citro3d's own APT hook waits for what was submitted

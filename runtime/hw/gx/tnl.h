@@ -75,8 +75,12 @@ struct GxTnlPalette {
     };
     Entry entries[TNL_PAL_SLOTS / 3];
     u8 slot_entry[TNL_PAL_SLOTS];  // slot -> entry index, 0xFF: none
+    u8 by_row[3][64];              // (kind - 1, XF row) -> entry index, 0xFF: none
     u32 clock = 0;
-    GxTnlPalette() { memset(slot_entry, 0xFF, sizeof(slot_entry)); }
+    GxTnlPalette() {
+        memset(slot_entry, 0xFF, sizeof(slot_entry));
+        memset(by_row, 0xFF, sizeof(by_row));
+    }
     // the pending batch was submitted: every slot may be reused
     void flushed() { used = 0; }
 };

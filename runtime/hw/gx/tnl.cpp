@@ -58,6 +58,7 @@ u32 pal_groups_of(u8 kind) { return kind == PAL_R3N ? 2 : 1; }
 void pal_fill(GxTnlPalette& pal, u32 g, u8 kind, u8 xf_row) {
     GxTnlPalette::Entry& e = pal.entries[g];
     e.first = (u8)(3 * g), e.n = (u8)(3 * pal_groups_of(kind)), e.kind = kind, e.xf_row = xf_row;
+    pal.by_row[kind - 1][xf_row & 63] = (u8)g;
     e.mem_serial = g_gx.xf_mem_serial;
     e.age = ++pal.clock;
     pal_source(kind, xf_row, (f32(*)[4]) & pal.rows[e.first]);
@@ -116,7 +117,14 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
                 return s;
         }
     }
-    for (u32 g = 0; g < PAL_GROUPS; g++) {
+    // the entry holding these rows, by row (an R3's rows may sit in an R3N entry)
+    u32 g = pal.by_row[kind - 1][xf_row & 63];
+    if (g != 0xFF) {
+        int s = pal_try(pal, g, kind, xf_row);
+        if (s >= 0)
+            return s;
+    }
+    if (kind == PAL_R3 && (g = pal.by_row[PAL_R3N - 1][xf_row & 63]) != 0xFF) {
         int s = pal_try(pal, g, kind, xf_row);
         if (s >= 0)
             return s;
@@ -148,7 +156,10 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
     if (best < 0)
         return -1;
     for (u32 k = best_lo; k < best_hi; k++) {
-        pal.entries[k] = GxTnlPalette::Entry();
+        GxTnlPalette::Entry& e = pal.entries[k];
+        if (e.kind && e.kind != PAL_CONT && pal.by_row[e.kind - 1][e.xf_row & 63] == k)
+            pal.by_row[e.kind - 1][e.xf_row & 63] = 0xFF;
+        e = GxTnlPalette::Entry();
         pal.slot_entry[3 * k] = pal.slot_entry[3 * k + 1] = pal.slot_entry[3 * k + 2] = 0xFF;
     }
     pal_fill(pal, (u32)best, kind, xf_row);
@@ -386,6 +397,12 @@ struct SlotMaps {
         }
         return true;
     }
+    // the slots of a draw whose matrices are fixed
+    void fixed(GxTnlSlots& o) const {
+        o.s[0] = (u8)fixed_pos;
+        for (u32 k = 0; k < 3; k++)
+            o.s[1 + k] = (u8)fixed_tc[k];
+    }
     // a vertex's slots from its rows; false when the palette is full
     bool slots(const GxTnlPlan& p, GxTnlPalette& pal, const u8 rows[4], GxTnlSlots& o) {
         if (!vary_pos) {
@@ -445,12 +462,101 @@ bool gx_tnl_fixed_slots(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots*
     return m.slots(p, pal, none, *out);
 }
 
+// The commonest immediate draws, the layouts' quads and glyphs: float positions in the stream,
+// no normal, a direct RGBA8 color or none, texgen sources from direct float, u16 or s16 texture
+// coordinates, the position, or none; one matrix each. Nothing to read but the fields themselves.
+struct SimpleTc {
+    u8 kind;    // 0 none, 1 position, 2 f32, 3 u16, 4 s16
+    u8 n;       // texture coordinate components
+    u8 offset;  // its stream offset
+    f32 scale;
+    f32 z;      // the third component (1, or the position's z)
+};
+bool simple_plan(const GxTnlPlan& p, SimpleTc tcs[3]) {
+    const GxVertexFormat& f = *p.fmt;
+    if (p.need_nrm || f.pos_mtx >= 0 || f.pos.mode != 1 || f.pos.type != 4)
+        return false;
+    if (f.color[0].mode == 1 ? f.color[0].type != 5 : f.color[0].mode != 0)
+        return false;
+    for (u32 k = 0; k < 3; k++) {
+        const GxTnlPlan::Tc& t = p.tc[k];
+        SimpleTc& st = tcs[k];
+        st.kind = 0, st.n = 0, st.offset = 0, st.scale = 1.0f, st.z = 1.0f;
+        if (t.src == TNL_SRC_ZERO)
+            continue;
+        if (t.mtx_off >= 0)
+            return false;
+        if (t.src == TNL_SRC_POS) {
+            st.kind = 1;
+            continue;
+        }
+        if (t.src != TNL_SRC_TEX)
+            return false;
+        const GxAttrFormat& a = f.tex[t.tex];
+        if (!a.mode) {
+            continue;  // (zeros)
+        }
+        if (a.mode != 1 || (a.type != 4 && a.type != 2 && a.type != 3))
+            return false;
+        st.kind = a.type == 4 ? 2 : a.type == 2 ? 3 : 4;
+        st.n = a.n, st.offset = a.offset, st.scale = a.scale;
+    }
+    return true;
+}
+
+u32 vertices_simple(const GxTnlPlan& p, const u8* data, u32 first, u32 n, const SlotMaps& m, const SimpleTc tcs[3],
+                    GxTnlVertex* out, GxTnlSlots* slots) {
+    const GxVertexFormat& f = *p.fmt;
+    const u8* v = data + first * f.size;
+    GxTnlSlots fixed;
+    m.fixed(fixed);
+    const u32 poff = f.pos.offset, pos_n = f.pos.n;
+    const bool color = f.color[0].mode == 1;
+    const u32 coff = f.color[0].offset;
+    for (u32 i = 0; i < n; i++, v += f.size) {
+        GxTnlVertex& o = out[i];
+        slots[i] = fixed;
+        o.pos[0] = gx_be_f32(v + poff), o.pos[1] = gx_be_f32(v + poff + 4), o.pos[2] = pos_n == 3 ? gx_be_f32(v + poff + 8) : 0.0f;
+        o.nrm[0] = o.nrm[1] = o.nrm[2] = 0.0f;
+        if (color)
+            memcpy(o.color, v + coff, 4);
+        else
+            o.color[0] = o.color[1] = o.color[2] = o.color[3] = 0;
+        for (u32 k = 0; k < 3; k++) {
+            const SimpleTc& st = tcs[k];
+            f32* tc = o.tc[k];
+            const u8* d = v + st.offset;
+            switch (st.kind) {
+            case 1:
+                tc[0] = o.pos[0], tc[1] = o.pos[1], tc[2] = p.tc[k].z ? o.pos[2] : 1.0f;
+                break;
+            case 2:
+                tc[0] = gx_be_f32(d), tc[1] = st.n == 2 ? gx_be_f32(d + 4) : 0.0f, tc[2] = 1.0f;
+                break;
+            case 3:
+                tc[0] = (f32)gx_be16(d) * st.scale, tc[1] = st.n == 2 ? (f32)gx_be16(d + 2) * st.scale : 0.0f, tc[2] = 1.0f;
+                break;
+            case 4:
+                tc[0] = (f32)(s16)gx_be16(d) * st.scale, tc[1] = st.n == 2 ? (f32)(s16)gx_be16(d + 2) * st.scale : 0.0f, tc[2] = 1.0f;
+                break;
+            default:
+                tc[0] = tc[1] = 0.0f, tc[2] = 1.0f;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
 u32 gx_tnl_vertices(const GxTnlPlan& p, const u8* data, u32 first, u32 n, GxTnlPalette& pal, GxTnlVertex* out,
                     GxTnlSlots* slots, GxTnlRows* rows) {
     const GxVertexFormat& f = *p.fmt;
     SlotMaps m;
     if (!m.init(p, pal))
         return 0;
+    SimpleTc tcs[3];
+    if (!rows && simple_plan(p, tcs))
+        return vertices_simple(p, data, first, n, m, tcs, out, slots);
     const u8* v = data + first * f.size;
     for (u32 i = 0; i < n; i++, v += f.size) {
         GxTnlVertex& o = out[i];

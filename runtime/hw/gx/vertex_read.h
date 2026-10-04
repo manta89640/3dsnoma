@@ -19,6 +19,13 @@ static inline u32 gx_be32(const u8* p) {
     return __builtin_bswap32(v);
 }
 
+static inline f32 gx_be_f32(const u8* p) {
+    u32 b = gx_be32(p);
+    f32 v;
+    memcpy(&v, &b, 4);
+    return v;
+}
+
 // bytes one component of a type takes in an array element
 static inline u32 gx_comp_bytes(u32 type) { return type == 2 || type == 3 ? 2 : type == 4 ? 4 : 1; }
 

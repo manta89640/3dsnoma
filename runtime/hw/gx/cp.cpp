@@ -54,7 +54,25 @@ static void load_cp(u32 reg, u32 v) {
     default: break;
     }
     g_gx.cp[reg & 0xFF] = v;
-    s_renderer->cp_write(reg & 0xFF, v);
+}
+
+// the part of a renderer's state each BP register is part of (GX_BP_*; 0: none)
+static u8 s_bp_group[256];
+static void init_bp_groups() {
+    s_bp_group[0x00] = GX_BP_TEV;                     // GENMODE
+    for (u32 r = 0x28; r < 0x30; r++)                 // TREF
+        s_bp_group[r] = GX_BP_TEV;
+    for (u32 r = 0xC0; r < 0xE8; r++)                 // TEV stages, registers
+        s_bp_group[r] = GX_BP_TEV;
+    for (u32 r = 0xF6; r < 0xFE; r++)                 // KSEL
+        s_bp_group[r] = GX_BP_TEV;
+    for (u32 r = 0x60; r <= 0x65; r++)                // TMEM preloads, palette loads
+        s_bp_group[r] = GX_BP_TEX;
+    for (u32 r = 0x80; r < 0xBC; r++)                 // texture modes, images, palettes
+        s_bp_group[r] = GX_BP_TEX;
+    s_bp_group[0x40] = s_bp_group[0x41] = s_bp_group[0x43] = GX_BP_PIXEL;  // ZMODE, CMODE0, ZCONTROL
+    s_bp_group[0xF3] = GX_BP_PIXEL;                   // ALPHACOMPARE
+    s_bp_group[0x20] = s_bp_group[0x21] = GX_BP_SCISSOR;
 }
 
 bool gx_debug_frame();
@@ -96,7 +114,6 @@ static void load_xf(u32 addr, u32 v, const u8* from = nullptr) {
         g_gx.xf[addr] = v;
         gx_xf_written(g_gx, addr, 1);
     }
-    s_renderer->xf_write(addr, v);
 }
 
 static void dump_stats() {
@@ -121,6 +138,9 @@ static void load_bp(u32 cmd) {
     }
     v = (g_gx.bp[reg] & ~s_bp_mask) | (v & s_bp_mask);
     s_bp_mask = 0xFFFFFF;
+    // (a palette load or a TMEM preload changes what a texture register means: always a change)
+    if (g_gx.bp[reg] != v || reg == 0x65 || reg == 0x63)
+        g_gx.bp_dirty |= s_bp_group[reg];
     g_gx.bp[reg] = v;
     if (reg >= 0xE0 && reg < 0xE8) {  // TEV color/konst registers: low (R, A) or high (B, G) half
         s32* dst = ((v >> 23) & 1) ? g_gx.tev_konst[(reg - 0xE0) / 2] : g_gx.tev_reg[(reg - 0xE0) / 2];
@@ -130,11 +150,11 @@ static void load_bp(u32 cmd) {
         else
             dst[0] = sext11(v & 0x7FF), dst[3] = sext11((v >> 12) & 0x7FF);
     }
-    s_renderer->bp_write(reg, v);
     switch (reg) {
     case 0x45:  // draw done
         if ((v & 0xFF) == 2) {
             s_stats.finish++;
+            s_renderer->draw_done();
             pe_finish();
             if (s_debug)
                 dump_stats();
@@ -177,7 +197,6 @@ static void load_indexed(u32 which, u32 v) {
             g_gx.xf[addr + i] = w;
     }
     gx_xf_written(g_gx, addr, count);
-    s_renderer->xf_indexed_load(which, index, src, count);
 }
 
 static void call_display_list(u32 addr, u32 size) {
@@ -199,92 +218,106 @@ static void call_display_list(u32 addr, u32 size) {
         list = s_list.data();
     }
     s_dl_addr = a, s_dl_host = list, s_dl_size = size;
-    u32 done = 0;
-    while (done < size) {
-        s_dl_offset = done;
-        u32 used = gx_decode(list + done, size - done, true);
-        if (!used)
-            break;  // a truncated command at the end of the list is dropped, as on hardware
-        done += used;
-    }
+    // (a truncated command at the end of the list is dropped, as on hardware)
+    gx_decode(list, size, true);
     s_dl_host = nullptr;
 }
 
 u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
-    if (n < 1)
-        return 0;
-    u32 cmd = p[0];
-    switch (cmd) {
-    case 0x00:
-        return 1;
-    case 0x08:
-        if (n < 6)
-            return 0;
-        load_cp(p[1], be32(p + 2));
-        return 6;
-    case 0x10: {
-        if (n < 5)
-            return 0;
-        u32 h = be32(p + 1);
-        u32 count = ((h >> 16) & 0xF) + 1, addr = h & 0xFFFF;
-        u32 len = 5 + 4 * count;
-        if (n < len)
-            return 0;
-        NOMA_PROF_SCOPE("(gx xf)");
-        for (u32 i = 0; i < count; i++)
-            load_xf(addr + i, be32(p + 5 + 4 * i), in_display_list ? p + 5 + 4 * i : nullptr);
-        return len;
+    static bool s_groups_ready;
+    if (!s_groups_ready) {
+        init_bp_groups();
+        s_groups_ready = true;
     }
-    case 0x20: case 0x28: case 0x30: case 0x38:
-        if (n < 5)
-            return 0;
-        load_indexed((cmd - 0x20) >> 3, be32(p + 1));
-        return 5;
-    case 0x40:
-        if (n < 9)
-            return 0;
-        if (!in_display_list) {
-            NOMA_PROF_SCOPE("(gx display list)");
-            call_display_list(be32(p + 1), be32(p + 5));
+    u32 done = 0;
+    while (done < n) {
+        const u8* q = p + done;
+        const u32 left = n - done;
+        u32 cmd = q[0];
+        u32 len;
+        switch (cmd) {
+        case 0x00:
+            len = 1;
+            break;
+        case 0x08:
+            if (left < 6)
+                return done;
+            load_cp(q[1], be32(q + 2));
+            len = 6;
+            break;
+        case 0x10: {
+            if (left < 5)
+                return done;
+            u32 h = be32(q + 1);
+            u32 count = ((h >> 16) & 0xF) + 1, addr = h & 0xFFFF;
+            len = 5 + 4 * count;
+            if (left < len)
+                return done;
+            NOMA_PROF_SCOPE("(gx xf)");
+            for (u32 i = 0; i < count; i++)
+                load_xf(addr + i, be32(q + 5 + 4 * i), in_display_list ? q + 5 + 4 * i : nullptr);
+            break;
         }
-        return 9;
-    case 0x44:
-    case 0x48:
-        return 1;
-    case 0x61: {
-        if (n < 5)
-            return 0;
-        NOMA_PROF_SCOPE("(gx bp)");
-        load_bp(be32(p + 1));
-        return 5;
-    }
-    default:
-        break;
-    }
-    if (cmd & 0x80) {
-        if (n < 3)
-            return 0;
-        u32 vat = cmd & 7, prim = cmd & 0xF8;
-        u32 count = be16(p + 1);
-        u32 len = 3 + count * gx_vertex_format(vat).size;
-        if (n < len)
-            return 0;
-        s_stats.draws++;
-        s_stats.vertices += count;
-        if (count) {
-            NOMA_PROF_SCOPE("(gx draw)");
-            s_cur_prim = prim;
-            s_renderer->draw(prim, vat, count, p + 3);
+        case 0x20: case 0x28: case 0x30: case 0x38:
+            if (left < 5)
+                return done;
+            load_indexed((cmd - 0x20) >> 3, be32(q + 1));
+            len = 5;
+            break;
+        case 0x40:
+            if (left < 9)
+                return done;
+            if (in_display_list) {
+                s_dl_offset = done;
+            } else {
+                NOMA_PROF_SCOPE("(gx display list)");
+                call_display_list(be32(q + 1), be32(q + 5));
+            }
+            len = 9;
+            break;
+        case 0x44:
+        case 0x48:
+            len = 1;
+            break;
+        case 0x61: {
+            if (left < 5)
+                return done;
+            NOMA_PROF_SCOPE("(gx bp)");
+            load_bp(be32(q + 1));
+            len = 5;
+            break;
         }
-        if (s_debug)
-            dump_stats();
-        return len;
+        default:
+            if (cmd & 0x80) {
+                if (left < 3)
+                    return done;
+                u32 vat = cmd & 7, prim = cmd & 0xF8;
+                u32 count = be16(q + 1);
+                len = 3 + count * gx_vertex_format(vat).size;
+                if (left < len)
+                    return done;
+                s_stats.draws++;
+                s_stats.vertices += count;
+                if (count) {
+                    NOMA_PROF_SCOPE("(gx draw)");
+                    s_cur_prim = prim;
+                    s_dl_offset = done;
+                    s_renderer->draw(prim, vat, count, q + 3);
+                }
+                if (s_debug)
+                    dump_stats();
+                break;
+            }
+            // an unknown command: the hardware would hang; skip the byte so a desynchronised
+            // stream shows up in the statistics instead
+            if (s_stats.unknown++ < 16)
+                log("gx: unknown command %02X", cmd);
+            len = 1;
+            break;
+        }
+        done += len;
     }
-    // an unknown command: the hardware would hang; skip the byte so a desynchronised stream
-    // shows up in the statistics instead
-    if (s_stats.unknown++ < 16)
-        log("gx: unknown command %02X", cmd);
-    return 1;
+    return done;
 }
 
 }  // namespace guest

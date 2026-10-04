@@ -25,6 +25,16 @@ struct GxState {
     // move on when XF memory (matrices, lights: below 0x1000), the post-transform matrices
     // (0x500-0x5FF) or an XF register changed: the draw path keeps its plan for a draw until then
     u32 xf_mem_serial, xf_post_serial, xf_reg_serial;
+    u32 xf_viewport_serial;  // ... when the viewport (0x101A-0x101F) changed
+    // the parts of a renderer's state whose BP registers changed since it last looked (GX_BP_*):
+    // the decoder sets the bits as it writes the registers, the renderer clears them
+    u32 bp_dirty;
+};
+enum : u32 {
+    GX_BP_TEV = 1,      // combiners: GENMODE, TREF, the TEV stages, registers and constants, KSEL
+    GX_BP_TEX = 2,      // textures (modes, images, palettes, TMEM loads)
+    GX_BP_PIXEL = 4,    // depth, blending, logic op, write masks, alpha test
+    GX_BP_SCISSOR = 8,  // the scissor box
 };
 // the XF words [addr, addr + count) were written with new values
 static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
@@ -36,6 +46,8 @@ static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
         s.xf_post_serial++;
     if (addr + count > 0x1000)
         s.xf_reg_serial++;
+    if (addr < 0x1020 && addr + count > 0x101A)
+        s.xf_viewport_serial++;
 }
 extern GxState g_gx;
 
@@ -56,9 +68,8 @@ struct GxRenderer {
     // a primitive: type (GX_QUADS 0x80 ... GX_POINTS 0xB8), vertex format, count, the raw
     // vertex data in the stream (count * gx_vertex_format(vat).size bytes)
     virtual void draw(u32 prim, u32 vat, u32 count, const u8* data) {}
-    virtual void bp_write(u32 reg, u32 value) {}
-    virtual void xf_write(u32 addr, u32 value) {}
-    virtual void cp_write(u32 reg, u32 value) {}
+    // BP 0x45 (draw done): the frame is complete (the other registers only set g_gx.bp_dirty)
+    virtual void draw_done() {}
     // XF indexed loads (matrices/normals/lights from main memory)
     virtual void xf_indexed_load(u32 which, u32 index, u32 addr, u32 count) {}
     // BP 0x52: copy the EFB to texture memory or to the external frame buffer
@@ -81,7 +92,8 @@ void gx_pi_fifo_write(u32 off, u32 value, int size);  // PI 0x0C/0x10/0x14: CPU 
 u32 gx_pi_fifo_read(u32 off);
 void gx_run();  // execute whatever the GPU's FIFO holds now (also called from device polls)
 
-// cp.cpp: decode commands; returns bytes used, or 0 if [p, p+n) ends in the middle of one
+// cp.cpp: decode the commands in [p, p+n) in a row; returns bytes used (less than n when the
+// last command is cut off: the rest waits for its tail)
 u32 gx_decode(const u8* p, u32 n, bool in_display_list);
 // while a renderer's draw() runs: whether the draw came from a display list, and its primitive
 bool gx_in_display_list();

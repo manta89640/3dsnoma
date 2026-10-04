@@ -884,7 +884,7 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
 }  // namespace
 
 // ---------------------------------------------------------------- the renderer
-void SoftRenderer::bp_write(u32 reg, u32 value) {}
+
 
 // NOMA_DEBUG_DRAWS=N: describe every draw of the Nth frame (counted in XFB copies)
 static u32 s_copies;
