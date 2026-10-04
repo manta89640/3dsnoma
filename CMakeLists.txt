@@ -101,9 +101,16 @@ set(ENGINE_SOURCES
   engine/system/host_scene.cpp
   engine/system/keyboard.cpp
   engine/system/thread.cpp
+  engine/ui/bar_button.cpp
+  engine/ui/caption.cpp
+  engine/ui/confirm.cpp
   engine/ut/font.cpp
+  engine/wuhu/bar_button.cpp
+  engine/wuhu/content_placeholder.cpp
   engine/wuhu/follow_camera.cpp
+  engine/wuhu/music_stub.cpp
   engine/wuhu/player.cpp
+  engine/wuhu/scene.cpp
 )
 
 # ---- the Wii runtime (memory, threads, interrupts, hardware and IOS emulation) ----
@@ -126,6 +133,7 @@ set(RUNTIME_SOURCES
   runtime/patches/vf.cpp
   runtime/patches/wii_parts.cpp
   runtime/patches/wiilink.cpp
+  runtime/patches/wipes.cpp
   runtime/hle/report.cpp
   runtime/trace.cpp
   runtime/profile.cpp

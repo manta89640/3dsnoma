@@ -13,14 +13,17 @@
 
 #include "engine/soundplayer/catalog.h"
 #include "engine/soundplayer/controls.h"
-#include "engine/soundplayer/game.h"
-#include "engine/soundplayer/lyt.h"
 #include "engine/soundplayer/music.h"
 #include "engine/soundplayer/stage.h"
 #include "engine/soundplayer/track_list.h"
 #include "engine/system/host_scene.h"
+#include "engine/ui/game.h"
+#include "engine/ui/lyt.h"
 
 namespace engine::soundplayer {
+
+namespace game = engine::ui::game;
+namespace lyt = engine::ui::lyt;
 
 namespace {
 
