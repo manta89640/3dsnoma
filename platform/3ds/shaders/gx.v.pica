@@ -30,7 +30,9 @@
 .fvec lights[32]           ; 4 per light: (cosatt, r) (distatt, g) (position, b) (direction, a)
 .fvec post[9]              ; post-transform matrices of texgens 0-2, 3 rows each
 .fvec pal[42]              ; palette: matrix rows
-.constf consts(0.0, 1.0, 0.00392156862745098, 1e-30)
+; (w: the floor of a squared length before rsq; f24's smallest normal is ~2.2e-19, so 1e-30 was 0 on a
+; real PICA and a zero vector's rsq infinite)
+.constf consts(0.0, 1.0, 0.00392156862745098, 1e-18)
 
 .ivec nlights              ; x: lights - 1; y: 0; z: 4 (the loop steps a light)
 
