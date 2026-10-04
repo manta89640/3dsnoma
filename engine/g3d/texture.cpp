@@ -191,7 +191,7 @@ u32 gx_level_bytes(u32 gx_format, u32 w, u32 h) {
 
 u32 gx_texture_bytes(u32 gx_format, u32 w, u32 h, u32 levels) {
     u32 total = 0;
-    for (u32 l = 0; l < levels; l++)
+    for (u32 l = 0; l < levels && l < 32; l++)
         total += gx_level_bytes(gx_format, w >> l ? w >> l : 1, h >> l ? h >> l : 1);
     return total;
 }
@@ -247,6 +247,12 @@ bool convert_gx_texture(const fmt::Texture& t, const u8* src, u32 src_size, Conv
     if (!gx_conversion_supported(t.gx_format, t.format))
         return fail("no conversion from its GX format to its PICA format");
     const u32 gx_levels = t.levels ? t.levels : 1;
+    // (GX's levels halve down to 1x1: a 1024 x 1024 texture has 11)
+    u32 most = 1;
+    while ((w >> most) | (h >> most))
+        most++;
+    if (gx_levels > most)
+        return fail("more levels than its size has");
     if (gx_texture_bytes(t.gx_format, w, h, gx_levels) > src_size)
         return fail("fewer texel bytes than its levels need");
     const u32 W = next_pow2(w), H = next_pow2(h);

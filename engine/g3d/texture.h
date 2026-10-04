@@ -50,7 +50,7 @@ void pica_decode(u32 format, const u8* texels, u32 w, u32 h, u32* rgba);
 // 14 CMPR)
 // bytes of one level of w x h texels (whole blocks)
 u32 gx_level_bytes(u32 gx_format, u32 w, u32 h);
-// bytes of `levels` levels from w x h down (GX levels halve down to 1x1)
+// bytes of `levels` levels from w x h down (GX levels halve down to 1x1; at most 32 counted)
 u32 gx_texture_bytes(u32 gx_format, u32 w, u32 h, u32 levels);
 // whether pica_tex.h converts this GX format to this PICA format exactly as the GX path keeps it:
 // I4 -> L4 or LA4, I8 -> L8 or LA8, IA4 -> LA4, IA8 -> LA8, RGB565 -> RGB565, RGB5A3 and RGBA8 ->

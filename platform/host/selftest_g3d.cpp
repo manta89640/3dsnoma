@@ -541,6 +541,7 @@ void test_load() {
     add_scene("texture bytes", [](Scene& s) { s.p.texels[2].resize(s.p.texels[2].size() - 16); });
     add_scene("texture GX conversion unsupported", [](Scene& s) { s.p.texs[1].format = fm::TF_RGB565; });
     add_scene("texture GX bytes short", [](Scene& s) { s.p.texels[0].resize(64); });
+    add_scene("texture GX levels past 1x1", [](Scene& s) { s.p.texs[1].levels = 200; });
     add_scene("texture source size", [](Scene& s) { s.p.texs[2].src_width = 17; });
     add_raw("texture outside TDAT", [&](std::vector<u8>& b) {
         fm::Section* s = sec(b, fm::SEC_TEXS);
@@ -611,9 +612,9 @@ void test_load() {
     }
     log("selftest g3d: load: the test package loads (%zu bytes); %u of %zu corrupted files refused with a reason",
         good.size(), refused, cases.size());
-    // random damage: never a crash (each load either refuses or checks out)
+    // random damage: never a crash (each load either refuses or checks out); NOMA_G3D_FUZZ=N files
     Rng r{77};
-    u32 accepted = 0, n = 3000;
+    u32 accepted = 0, n = getenv("NOMA_G3D_FUZZ") ? (u32)atoi(getenv("NOMA_G3D_FUZZ")) : 3000;
     for (u32 i = 0; i < n; i++) {
         std::vector<u8> b = good;
         const u32 flips = 1 + r() % 4;
@@ -661,7 +662,10 @@ void test_textures() {
         for (int t = 0; t < 12; t++) {
             const bool npot = t >= 10;
             const u32 w = npot ? 8 + r() % 60 : 8u << (r() % 6), h = npot ? 8 + r() % 60 : 8u << (r() % 6);
-            const u32 nl = npot ? 1 : 1 + r() % 6;
+            u32 most = 1;  // (GX levels down to 1x1)
+            while ((w >> most) | (h >> most))
+                most++;
+            const u32 nl = npot ? 1 : std::min(most, 1 + r() % 6);
             src.resize(g3::gx_texture_bytes(pr.gx, w, h, nl));
             for (u8& b : src)
                 b = (u8)r();
