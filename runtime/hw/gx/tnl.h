@@ -59,8 +59,11 @@ const u32 TNL_CONST_VECTORS = 53;  // c0-c52 as the struct lays them out
 static_assert(offsetof(GxTnlConsts, nlights) == TNL_CONST_VECTORS * 16, "GxTnlConsts layout");
 
 // The palette: matrix rows copied from XF memory into uniform registers c53 on, found again by the
-// rows they came from. Slots a pending batch's vertices refer to (used) are kept until the batch
-// is submitted (flushed); the renderer uploads the slots written since it last did (dirty).
+// rows they came from, current while those rows' write generations (g_gx.xf_row_gen) are older
+// than the copy. Slots a pending batch's vertices refer to (used) are kept until the batch is
+// submitted (flushed); the renderer uploads the slots written since it last did (dirty). Room for
+// new rows comes from a clock over the groups of 3 slots: a group used since the hand last passed
+// gets a second chance.
 const u32 TNL_PAL_BASE = 53, TNL_PAL_SLOTS = 42;
 struct GxTnlPalette {
     f32 rows[TNL_PAL_SLOTS][4] = {};
@@ -70,13 +73,13 @@ struct GxTnlPalette {
         u8 first = 0, n = 0;   // slots
         u8 kind = 0;           // 0 free; else TNL_PAL_* below
         u8 xf_row = 0;         // XF matrix memory row (position/texture matrices), normal matrix index
-        u32 mem_serial = 0;    // g_gx.xf_mem_serial when the rows were checked against XF memory
-        u32 age = 0;           // allocation order (the oldest unused entry gives way first)
+        u32 gen = 0;           // g_gx.xf_gen when the rows were copied
     };
     Entry entries[TNL_PAL_SLOTS / 3];
     u8 slot_entry[TNL_PAL_SLOTS];  // slot -> entry index, 0xFF: none
     u8 by_row[3][64];              // (kind - 1, XF row) -> entry index, 0xFF: none
-    u32 clock = 0;
+    u16 ref = 0;                   // bit per group: used since the clock's hand passed it
+    u8 hand = 0;
     GxTnlPalette() {
         memset(slot_entry, 0xFF, sizeof(slot_entry));
         memset(by_row, 0xFF, sizeof(by_row));
@@ -137,6 +140,11 @@ u32 gx_tnl_array_ranges(const GxVertexFormat& f, const u8* data, u32 count, GxTn
 // the number of draws planned with something the shader doesn't do (specular attenuation, a
 // differently lit alpha channel, emboss/color/binormal texgens), for a log line
 u32 gx_tnl_approximated();
+// what the palette did so far: entries filled, checked against XF memory (and found stale), room searched
+struct GxTnlPalStats {
+    u32 fills, checks, stale, scans;
+};
+GxTnlPalStats gx_tnl_pal_stats();
 
 // NOMA_CHECK_GX_DRAW=pica (the host's reference renderer): the draw through the shader binary
 // against gx_transform's results

@@ -6,6 +6,8 @@
 // later by a CALL_DL command. fifo.cpp moves the bytes, cp.cpp decodes the command stream and
 // keeps the GPU's register state, a renderer (gx_render.h) draws.
 #pragma once
+#include <algorithm>
+
 #include "../hw.h"
 
 namespace guest {
@@ -26,6 +28,12 @@ struct GxState {
     // (0x500-0x5FF) or an XF register changed: the draw path keeps its plan for a draw until then
     u32 xf_mem_serial, xf_post_serial, xf_reg_serial;
     u32 xf_viewport_serial;  // ... when the viewport (0x101A-0x101F) changed
+    // the matrix rows' write generations (xf_gen when a row last got new values): position and
+    // texture matrix memory in rows of 4 words (0x000-0x10F), normal matrix memory in rows of 3
+    // (0x400-0x465): what the draw path copied of them is current while their generation is older
+    u32 xf_gen;
+    u32 xf_row_gen[68];
+    u32 xf_nrm_gen[34];
     // the parts of a renderer's state whose BP registers changed since it last looked (GX_BP_*):
     // the decoder sets the bits as it writes the registers, the renderer clears them
     u32 bp_dirty;
@@ -40,8 +48,21 @@ enum : u32 {
 static inline void gx_xf_written(GxState& s, u32 addr, u32 count) {
     if ((addr < 0x800 && addr + count > 0x600) || (addr < 0x1012 && addr + count > 0x1009))
         s.light_serial++;
-    if (addr < 0x1000)
+    if (addr < 0x1000) {
         s.xf_mem_serial++;
+        const u32 end = addr + count;
+        if (addr < 0x110) {
+            u32 g = ++s.xf_gen;
+            for (u32 r = addr >> 2, last = (std::min<u32>(end, 0x110) - 1) >> 2; r <= last; r++)
+                s.xf_row_gen[r] = g;
+        }
+        if (addr < 0x466 && end > 0x400) {
+            u32 g = ++s.xf_gen;
+            u32 lo = addr > 0x400 ? addr - 0x400 : 0;
+            for (u32 r = lo / 3, last = (std::min<u32>(end, 0x466) - 0x400 - 1) / 3; r <= last; r++)
+                s.xf_nrm_gen[r] = g;
+        }
+    }
     if (addr < 0x600 && addr + count > 0x500)
         s.xf_post_serial++;
     if (addr + count > 0x1000)

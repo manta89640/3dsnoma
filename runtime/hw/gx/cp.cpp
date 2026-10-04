@@ -107,13 +107,20 @@ static void check_nan(u32 addr, u32 v, const u8* from = nullptr) {
     platform_backtrace(why);
 }
 
-static void load_xf(u32 addr, u32 v, const u8* from = nullptr) {
-    s_stats.xf++;
-    check_nan(addr, v, from);
-    if (addr < sizeof(g_gx.xf) / 4 && g_gx.xf[addr] != v) {
-        g_gx.xf[addr] = v;
-        gx_xf_written(g_gx, addr, 1);
+// XF words from the stream at p; what changed is reported once
+static void load_xf(u32 addr, u32 count, const u8* p, bool in_display_list) {
+    s_stats.xf += count;
+    u32 lo = ~0u, hi = 0;
+    for (u32 i = 0; i < count; i++, p += 4) {
+        u32 a = addr + i, v = be32(p);
+        check_nan(a, v, in_display_list ? p : nullptr);
+        if (a < sizeof(g_gx.xf) / 4 && g_gx.xf[a] != v) {
+            g_gx.xf[a] = v;
+            lo = std::min(lo, a), hi = a + 1;
+        }
     }
+    if (lo < hi)
+        gx_xf_written(g_gx, lo, hi - lo);
 }
 
 static void dump_stats() {
@@ -190,13 +197,17 @@ static void load_indexed(u32 which, u32 v) {
     u32 index = v >> 16, count = ((v >> 12) & 0xF) + 1, addr = v & 0xFFF;
     u32 base = g_gx.cp[CP_ARRAY_BASE + 12 + which], stride = g_gx.cp[CP_ARRAY_STRIDE + 12 + which];
     u32 src = 0x80000000 | ((base + index * stride) & 0x1FFFFFFF);
+    u32 lo = ~0u, hi = 0;  // the words that changed
     for (u32 i = 0; i < count; i++) {
         u32 w = load32(src + 4 * i);
         check_nan(addr + i, w);
-        if (addr + i < sizeof(g_gx.xf) / 4)
+        if (addr + i < sizeof(g_gx.xf) / 4 && g_gx.xf[addr + i] != w) {
             g_gx.xf[addr + i] = w;
+            lo = std::min(lo, addr + i), hi = addr + i + 1;
+        }
     }
-    gx_xf_written(g_gx, addr, count);
+    if (lo < hi)
+        gx_xf_written(g_gx, lo, hi - lo);
 }
 
 static void call_display_list(u32 addr, u32 size) {
@@ -254,8 +265,7 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
             if (left < len)
                 return done;
             NOMA_PROF_SCOPE("(gx xf)");
-            for (u32 i = 0; i < count; i++)
-                load_xf(addr + i, be32(q + 5 + 4 * i), in_display_list ? q + 5 + 4 * i : nullptr);
+            load_xf(addr, count, q + 5, in_display_list);
             break;
         }
         case 0x20: case 0x28: case 0x30: case 0x38:

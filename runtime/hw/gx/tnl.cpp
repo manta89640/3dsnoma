@@ -17,6 +17,7 @@ namespace guest {
 namespace {
 
 u32 s_approximated;
+GxTnlPalStats s_pal_stats;
 
 // a light's rows for the shader: (cosatt, r) (distatt, g) (position, b) (direction, a)
 void light_rows(u32 l, f32 rows[4][4]) {
@@ -56,31 +57,37 @@ void pal_source(u8 kind, u8 xf_row, f32 rows[6][4]) {
 u32 pal_groups_of(u8 kind) { return kind == PAL_R3N ? 2 : 1; }
 
 void pal_fill(GxTnlPalette& pal, u32 g, u8 kind, u8 xf_row) {
+    s_pal_stats.fills++;
     GxTnlPalette::Entry& e = pal.entries[g];
     e.first = (u8)(3 * g), e.n = (u8)(3 * pal_groups_of(kind)), e.kind = kind, e.xf_row = xf_row;
     pal.by_row[kind - 1][xf_row & 63] = (u8)g;
-    e.mem_serial = g_gx.xf_mem_serial;
-    e.age = ++pal.clock;
+    e.gen = g_gx.xf_gen;
     pal_source(kind, xf_row, (f32(*)[4]) & pal.rows[e.first]);
     pal.dirty |= ((1ull << e.n) - 1) << e.first;
     for (u32 k = 0; k < pal_groups_of(kind); k++)
         pal.slot_entry[3 * (g + k)] = pal.slot_entry[3 * (g + k) + 1] = pal.slot_entry[3 * (g + k) + 2] = (u8)g;
     if (kind == PAL_R3N) {
         GxTnlPalette::Entry& c = pal.entries[g + 1];
-        c.kind = PAL_CONT, c.first = (u8)(3 * g + 3), c.n = 3, c.age = e.age;
+        c.kind = PAL_CONT, c.first = (u8)(3 * g + 3), c.n = 3;
     }
 }
 
-// the entry's rows against XF memory (XF changed since they were checked)
-bool pal_current(GxTnlPalette& pal, u32 g) {
-    GxTnlPalette::Entry& e = pal.entries[g];
-    if (e.mem_serial == g_gx.xf_mem_serial)
-        return true;
-    f32 rows[6][4];
-    pal_source(e.kind, e.xf_row, rows);
-    if (memcmp(rows, &pal.rows[e.first], e.n * 16) != 0)
+// the entry's rows are as XF memory has them: none written since they were copied
+bool pal_current(const GxTnlPalette& pal, u32 g) {
+    const GxTnlPalette::Entry& e = pal.entries[g];
+    const u32* rg = &g_gx.xf_row_gen[e.xf_row & 63];
+    u32 newest = std::max(rg[0], rg[1]);
+    if (e.kind != PAL_R2)
+        newest = std::max(newest, rg[2]);
+    if (e.kind == PAL_R3N) {
+        const u32* ng = &g_gx.xf_nrm_gen[e.xf_row & 31];
+        newest = std::max(newest, std::max(ng[0], std::max(ng[1], ng[2])));
+    }
+    s_pal_stats.checks++;
+    if (newest > e.gen) {
+        s_pal_stats.stale++;
         return false;
-    e.mem_serial = g_gx.xf_mem_serial;
+    }
     return true;
 }
 
@@ -100,7 +107,7 @@ int pal_try(GxTnlPalette& pal, u32 g, u8 kind, u8 xf_row) {
             return -1;
         pal_fill(pal, g, e.kind, xf_row);
     }
-    e.age = ++pal.clock;
+    pal.ref |= (u16)(((1u << (e.n / 3)) - 1) << g);
     pal.used |= slots_mask(e.first, 3 * pal_groups_of(kind));
     return e.first;
 }
@@ -130,12 +137,17 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
             return s;
     }
     // room: the groups [g, g + need) and the whole of any entry they cut into (an R3N's two
-    // groups go together), none in use by the pending batch; free groups first, else the
-    // least recently used
+    // groups go together), none in use by the pending batch, from the clock's hand on; a group
+    // used since the hand last passed is passed over once (its bit cleared)
     const u32 need = pal_groups_of(kind);
+    s_pal_stats.scans++;
     int best = -1;
-    u32 best_age = ~0u, best_lo = 0, best_hi = 0;
-    for (u32 g = 0; g + need <= PAL_GROUPS; g++) {
+    u32 best_lo = 0, best_hi = 0;
+    for (u32 step = 0; step < 2 * PAL_GROUPS + 2; step++) {
+        u32 g = pal.hand;
+        pal.hand = (u8)(g + need < PAL_GROUPS ? g + 1 : 0);
+        if (g + need > PAL_GROUPS)
+            continue;
         u32 lo = g, hi = g + need;
         if (lo > 0 && pal.entries[lo].kind == PAL_CONT)
             lo--;
@@ -143,15 +155,13 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
             hi++;
         if (hi > PAL_GROUPS || (pal.used & slots_mask(3 * lo, 3 * (hi - lo))))
             continue;
-        u32 age = 0;
-        for (u32 k = lo; k < hi; k++)
-            if (pal.entries[k].kind)
-                age = std::max(age, pal.entries[k].age);
-        if (age < best_age) {
-            best_age = age, best = (int)g, best_lo = lo, best_hi = hi;
-            if (!age)
-                break;
+        const u16 mask = (u16)(((1u << (hi - lo)) - 1) << lo);
+        if (pal.ref & mask) {
+            pal.ref &= (u16)~mask;
+            continue;
         }
+        best = (int)g, best_lo = lo, best_hi = hi;
+        break;
     }
     if (best < 0)
         return -1;
@@ -164,6 +174,7 @@ int pal_lookup(GxTnlPalette& pal, u8 kind, u8 xf_row, int hint = -1) {
     }
     pal_fill(pal, (u32)best, kind, xf_row);
     pal.used |= slots_mask(3 * best, 3 * need);
+    pal.ref |= (u16)(((1u << need) - 1) << best);
     return 3 * best;
 }
 
@@ -357,6 +368,7 @@ void make_plan(const GxVertexFormat& f, const GxDrawSetup& setup, const f32 clip
 }  // namespace
 
 u32 gx_tnl_approximated() { return s_approximated; }
+GxTnlPalStats gx_tnl_pal_stats() { return s_pal_stats; }
 
 // ---------------------------------------------------------------- the vertices
 namespace {
