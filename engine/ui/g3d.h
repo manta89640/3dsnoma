@@ -7,6 +7,8 @@
 // (the stage's camera is written directly every frame).
 #pragma once
 
+#include <string>
+
 #include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
@@ -42,6 +44,18 @@ inline u32 new_aligned(u32 size) {
     u32 p = g::operator_new((size + 31) & ~31u);
     g::lib_allocator_ScopedAlignment_dtor(scope, (u32)-1);
     return p;
+}
+
+// The current heap's name and free bytes, when it is a lib::allocator::HeapStd (vtable
+// lib_allocator_HeapStd_HeapStdImpl_vtable at +0x8: blocks taken from both ends, +0x24 the low
+// end's top, +0x28 the high end's; +0x14 its name): for the logs of what a scene's parts cost and
+// give back (the heaps are stacks: a scene gone, the free bytes are what they were before it).
+inline u32 heap_free(std::string* name) {
+    u32 heap = guest::load32(guest::load32(GA_lib_allocator_HeapBase_sRoot) + 0x1C);
+    *name = guest::read_string(guest::load32(heap + 0x14), 16);
+    if (guest::load32(heap + 0x8) != GA_lib_allocator_HeapStd_HeapStdImpl_vtable)
+        return 0;
+    return guest::load32(heap + 0x28) - guest::load32(heap + 0x24);
 }
 
 // ---- g3d::Stage (0x118 bytes): a set from a .lex (BRRES) file in its own nw4r::g3d::ScnRoot.

@@ -93,6 +93,7 @@ set(ENGINE_SOURCES
   engine/system/host_scene.cpp
   engine/system/keyboard.cpp
   engine/system/thread.cpp
+  engine/ui/bar_button.cpp
   engine/ut/font.cpp
 )
 

@@ -25,6 +25,102 @@ struct Coverage {
     void clear() { std::fill(c.begin(), c.end(), 0.0f); }
 };
 
+// ---- shapes drawn at run time (the room bar's icons)
+
+// A shape sampled SAMPLES x SAMPLES times a pixel: its parts each mark the samples inside them
+// (within their bounding box, so that a shape of many small parts costs what its parts cover),
+// and the coverage is the part of each pixel's samples marked. A sample sits at the centre of its
+// cell: x + (i + 0.5) / SAMPLES.
+class Samples {
+public:
+    static const u32 SAMPLES = 4;
+
+    Samples(u32 width, u32 height) : w_(width), h_(height), on_((size_t)width * height * SAMPLES * SAMPLES, 0) {}
+
+    // the samples within [x0, x1] x [y0, y1] (pixels) for which inside(x, y) holds
+    template <class Inside>
+    void mark(f32 x0, f32 y0, f32 x1, f32 y1, Inside inside) {
+        const s32 n = (s32)SAMPLES, across = (s32)(w_ * SAMPLES), down = (s32)(h_ * SAMPLES);
+        const s32 i0 = std::max((s32)0, (s32)std::floor(x0 * n)), i1 = std::min(across - 1, (s32)std::ceil(x1 * n));
+        const s32 j0 = std::max((s32)0, (s32)std::floor(y0 * n)), j1 = std::min(down - 1, (s32)std::ceil(y1 * n));
+        for (s32 j = j0; j <= j1; j++)
+            for (s32 i = i0; i <= i1; i++) {
+                u8& s = on_[(size_t)j * (size_t)across + (size_t)i];
+                if (!s && inside(at(i), at(j)))
+                    s = 1;
+            }
+    }
+
+    Coverage coverage() const {
+        Coverage out(w_, h_);
+        const size_t across = (size_t)w_ * SAMPLES;
+        for (u32 y = 0; y < h_; y++)
+            for (u32 x = 0; x < w_; x++) {
+                u32 n = 0;
+                for (u32 sy = 0; sy < SAMPLES; sy++)
+                    for (u32 sx = 0; sx < SAMPLES; sx++)
+                        n += on_[((size_t)y * SAMPLES + sy) * across + (size_t)x * SAMPLES + sx];
+                out.at(x, y) = (f32)n / (SAMPLES * SAMPLES);
+            }
+        return out;
+    }
+
+private:
+    // where sample i is along an axis (the same sum as x + (sx + 0.5) / SAMPLES)
+    static f32 at(s32 i) { return (f32)(i / (s32)SAMPLES) + ((f32)(i % (s32)SAMPLES) + 0.5f) / SAMPLES; }
+
+    u32 w_, h_;
+    std::vector<u8> on_;
+};
+
+// an ellipse, its x axis turned by an angle (cos_a, sin_a; y runs down, so a positive angle turns
+// it clockwise on the screen)
+struct Ellipse {
+    f32 cx, cy, rx, ry, cos_a = 1.0f, sin_a = 0.0f;
+
+    bool inside(f32 x, f32 y) const {
+        f32 dx = x - cx, dy = y - cy;
+        f32 u = (dx * cos_a + dy * sin_a) / rx, v = (dy * cos_a - dx * sin_a) / ry;
+        return u * u + v * v <= 1.0f;
+    }
+    void mark(Samples& s) const {
+        const f32 r = std::max(rx, ry);
+        s.mark(cx - r, cy - r, cx + r, cy + r, [this](f32 x, f32 y) { return inside(x, y); });
+    }
+};
+
+// A brush stroke: a round brush swept along a quadratic Bézier curve (from p0 to p2, pulled
+// toward p1), its radius r0 * (1 - t)^taper + r1 * t at t along it (taper 1: from r0 to r1 evenly;
+// less: thick for longer). Drawn as STEPS straight pieces, the brush sliding from one point of the
+// curve to the next (so the ends are round).
+struct Stroke {
+    f32 x0, y0, x1, y1, x2, y2;
+    f32 r0, r1, taper = 1.0f;
+
+    static const u32 STEPS = 80;
+
+    void mark(Samples& s) const {
+        f32 px[STEPS + 1], py[STEPS + 1], pr[STEPS + 1];
+        for (u32 k = 0; k <= STEPS; k++) {
+            const f32 t = (f32)k / STEPS, u = 1.0f - t;
+            px[k] = u * u * x0 + 2.0f * u * t * x1 + t * t * x2;
+            py[k] = u * u * y0 + 2.0f * u * t * y1 + t * t * y2;
+            pr[k] = r0 * std::pow(u, taper) + r1 * t;
+        }
+        for (u32 k = 0; k < STEPS; k++) {
+            const f32 ax = px[k], ay = py[k], ra = pr[k], rb = pr[k + 1];
+            const f32 dx = px[k + 1] - ax, dy = py[k + 1] - ay;
+            const f32 ll = std::max(dx * dx + dy * dy, 1e-9f), r = std::max(ra, rb);
+            s.mark(std::min(ax, ax + dx) - r, std::min(ay, ay + dy) - r, std::max(ax, ax + dx) + r,
+                   std::max(ay, ay + dy) + r, [=](f32 x, f32 y) {
+                       const f32 t = std::min(std::max(((x - ax) * dx + (y - ay) * dy) / ll, 0.0f), 1.0f);
+                       const f32 qx = ax + t * dx - x, qy = ay + t * dy - y, rt = ra + (rb - ra) * t;
+                       return qx * qx + qy * qy <= rt * rt;
+                   });
+        }
+    }
+};
+
 // ---- the two-tone style of the room bar's icons and labels (Move_Btn_Icon_*.tpl,
 // Move_Btn_Text_*.tpl): IA4 textures (a byte a texel: alpha in the high nibble, intensity in the
 // low one) holding a shape at intensity 0 over an outline at intensity 15. Their materials turn

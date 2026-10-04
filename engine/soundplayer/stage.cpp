@@ -183,17 +183,6 @@ f32 frame_at(const Clip& c, double u) {
     return f >= c.frames ? f - c.frames : f;
 }
 
-// The current heap's name and free bytes, when it is a lib::allocator::HeapStd (vtable 0x807AE918
-// at +0x8: blocks taken from both ends, +0x24 the low end's top, +0x28 the high end's): for the log
-// of what the stage costs and gives back.
-u32 heap_free(std::string* name) {
-    u32 heap = guest::load32(guest::load32(GA_lib_allocator_HeapBase_sRoot) + 0x1C);
-    *name = guest::read_string(guest::load32(heap + 0x14), 16);
-    if (guest::load32(heap + 0x8) != GA_lib_allocator_HeapStd_HeapStdImpl_vtable)
-        return 0;
-    return guest::load32(heap + 0x28) - guest::load32(heap + 0x24);
-}
-
 }  // namespace
 
 struct Stage::Impl {
@@ -249,7 +238,7 @@ struct Stage::Impl {
 
 Stage::Impl::Impl() {
     std::string heap;
-    u32 free_before = heap_free(&heap);
+    u32 free_before = g3d::heap_free(&heap);
     // the household's RFLCreateIDs (model::Family reads the channel's save; it lives on the guest
     // stack only for this)
     std::vector<u8> ids;
@@ -362,7 +351,7 @@ Stage::Impl::Impl() {
     for (u32 i = 0; i < n_files; i++)
         files += guest::load32(guest::load32(guest::load32(res + 0xC) + 4 * i) + 0x10);
     f32 dx = cam_pos.x - cam_target.x, dy = cam_pos.y - cam_target.y, dz = cam_pos.z - cam_target.z;
-    u32 free_after = heap_free(&heap);
+    u32 free_after = g3d::heap_free(&heap);
     guest::log("soundplayer: stage: %u Miis, table x%.2f, camera %.0f away; memory: block %u, set %u, "
                "Mii model %u, %u animation files %u, Mii shadow %u, actor slots %u x %u; heap %s: %u bytes "
                "taken, %u free",
@@ -386,7 +375,7 @@ Stage::Impl::~Impl() {
     if (block)
         g::operator_delete(block);
     std::string heap;
-    u32 free_after = heap_free(&heap);
+    u32 free_after = g3d::heap_free(&heap);
     guest::log("soundplayer: stage: gone; heap %s: %u bytes free", heap.c_str(), (unsigned)free_after);
 }
 
@@ -619,7 +608,7 @@ void Stage::Impl::choose_dances() {
     static const bool trace = std::getenv("NOMA_SP_BEATS") != nullptr;
     if (trace) {
         std::string heap;
-        u32 free = heap_free(&heap);
+        u32 free = g3d::heap_free(&heap);
         guest::log("soundplayer: stage: dances for phrase %d (heap %s: %u bytes free)", phrase, heap.c_str(),
                    (unsigned)free);
     }
