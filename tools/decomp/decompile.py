@@ -73,8 +73,9 @@ NATIVE_NAMES = {
     # thread spent half its time invalidating stream buffers line by line on the 3DS)
     "DCInvalidateRange", "DCFlushRangeNoSync", "DCZeroRange", "ICInvalidateRange", "DCStoreRangeNoSync",
     # ---- the engine: SDK functions replaced by native 3DS code (engine/)
-    # engine/os: interrupt control and the clock
+    # engine/os: interrupt control and the clock; the CRC-16 the save file is checked with
     "OSDisableInterrupts", "OSEnableInterrupts", "OSRestoreInterrupts", "OSGetTime", "OSGetTick",
+    "OSCalcCRC16",
     # engine/cw: CodeWarrior's 64-bit integer helpers
     "__div2u", "__div2i", "__mod2u", "__mod2i", "__shl2i",
     # engine/cx: the SDK's streaming decompression (the loaders' hottest code)

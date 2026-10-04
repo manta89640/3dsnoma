@@ -68,6 +68,7 @@ set(ENGINE_SOURCES
   engine/math/mtx.cpp
   engine/math/nw4r_math.cpp
   engine/math/tables.cpp
+  engine/os/crc.cpp
   engine/os/interrupts.cpp
   engine/os/mutex.cpp
   engine/os/time.cpp

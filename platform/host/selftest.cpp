@@ -993,6 +993,39 @@ static void selftest_fill() {
     log("selftest fill: %d fills, %s", cases, bad ? "MISMATCH" : "ok");
 }
 
+// OSCalcCRC16 (engine/os/crc.cpp, a byte at a time) against the SDK's loop it replaces (half a byte
+// at a time through the DOL's table of 16): random blocks of 0 B to 1 MB at any alignment, and the
+// channel's save file size
+static void selftest_crc() {
+    axref::Rng rnd{1616};
+    const u32 base = 0x90200000;
+    auto reference = [](u32 p, u32 n) {
+        u32 c = 0;
+        for (u32 i = 0; i < n; i++) {
+            u32 b = load8(p + i);
+            c = (c >> 4) ^ load16(GA___OSCRC16Table + ((c ^ b) & 15) * 2);
+            c = (c >> 4) ^ load16(GA___OSCRC16Table + ((c ^ (b >> 4)) & 15) * 2);
+        }
+        return c & 0xFFFF;
+    };
+    int bad = 0, cases = 0;
+    std::vector<u8> d;
+    for (int t = 0; t < 400 && bad < 5; t++, cases++) {
+        u32 n = t == 0 ? 0x77FF8 : t % 50 == 0 ? rnd() % 0x100000 : t % 5 == 0 ? rnd() % 8 : rnd() % 20000;
+        u32 at = base + rnd() % 64;
+        d.resize(n);
+        for (u8& b : d)
+            b = (u8)rnd();
+        write_g(at, d.data(), n);
+        u32 want = reference(at, n), got = g::OSCalcCRC16(at, n);
+        if (want != got) {
+            bad++;
+            log("selftest crc: %u bytes at %08X: %04X, the loop %04X", n, at, got, want);
+        }
+    }
+    log("selftest crc: %d blocks, %s", cases, bad ? "MISMATCH" : "ok");
+}
+
 bool run_selftest(const std::string& name) {
     g_sp = 0x81710000;
     if (name == "aes")
@@ -1017,6 +1050,8 @@ bool run_selftest(const std::string& name) {
         selftest_cx();
     else if (name == "fill")
         selftest_fill();
+    else if (name == "crc")
+        selftest_crc();
     else if (name == "all") {
         selftest_rfl();
         selftest_time();
@@ -1030,6 +1065,7 @@ bool run_selftest(const std::string& name) {
         selftest_axframe();
         selftest_cx();
         selftest_fill();
+        selftest_crc();
     }
     else
         return false;
