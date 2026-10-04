@@ -200,7 +200,7 @@ int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half
     In prev;
     prev.kind = In::SRC;
     prev.src = SRC_PREVIOUS;
-    prev.op = alpha ? OP_A_SRC_ALPHA : OP_RGB_SRC_COLOR;
+    prev.op = alpha ? (u8)OP_A_SRC_ALPHA : (u8)OP_RGB_SRC_COLOR;
     prev.pair_prev = true;
     // lerp(a, b, c) simplified to x (single term) or a product, or a full interpolation
     In x;
@@ -229,13 +229,13 @@ int plan(In a, In b, In c, In d, bool sub, u32 bias, u32 scale, bool alpha, Half
     } else if (is_zero(b, alpha)) {
         // a * (1 - c)
         shape = PRODUCT, p0 = a, p1 = c;
-        p1.op = alpha ? (p1.op == OP_A_SRC_ALPHA ? OP_A_ONE_MINUS_SRC_ALPHA : p1.op)
-                      : (p1.op == OP_RGB_SRC_COLOR ? OP_RGB_ONE_MINUS_SRC_COLOR : OP_RGB_ONE_MINUS_SRC_ALPHA);
+        p1.op = alpha ? (p1.op == OP_A_SRC_ALPHA ? (u8)OP_A_ONE_MINUS_SRC_ALPHA : p1.op)
+                      : (p1.op == OP_RGB_SRC_COLOR ? (u8)OP_RGB_ONE_MINUS_SRC_COLOR : (u8)OP_RGB_ONE_MINUS_SRC_ALPHA);
         if (p1.kind == In::CONST) {  // 1 - constant
             u32 v = p1.value;
             p1.value = (255 - (v & 255)) | (255 - ((v >> 8) & 255)) << 8 | (255 - ((v >> 16) & 255)) << 16 |
                        (255 - (v >> 24)) << 24;
-            p1.op = alpha ? OP_A_SRC_ALPHA : OP_RGB_SRC_COLOR;
+            p1.op = alpha ? (u8)OP_A_SRC_ALPHA : (u8)OP_RGB_SRC_COLOR;
         }
     } else {
         shape = LERP;
@@ -358,7 +358,7 @@ void apply_half(CombinerStage& st, const Half& h, bool alpha) {
             // of a constant one... use the constant with an operand that gives 0: there is
             // none, so a zero input only appears where the function ignores it
             src[i] = SRC_CONSTANT;
-            ops[i] = alpha ? OP_A_SRC_ALPHA : OP_RGB_SRC_COLOR;
+            ops[i] = alpha ? (u8)OP_A_SRC_ALPHA : (u8)OP_RGB_SRC_COLOR;
         }
     }
     if (alpha)

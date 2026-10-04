@@ -6,6 +6,7 @@
 //   0x20-0x38   LOAD_INDX_A-D XF memory from the CP arrays 12-15: index << 16 | (n - 1) << 12 | addr
 //   0x40 a s    CALL_DL       execute the display list at physical a, s bytes
 //   0x44, 0x48  (metrics), INVALIDATE_VTX_CACHE
+//   0x50 id32   (ours)        a native draw: GxRenderer::native(id) (engine/g3d/native_draw.h)
 //   0x61 v32    LOAD_BP_REG   register in the top byte, 24-bit value
 //   0x80-0xBF   draw          primitive in bits 3-7, vertex format in bits 0-2; u16 count; vertices
 #include <cstdio>
@@ -33,11 +34,11 @@ static u32 s_bp_mask = 0xFFFFFF;
 
 // statistics for NOMA_DEBUG_GX
 struct GxStats {
-    u32 draws, vertices, bp, cp, xf, dl, copies, finish, tokens, unknown;
+    u32 draws, vertices, bp, cp, xf, dl, copies, finish, tokens, unknown, native;
 };
 static GxStats s_stats;
 GxDecodeCounts gx_decode_counts() {
-    return {s_stats.draws, s_stats.vertices, s_stats.bp, s_stats.cp, s_stats.xf, s_stats.dl};
+    return {s_stats.draws, s_stats.vertices, s_stats.bp, s_stats.cp, s_stats.xf, s_stats.dl, s_stats.native};
 }
 static bool s_debug = getenv("NOMA_DEBUG_GX") != nullptr;
 
@@ -295,6 +296,16 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
         case 0x44:
         case 0x48:
             len = 1;
+            break;
+        case 0x50:  // a native draw (ours)
+            if (left < 5)
+                return done;
+            s_stats.native++;
+            {
+                NOMA_PROF_SCOPE("(gx native)");
+                s_renderer->native(be32(q + 1));
+            }
+            len = 5;
             break;
         case 0x61: {
             if (left < 5)

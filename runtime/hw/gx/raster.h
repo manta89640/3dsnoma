@@ -8,7 +8,26 @@ class SoftRenderer : public GxRenderer {
 public:
     void draw(u32 prim, u32 vat, u32 count, const u8* data) override;
     void efb_copy(u32 value) override;
+    // a native draw: the registered backend draws into the EFB (gx_host_efb), at this point of the
+    // stream (nothing is cached here between draws: every draw reads the registers again)
+    void native(u32 id) override;
 };
+
+// The EFB for native draws (engine/g3d's software backend) drawing beside GX's, into the same
+// pixels and depth: colour (R in bits 0-7 ... A in 24-31), depth (24 bits, 0 near ... 0xFFFFFF far,
+// as GX writes it), the size, and what the registers say now: the scissor (inclusive EFB pixels,
+// the scissor offset applied, clamped to the EFB), the offset to subtract from viewport-transformed
+// x and y (the scissor offset: raster.cpp's to_screen), and the pixel format (BP 0x43 bits 0-2:
+// 0 RGB8 (alpha not kept), 1 RGBA6, 2 RGB565).
+struct HostEfb {
+    u32* color;
+    u32* depth;
+    u32 width, height;
+    s32 scissor_left, scissor_top, scissor_right, scissor_bottom;
+    f32 x_offset, y_offset;
+    u32 pixel_format;
+};
+HostEfb gx_host_efb();
 
 // an EFB copy as the BP registers describe it when the copy command (BP 0x52) is written
 struct EfbCopy {

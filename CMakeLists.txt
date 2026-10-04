@@ -60,7 +60,13 @@ set(ENGINE_SOURCES
   engine/audio/ax_render.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
+  engine/g3d/anim.cpp
   engine/g3d/g3d.cpp
+  engine/g3d/material.cpp
+  engine/g3d/native_draw.cpp
+  engine/g3d/package.cpp
+  engine/g3d/texture.cpp
+  engine/g3d/world.cpp
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
   engine/lyt/quad.cpp
