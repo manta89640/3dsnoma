@@ -219,7 +219,8 @@ def snd_diff(rev, seeds=200):
     with tempfile.TemporaryDirectory() as out:
         old_root = os.path.join(out, "old")
         os.makedirs(os.path.join(old_root, "engine", "snd"))
-        for f in ("voice.cpp", "ax_voice.cpp", "tables.cpp", "voice.h", "ax_voice.h", "guest_obj.h", "tables.h"):
+        for f in ("voice.cpp", "ax_voice.cpp", "channel.cpp", "tables.cpp", "voice.h", "ax_voice.h", "guest_obj.h",
+                  "tables.h"):
             data = subprocess.run(["git", "-C", ROOT, "show", "%s:engine/snd/%s" % (rev, f)], capture_output=True).stdout
             open(os.path.join(old_root, "engine", "snd", f), "wb").write(data)
         builds = []
@@ -227,24 +228,35 @@ def snd_diff(rev, seeds=200):
             d = os.path.join(out, name + "_build")
             os.makedirs(d)
             srcs = ["tools/armbench/snd_bench.cpp"] + [os.path.relpath(os.path.join(root, "engine", "snd", f), ROOT)
-                                                       for f in ("voice.cpp", "ax_voice.cpp", "tables.cpp")]
-            builds.append(Machine(build(d, srcs, ("snd_random",)), ("snd_random",)))
-        bad = []
+                                                       for f in ("voice.cpp", "ax_voice.cpp", "channel.cpp", "tables.cpp")]
+            builds.append(Machine(build(d, srcs, ("snd_random", "chan_random")), ("snd_random", "chan_random")))
+        bad, bad_ch = [], []
         for seed in range(1, seeds + 1):
             a, b = (m.call("snd_random", seed, 6 + seed % 10, 12) for m in builds)
             if a != b:
                 bad.append(seed)
-        print("engine/snd against %s: %d random scenarios (6-15 voices, 12 frames each): %s" % (
-            rev, seeds, "the same" if not bad else "DIFFERENT in seeds %s" % bad[:10]))
+            a, b = (m.call("chan_random", seed, 6 + seed % 10, 12) for m in builds)
+            if a != b:
+                bad_ch.append(seed)
+        print("engine/snd against %s: %d random scenarios (6-15 voices, 12 frames each): %s; with channels: %s" % (
+            rev, seeds, "the same" if not bad else "DIFFERENT in seeds %s" % bad[:10],
+            "the same" if not bad_ch else "DIFFERENT in seeds %s" % bad_ch[:10]))
+        bad += bad_ch
         sys.exit(1 if bad else 0)
 
 
 def bench_snd(counts):
     """nw4r::snd's voice update (tools/armbench/snd_bench.cpp: engine/snd's UpdateAllVoices, every
-    voice recalculated as the game's player makes it each frame): per voice, by voice count"""
+    voice recalculated as the game's player makes it each frame) and channel update (Channel::Update
+    for each, with its envelope, LFO and the voice setters): per voice or channel, by count"""
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out, ("tools/armbench/snd_bench.cpp", "engine/snd/voice.cpp", "engine/snd/ax_voice.cpp",
-                                "engine/snd/tables.cpp"), ("snd",)), ("snd",))
+                                "engine/snd/channel.cpp", "engine/snd/tables.cpp"), ("snd", "chan")), ("snd", "chan"))
+        for n in counts:
+            ins = (m.instructions("chan", n, 12, 0) - m.instructions("chan", n, 4, 0)) / 8
+            cyc = (m.cycles("chan", n, 12, 0) - m.cycles("chan", n, 4, 0)) / 8
+            print("%3d channels: %7.0f ARM instructions, %7.0f estimated ARM11 cycles a frame (%.0f a channel); "
+                  "state hash %08X" % (n, ins, cyc, cyc / n, m.call("chan", n, 6, 1)), flush=True)
         for n in counts:  # (frames 4 to 12: the mixes have reached their targets, as in the game)
             ins = (m.instructions("snd", n, 12, 0) - m.instructions("snd", n, 4, 0)) / 8
             cyc = (m.cycles("snd", n, 12, 0) - m.cycles("snd", n, 4, 0)) / 8

@@ -48,6 +48,13 @@ u32 nw4r_snd_detail_AxManager_GetInstance(u32, u32, u32, u32, u32, u32, u32, u32
                                           f64) {
     return AXMAN;
 }
+// (what a channel calls when it ends: the scenarios' channels don't)
+void nw4r_snd_detail_Voice_Stop(u32) {}
+u32 nw4r_snd_detail_Voice_Free(u32) { return 0; }
+u32 nw4r_snd_detail_ChannelManager_GetInstance(void) { return 0; }
+u32 nw4r_ut_detail_LinkListImpl_Erase(u32, u32) { return 0; }
+u32 nw4r_snd_detail_PoolImpl_FreeImpl(u32, u32) { return 0; }
+void nw4r_snd_detail_ChannelManager_UpdateAllChannel(u32 manager);
 u64 nw4r_snd_detail_VoiceManager_UpdateAllVoices(u32, u32, u32, u32, u32, u32, u32, u32, f64, f64, f64, f64, f64,
                                                  f64, f64, f64);
 }  // namespace g
@@ -207,6 +214,107 @@ extern "C" u32 snd(u32 voices, u32 frames, u32 hash) {
         g::nw4r_snd_detail_VoiceManager_UpdateAllVoices(MANAGER, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         for (u32 i = 0; hash && i < 0x30000; i++)  // (the voices, AX voices and PBs: what changed)
             h = (h ^ s_mem1[VOICES - 0x80000000u + i]) * 16777619u;
+    }
+    return h;
+}
+
+// `channels` channels like a sequence's notes (an envelope in its sustain, one in three with an LFO
+// on the pitch, panned, a fixed volume), each driving a voice like snd()'s, `frames` frames of
+// ChannelManager::UpdateAllChannel; with `hash`, an FNV-1a hash of the channels and voices
+extern "C" u32 chan(u32 channels, u32 frames, u32 hash) {
+    snd(channels, 0, 0);  // the voices
+    const u32 CHANNELS = 0x80088000, CH_SIZE = 0x100, CM = 0x80087000;
+    memset(s_mem1 + (CM - 0x80000000u), 0, 0x1000 + CH_SIZE * channels);
+    u32 head = CM + 8, prev = head;
+    for (u32 i = 0; i < channels; i++) {
+        u32 c = CHANNELS + CH_SIZE * i;
+        st32(c + 0x00, 3);                                        // envelope: sustain
+        stf(c + 0x04, -60.0f - 4.0f * (f32)i);                    // its level (0.1 dB)
+        stf(c + 0x08, 0.5f), stf(c + 0x0C, 1.0f), stf(c + 0x10, 0.9f);
+        st8(c + 0x14, 100);
+        if (i % 3 == 0)                                          // the LFO, on the pitch
+            stf(c + 0x1C, 0.3f), stf(c + 0x1C + 4, 6.0f), st8(c + 0x1C + 0xC, 1), stf(c + 0x1C + 0x14, 0.1f * (f32)i);
+        st8(c + 0x36, 1);                                         // active
+        stf(c + 0x40, 1.0f), stf(c + 0x44, 1.0f), stf(c + 0x48, -0.5f + 0.1f * (f32)i);
+        stf(c + 0x5C, 1.0f);                                      // main out volume
+        for (u32 k = 0; k < 4; k++)
+            stf(c + 0x70 + 4 * k, 1.0f);
+        stf(c + 0x90, 0.8f), stf(c + 0x94, 0.1f), stf(c + 0x9C, 1.0f);
+        st8(c + 0xA1, 255);                                       // no silence fade
+        st32(c + 0xA8, 60 + i % 12), st32(c + 0xAC, 60);          // key, original key
+        st32(c + 0xD0, VOICES + VOICE_SIZE * i);                  // its voice
+        st32(prev, c + 0xD8), prev = c + 0xD8;
+    }
+    st32(prev, head);
+    u32 h = 2166136261u;
+    for (u32 f = 0; f < frames; f++) {
+        g::nw4r_snd_detail_ChannelManager_UpdateAllChannel(CM);
+        for (u32 i = 0; hash && i < 0x30000; i++)
+            h = (h ^ s_mem1[VOICES - 0x80000000u + i]) * 16777619u;
+        for (u32 i = 0; hash && i < CH_SIZE * channels; i++)
+            h = (h ^ s_mem1[CHANNELS - 0x80000000u + i]) * 16777619u;
+    }
+    return h;
+}
+
+// a random scenario for comparing two versions of the channel update (armbench.py --snd-diff):
+// every envelope state, LFOs with delays, depths, ranges and targets (pitch, volume, pan), sweeps,
+// silence fades, keys and pitch offsets far out (octaves past a float's range), pauses, channels
+// that end; then the voices' update. Returns a hash of the channels and voices after each frame.
+extern "C" u32 chan_random(u32 seed, u32 channels, u32 frames) {
+    snd_random(seed, channels, 0);  // random voices
+    Rng r{seed * 7 + 1};
+    const u32 CHANNELS = 0x80088000, CH_SIZE = 0x100, CM = 0x80087000;
+    memset(s_mem1 + (CM - 0x80000000u), 0, 0x1000 + CH_SIZE * channels);
+    auto params = [&](u32 c) {
+        st32(c + 0x00, r() % 5);
+        stf(c + 0x04, r() % 8 ? -r.f(0.0f, 900.0f) : r.f(-1000.0f, 50.0f));
+        stf(c + 0x08, r.f(0.0f, 3.0f)), stf(c + 0x0C, r.f(0.0f, 5.0f)), stf(c + 0x10, r() % 6 ? r.f(0.5f, 1.0f) : 0.0f);
+        st8(c + 0x14, (u8)(r() % 128)), st16(c + 0x16, (u16)(r() % 40)), st16(c + 0x18, (u16)(r() % 40));
+        stf(c + 0x1C, r() % 2 ? 0.0f : r.f(0.0f, 1.0f)), stf(c + 0x20, r.f(0.0f, 20.0f));
+        st32(c + 0x24, r() % 3 ? 0 : r() % 30), st8(c + 0x28, (u8)(r() % 16)), st32(c + 0x2C, r() % 40);
+        stf(c + 0x30, r.f(-0.5f, 1.5f));
+        st8(c + 0x34, (u8)(r() % 3)), st8(c + 0x35, r() % 8 == 0), st8(c + 0x36, r() % 16 ? 1 : 0);
+        st8(c + 0x38, r() % 2), st8(c + 0x3C, (u8)(r() % 4 ? 0 : r() % 140));
+        stf(c + 0x40, r.f(0.0f, 1.5f)), stf(c + 0x44, r.f(0.25f, 4.0f)), stf(c + 0x48, r.f(-1.5f, 1.5f));
+        stf(c + 0x4C, r.f(-0.5f, 2.5f)), stf(c + 0x50, r.f(-1.2f, 0.2f));
+        st32(c + 0x58, 1 | (r() % 4 ? 0 : r() & 0x1E));
+        stf(c + 0x5C, r.f(0.0f, 1.5f)), stf(c + 0x60, r.f(-1.0f, 0.5f));
+        for (u32 k = 0; k < 3; k++)
+            stf(c + 0x64 + 4 * k, r() % 2 ? 0.0f : r.f(-0.2f, 1.2f));
+        for (u32 k = 0; k < 4; k++)
+            stf(c + 0x70 + 4 * k, r.f(0.0f, 1.2f));
+        // the pitch offset (semitones): as a rule near 0; now and then far out, or at the octaves where
+        // 2^octave turns subnormal (-127..-149 octaves) or overflows (128 on)
+        static const f32 lo[4] = {-3e6f, -1800.0f, 1500.0f, -24.0f}, hi[4] = {3e6f, -1490.0f, 1600.0f, 24.0f};
+        u32 k = r() % 8 ? 3 : r() % 3;
+        stf(c + 0x80, r.f(lo[k], hi[k]));
+        stf(c + 0x84, r() % 2 ? 0.0f : r.f(-12.0f, 12.0f));
+        st32(c + 0x88, r() % 50), st32(c + 0x8C, r() % 60);
+        stf(c + 0x90, r.f(0.0f, 1.5f)), stf(c + 0x94, r.f(-1.5f, 1.5f)), stf(c + 0x98, r.f(-0.5f, 2.5f));
+        stf(c + 0x9C, r.f(0.25f, 4.0f));
+        st8(c + 0xA0, (u8)r()), st8(c + 0xA1, (u8)r()), st16(c + 0xA2, (u16)(r() % 4 ? 0 : r() % 60));
+        st16(c + 0xA4, (u16)(r() % 60));
+        st32(c + 0xA8, r() % 128), st32(c + 0xAC, r() % 128);
+        st32(c + 0xB4, r() % 2), st32(c + 0xB8, r() % 11);
+    };
+    u32 head = CM + 8, prev = head;
+    for (u32 i = 0; i < channels; i++) {
+        u32 c = CHANNELS + CH_SIZE * i;
+        params(c);
+        st32(c + 0xD0, r() % 16 ? VOICES + VOICE_SIZE * i : 0);
+        st32(prev, c + 0xD8), prev = c + 0xD8;
+    }
+    st32(prev, head);
+    u32 h = 2166136261u;
+    for (u32 f = 0; f < frames; f++) {
+        for (u32 i = 0; i < channels; i++)
+            if (r() % 6 == 0)
+                params(CHANNELS + CH_SIZE * i);
+        g::nw4r_snd_detail_ChannelManager_UpdateAllChannel(CM);
+        g::nw4r_snd_detail_VoiceManager_UpdateAllVoices(MANAGER, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        for (u32 i = 0x10000; i < 0x90000 + CH_SIZE * channels; i++)
+            h = (h ^ s_mem1[i]) * 16777619u;
     }
     return h;
 }

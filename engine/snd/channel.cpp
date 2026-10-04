@@ -199,6 +199,15 @@ void finish(GuestObj c) {
 
 }  // namespace
 
+// 2^n as a float, exactly as ldexpf(1.0f, n) rounds it: normal down to 2^-126, subnormal down to
+// 2^-149, 0 below that, infinity above 2^127
+inline f32 pow2f(s32 n) {
+    u32 bits = n > 127 ? 0x7F800000u : n >= -126 ? (u32)(n + 127) << 23 : n >= -149 ? 1u << (n + 149) : 0;
+    f32 f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
 // Util::CalcPitchRatio: the frequency ratio of a pitch in 1/256 semitones
 f32 calc_pitch_ratio(s32 pitch) {
     u32 p = (u32)pitch;
@@ -213,8 +222,9 @@ f32 calc_pitch_ratio(s32 pitch) {
         octave += (s32)n;
         p -= n * 0xC00;
     }
-    // 2^octave (the original multiplies it out by 2 or 0.5: exact, and the same at the ends)
-    f32 ratio = ldexpf(1.0f, octave);
+    // 2^octave (the original multiplies it out by 2 or 0.5: exact, and the same at the ends): what
+    // ldexpf(1.0f, octave) gives, made from its bits (ldexpf is a library call of ~120 cycles)
+    f32 ratio = pow2f(octave);
     if (u32 semitone = p >> 8)
         ratio = ratio * kSemitoneTable[semitone];
     if (u32 fine = p & 0xFF)
