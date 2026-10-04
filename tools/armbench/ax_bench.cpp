@@ -25,10 +25,12 @@ namespace {
 namespace ref = engine::audio::reference;
 
 // guest memory: the PBs at 0x80000000 on, the random voices' samples from 0x90FF8000 across the
-// page boundary at 0x91000000 (two buffers that aren't next to each other, as pages needn't be)
+// page boundary at 0x91000000 (two buffers that aren't next to each other, as pages needn't be).
+// The upper page is backed whole: a voice whose end address is skipped (an end on an ADPCM frame's
+// header) reads on past the data, and must find the same bytes there for both renderers
 const u32 DATA = 0x90FF8000, DATA_SIZE = 0x10000;
 u8 s_pbs[0x40000] __attribute__((aligned(32)));
-u8 s_lo[0x8000], s_hi[0x8000];
+u8 s_lo[0x8000], s_hi[1u << guest::PAGE_BITS];
 engine::audio::AxBuses s_bus;
 s32 s_ref_bus[12][ref::SPF];
 
@@ -85,17 +87,20 @@ extern "C" u32 count(u32 kind, u32 frames, u32 hash) {
     return h;
 }
 
+u32 g_first_bad;  // the first frame that differed, as voice * 4 + frame, plus 1 (0: none)
+
 // `voices` random voices, four frames each, rendered and defined: the frames that differ
 extern "C" u32 exact(u32 voices) {
+    g_first_bad = 0;
     map();
     const u32 pb_ref = 0x80000100, pb_nat = 0x80000400;
     ref::Rng rnd{12345};
-    for (u32 i = 0; i < DATA_SIZE; i++)
-        guest::store8(DATA + i, (u8)rnd());
+    ref::test_data(rnd, DATA, DATA_SIZE);
     u32 bad = 0;
     for (u32 t = 0; t < voices; t++) {
         u16 w[0xD6 / 2];
-        ref::random_voice(rnd, w, DATA, DATA_SIZE);
+        if (!ref::edge_voice(t, w, DATA))
+            ref::random_voice(rnd, w, DATA, DATA_SIZE);
         for (u32 k = 0; k < 0xD6 / 2; k++)
             st16(pb_ref + 2 * k, w[k]), st16(pb_nat + 2 * k, w[k]);
         for (u32 f = 0; f < 4; f++) {
@@ -109,6 +114,8 @@ extern "C" u32 exact(u32 voices) {
             bool same = memcmp(s_ref_bus, s_bus, sizeof(s_bus)) == 0;
             for (u32 k = 0; k < 0xD6 && same; k += 2)
                 same = guest::load16(pb_ref + k) == guest::load16(pb_nat + k);
+            if (!same && !g_first_bad)
+                g_first_bad = t * 4 + f + 1;
             bad += !same;
         }
     }

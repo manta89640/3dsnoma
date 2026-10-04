@@ -229,10 +229,6 @@ void process_voice(Pb& pb, s32 (*s_buf)[SPF]) {
     }
 }
 
-// a random voice for the tests, as PB words: every format with addresses in [data, data + size)
-// (the caller fills that with random bytes), loops and streams, every SRC type, ratios (now and
-// then more input per output than the renderer's buffer), the mixer control with every bus and
-// ramp, the envelope muted, at 1.0 or anything (ramping now and then), the filters
 struct Rng {
     u32 seed;
     u32 operator()() {
@@ -240,6 +236,71 @@ struct Rng {
         return seed >> 8;
     }
 };
+
+// the tests' sample data: random bytes, but for the first 512, runs of the extremes (PCM16
+// -32768 and 32767, PCM8 -128 and 127, 32 samples each)
+inline void test_data(Rng& rnd, u32 data, u32 data_size) {
+    for (u32 i = 0; i < data_size; i++)
+        guest::store8(data + i, (u8)rnd());
+    for (u32 i = 0; i < 512; i++)
+        guest::store8(data + i, (u8)(i < 256 ? ((i >> 6) & 1 ? (i & 1 ? 0x00 : 0x80) : (i & 1 ? 0xFF : 0x7F))
+                                             : ((i >> 5) & 1 ? 0x80 : 0x7F)));
+}
+
+// the edges of the renderer's paths, as voices (false past the last): PCM16 looping on a run of
+// -32768 or 32767 (test_data's), main L and R, every output at that value, with the envelope
+// ramping onto 0, 1.0 and just past 1.0 (where it saturates), at 1.0, above it, volumes at 1.0 and
+// just above, zero, and the converter reading exactly 511, 512 and 513 input samples
+inline bool edge_voice(u32 i, u16 (&w)[0xD6 / 2], u32 data) {
+    struct Edge {
+        bool low;      // -32768 (else 32767)
+        u16 ve;
+        s16 ved;
+        u16 vol_l, vol_r;
+        u32 ratio;
+    };
+    static const Edge edges[] = {
+        {true, 0x8001 - 95, 1, 0x8000, 0x8000, 0x10000},  // ramp onto 1.0 + 1/32768: saturates
+        {true, 0x8000 - 95, 1, 0x8000, 0x8000, 0x10000},  // onto 1.0
+        {true, 0x8000, -1, 0x8000, 0x8000, 0x10000},      // from 1.0 down
+        {true, 95, -1, 0x8000, 0x8000, 0x10000},          // onto 0
+        {true, 94, -1, 0x8000, 0x8000, 0x10000},          // past 0 (the volume wraps)
+        {false, 0x8001 - 95, 1, 0x8000, 0x8000, 0x10000},
+        {true, 0x8000, 0, 0x8000, 0x8000, 0x10000},       // at 1.0
+        {false, 0xFFFF, 0, 0x8000, 0x8000, 0x10000},      // near 2.0: saturates up
+        {true, 0xFFFF, 0, 0x8000, 0x8000, 0x10000},       // and down
+        {true, 0x8000, 0, 0x8000, 0x8001, 0x10000},       // a volume just above 1.0
+        {false, 0x4000, 0, 0, 0, 0x10000},                // volumes 0
+        {true, 0x7FFF, 0, 0x8000, 0x7FFF, 349525},        // 511 input samples
+        {true, 0x7FFF, 0, 0x8000, 0x7FFF, 349526},        // 512: the most the buffer holds
+        {false, 0x7FFF, 0, 0x7FFF, 0x8000, 350208},       // 513
+    };
+    if (i >= sizeof(edges) / sizeof(edges[0]))
+        return false;
+    const Edge& e = edges[i];
+    for (u16& x : w)
+        x = 0;
+    auto set32 = [&](u32 off, u32 v) { w[off / 2] = (u16)(v >> 16), w[off / 2 + 1] = (u16)v; };
+    u32 run = (data & 0x1FFFFFFF) / 2 + (e.low ? 32 : 0);  // 32 samples of the value
+    w[0x10 / 2] = 1, w[0x70 / 2] = 0x0A, w[0x6E / 2] = 1;
+    set32(0x72, run), set32(0x76, run + 31), set32(0x7A, run);
+    set32(0x0C, 3);
+    w[0x14 / 2] = e.vol_l, w[0x18 / 2] = e.vol_r;
+    w[0x6A / 2] = e.ve, w[0x6C / 2] = (u16)e.ved;
+    set32(0xA6, e.ratio);
+    for (u32 k = 0; k < 4; k++)
+        w[0xAC / 2 + k] = (u16)(e.low ? -32768 : 32767);
+    return true;
+}
+
+// a random voice for the tests, as PB words: every format with addresses in [data, data + size)
+// (the caller fills that with random bytes), loops and streams, every SRC type, ratios (now and
+// then more input per output than the renderer's buffer), the mixer control with every bus and
+// ramp, the envelope muted, at 1.0 or anything (ramping now and then), the filters. Half of them
+// are shaped like the game's voices instead, which the renderer takes a path of its own for: main
+// L and R (now and then a ramp, S, aux A or one side only), volumes up to 1.0 and just above, the
+// envelope at 1.0, below, above, or ramping within 0 .. 1.0 and across its ends, the filters off
+// as a rule, ratios around the most the buffer holds
 inline void random_voice(Rng& rnd, u16 (&w)[0xD6 / 2], u32 data, u32 data_size) {
     for (u16& x : w)
         x = 0;
@@ -286,6 +347,50 @@ inline void random_voice(Rng& rnd, u16 (&w)[0xD6 / 2], u32 data, u32 data_size) 
     w[0xC2 / 2] = rnd() % 3 == 0;
     for (u32 k = 1; k < 10; k++)
         w[0xC2 / 2 + k] = (u16)((s16)(rnd() % 0x6000) - 0x3000);
+    if (rnd() % 2)
+        return;
+    // like the game's
+    w[0x08 / 2] = rnd() % 8 ? rnd() % 2 : 2;
+    static const u32 mcs[8] = {3, 3, 3, 3, 3 | 4, 1, 3 | 8, 0x30003};
+    set32(0x0C, rnd() % 4 ? 3 : mcs[rnd() % 8]);
+    auto vol = [&]() -> u16 {
+        u32 k = rnd() % 16;
+        return (u16)(k == 0 ? 0 : k == 1 ? 0x8000 : k == 2 ? 0x8001 + rnd() % 0x7FFF : k == 3 ? 1 : 1 + rnd() % 0x8000);
+    };
+    w[0x14 / 2] = vol(), w[0x18 / 2] = vol();
+    w[0xBA / 2] = rnd() % 10 == 0, w[0xC2 / 2] = rnd() % 10 == 0;
+    u32 kind = rnd() % 8;
+    s32 env = kind == 0 ? 0x8000 : kind == 1 ? 1 + rnd() % 0x7FFF : kind == 2 ? 0x8001 + rnd() % 0x7FFF
+            : kind == 3 ? 0 : (s32)(rnd() % 0x8001);
+    s32 ved = 0;
+    if (kind >= 4) {  // ramping: the last sample's volume (95 steps on) within 0 .. 1.0, exactly on
+                      // or just past an end of that, or anywhere
+        static const s32 ends[4] = {0, 0x8000, 0x8001, -1};
+        s32 to = kind == 4 ? (s32)(rnd() % 0x8001) : kind == 5 ? ends[rnd() % 4]
+               : kind == 6 ? (s32)(rnd() % 0x10000) - 0x4000 : env + (s32)(rnd() % 191) - 95;
+        ved = (s32)(rnd() % 0x200) - 0x100;
+        if (ved == 0)
+            ved = 1;
+        env = to - 95 * ved;
+        if (env < 0 || env > 0xFFFF)
+            ved = -ved, env = to - 95 * ved;
+        if (env < 0 || env > 0xFFFF)
+            env = to < 0 ? 0 : to > 0xFFFF ? 0xFFFF : to;
+    }
+    w[0x6A / 2] = (u16)env, w[0x6C / 2] = (u16)(s16)ved;
+    if (rnd() % 4 == 0) {  // in the data's first 512 bytes: the extremes (test_data)
+        u32 n = fmt == 0x00 ? 1024 : fmt == 0x0A ? 256 : 512;
+        u32 at = base + rnd() % (n / 2), len2 = 16 + rnd() % (n / 2 - 16);
+        if (fmt == 0x00)
+            at = (at & ~15u) + 2;
+        set32(0x72, at + rnd() % len2), set32(0x76, at + len2), set32(0x7A, at);
+    }
+    if (rnd() % 4 == 0) {  // just inside or outside the most input the buffer holds (512 samples)
+        u32 pos = w[0xAA / 2];
+        set32(0xA6, (((512u << 16) - pos) / 96) + rnd() % 5 - 2);
+    } else if (rnd() % 2) {
+        set32(0xA6, 0x8000 + rnd() % 0x28000);
+    }
 }
 
 }  // namespace engine::audio::reference

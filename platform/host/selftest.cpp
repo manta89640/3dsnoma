@@ -383,12 +383,12 @@ static void selftest_ax() {
     // the samples straddle a 16 MB page boundary (the renderer reads RAM a page at a time)
     const u32 data = 0x90FF8000, data_size = 0x10000, pb_ref = 0x81700000, pb_nat = 0x81700400;
     axref::Rng rnd{12345};
-    for (u32 i = 0; i < data_size; i++)
-        store8(data + i, (u8)rnd());
+    axref::test_data(rnd, data, data_size);
     int bad = 0, frames = 0;
     for (int t = 0; t < 4000 && bad < 5; t++) {
         u16 w[0xD6 / 2];
-        axref::random_voice(rnd, w, data, data_size);
+        if (!axref::edge_voice(t, w, data))
+            axref::random_voice(rnd, w, data, data_size);
         u16 fmt = w[0x70 / 2];
         for (u32 k = 0; k < 0xD6 / 2; k++)
             store16(pb_ref + 2 * k, w[k]), store16(pb_nat + 2 * k, w[k]);

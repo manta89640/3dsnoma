@@ -11,6 +11,9 @@ build's code generation flags, then
     four frames each: the 3DS-only paths (the ARM11's DSP instructions), which NOMA_SELFTEST=ax on
     the host can't reach.
 --lines KIND: instead, where voice KIND's instructions go, per source line.
+--cycles: with the instruction counts, an estimate of ARM11 cycles (tools/armbench/arm11_timing.py:
+the ARM11 MPCore TRM's issue cycles, result latencies and interlocks, the branch predictor; every
+access an L1 hit), with --lines per source line too.
 --cx: instead, engine/cx/uncompress.cpp's LZ and Huffman decoders (tools/armbench/cx_bench.cpp):
 instructions per output byte, the natives' against the streaming code they started from
 (engine/cx/cx_reference.h), and whether their outputs agree; on compressed files given (from your
@@ -27,6 +30,9 @@ import os
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import arm11_timing  # noqa: E402
 
 from elftools.elf.elffile import ELFFile
 from unicorn import UC_ARCH_ARM, UC_HOOK_BLOCK, UC_HOOK_CODE, UC_MODE_ARM, Uc
@@ -56,7 +62,7 @@ def build(out, sources=("tools/armbench/ax_bench.cpp", "engine/audio/ax_render.c
 
 
 class Machine:
-    def __init__(self, elf_path, names=("count", "exact")):
+    def __init__(self, elf_path, names=("count", "exact", "g_first_bad")):
         self.elf_path = elf_path
         elf = ELFFile(open(elf_path, "rb"))
         self.uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
@@ -87,13 +93,31 @@ class Machine:
         self.uc.hook_del(hook)
         return n[0]
 
-    def lines(self, kind, frames=16):
-        hits = collections.Counter()
-        hook = self.uc.hook_add(UC_HOOK_CODE, lambda uc, addr, size, _: hits.update((addr,)))
-        self.call("count", kind, frames, 0)
-        setup = collections.Counter()
+    def cycles(self, fn, *args):
+        """estimated ARM11 cycles for a call (arm11_timing.py)"""
+        self.uc.ctl_flush_tb()
+        model, hook = arm11_timing.attach(self.uc)
+        self.call(fn, *args)
         self.uc.hook_del(hook)
-        hook = self.uc.hook_add(UC_HOOK_CODE, lambda uc, addr, size, _: setup.update((addr,)))
+        return model.cycles
+
+    def lines(self, kind, frames=16, cycles=False):
+        def counted():
+            # instructions per address, or with `cycles` the cycles each address's instructions took
+            hits = collections.Counter()
+            if not cycles:
+                return hits, self.uc.hook_add(UC_HOOK_CODE, lambda uc, addr, size, _: hits.update((addr,)))
+            model = arm11_timing.Arm11Timing()
+
+            def step(uc, addr, size, _):
+                t0 = model.cycles
+                model.step(uc, addr)
+                hits[addr] += model.cycles - t0
+            return hits, self.uc.hook_add(UC_HOOK_CODE, step)
+        hits, hook = counted()
+        self.call("count", kind, frames, 0)
+        self.uc.hook_del(hook)
+        setup, hook = counted()
         self.call("count", kind, 0, 0)
         self.uc.hook_del(hook)
         hits.subtract(setup)
@@ -159,14 +183,16 @@ def main():
     ap.add_argument("--lines", type=int, metavar="KIND")
     ap.add_argument("--voices", type=int, default=1000)
     ap.add_argument("--cx", nargs="*", metavar="FILE")
+    ap.add_argument("--cycles", action="store_true")
     args = ap.parse_args()
     if args.cx is not None:
         return bench_cx(args.cx)
     with tempfile.TemporaryDirectory() as out:
         m = Machine(build(out))
         if args.lines is not None:
-            per = m.lines(args.lines)
-            print("%s: %.0f instructions a frame" % (KINDS[args.lines], sum(per.values())))
+            per = m.lines(args.lines, cycles=args.cycles)
+            print("%s: %.0f %s a frame" % (KINDS[args.lines], sum(per.values()),
+                                          "estimated ARM11 cycles" if args.cycles else "instructions"))
             for name, n in sorted(per.items(), key=lambda x: -x[1])[:40]:
                 line = ""
                 if name.startswith("ax_render.cpp:"):
@@ -176,10 +202,19 @@ def main():
             return
         for kind, name in enumerate(KINDS):
             n = (m.instructions("count", kind, 64, 0) - m.instructions("count", kind, 0, 0)) / 64
-            print("%-13s %6.0f ARM instructions a frame" % (name, n))
+            if not args.cycles:
+                print("%-13s %6.0f ARM instructions a frame" % (name, n))
+                continue
+            c = (m.cycles("count", kind, 64, 0) - m.cycles("count", kind, 0, 0)) / 64
+            print("%-13s %6.0f ARM instructions, %6.0f estimated ARM11 cycles a frame (%.1f us at 268 MHz)" % (
+                name, n, c, c / 268.0))
         bad = m.call("exact", args.voices)
-        print("%d random voices, %d frames: %s" % (args.voices, 4 * args.voices,
-                                                    "MISMATCH in %d frames" % bad if bad else "exact"))
+        first = ""
+        if bad:
+            at = int.from_bytes(m.uc.mem_read(m.fn["g_first_bad"], 4), "little") - 1
+            first = " (the first: voice %d, frame %d)" % (at // 4, at % 4)
+        print("%d random voices, %d frames: %s%s" % (args.voices, 4 * args.voices,
+                                                      "MISMATCH in %d frames" % bad if bad else "exact", first))
         sys.exit(1 if bad else 0)
 
 
