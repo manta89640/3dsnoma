@@ -118,8 +118,12 @@ PicaShader* pica_shader_load(const void* data, size_t size) {
         size_t at = d + unif_off + 8 * i;
         u32 sym = rd32(p, at), regs = rd32(p, at + 4);
         PicaShader::Uniform u;
-        if (sym < sym_n)
-            u.name = std::string(syms + sym, strnlen(syms + sym, sym_n - sym));
+        if (sym < sym_n) {
+            size_t len = 0;
+            while (sym + len < sym_n && syms[sym + len])
+                len++;
+            u.name = std::string(syms + sym, len);
+        }
         u.reg = regs & 0xFFFF;
         s->uniforms.push_back(u);
     }
