@@ -235,3 +235,43 @@ theme (Sound Player semantics).
 - 3DS: build-3ds-rel; Azahar run ONLY after checking the user isn't running it (pgrep), SD backed up and
   restored (trap), env.txt with NOMA_INPUT for the same path + NOMA_SHOT_EVERY; logs give load time,
   memory, fps.
+
+## 8. Amendments after stage 1 (2026-10-05) — these override the sections above
+
+- **k = 10.0** Wii no Ma Mii units per island unit (research k.md: WSR's Mii = body head_set 9.70 + head
+  0.08 x 69.2 = 15.24 iu; Wii no Ma's Mii 156.6 mu at height scale 1). The package's Env carries it;
+  the player's body sizes and the camera derive from it (engine/wuhu/player.h PlayerParams::make).
+- **Environment (research env_choice/env.md, env_recommended.json):** fog 0 OFF (WSR never fogs the
+  terrain, distant islands or sky in daytime); fog 1 = ws2_common_day (PERSP_LIN 27978..65527.34,
+  #83d5ff) and it applies only to the sea materials (mt_za_water, mt_za_water_off use fog index 1);
+  the sky (WS2_common_vr) follows the eye, unfogged, no depth write, drawn first; clear colour #83d5ff;
+  lights = WS2_bic_F0_Light.plight (ground-level cycling): set 0 Map ambient #788287 + Map_Light at
+  (-30000, 48000, 60000) white; set 1 Obj ambient #877a63 + Map_Light + Obj_Light #8c795a at
+  (0, 100000, 25000); set 6 Flag ambient #bec8d2 + Flag_Light; set 8 Obj2 ambient #646464 + Map_Light.
+  The sun model (StageArc Sun/G3D) belongs in the sky.
+- **Walking (research reach/reach.md):** slope limit 50 deg (walkable normal.y >= 0.643), step ~5 iu,
+  head clearance 20, water and lava are walls, no drop higher than ~30 iu (2 Mii heights: no falling
+  into coves you can't leave). About 73% of the main island is then reachable on foot, incl. tunnels,
+  the volcano's lava chamber, the castle and the ruins. reach/warps.json holds warp points (27 warp-only:
+  Wedge Island, islets, villa cove, summit rim...; 51 at reachable landmarks): they go into the package
+  as markers of kind 3 ("warp") with Japanese names, and the exploration menu offers them.
+- **Exploration menu (replaces the bare yes/no on START/B/Home tab):** 探検をつづける / ワープ (a list of
+  places) / 部屋にもどる (then the existing はい/いいえ confirm). Warping: fade to black, place the Mii
+  at the marker, fade in, a caption with the place's name.
+- **Collision** uses a per-file x/z grid (engine/collision/kcl.h), not the KCL octree.
+- **Packages are shipped baked** (tools/wuhu/stage_wuhu.py --bake build-host/ng3d-bake): converting GX
+  textures at load on the CPU thread would race gx_pica's uploads (pica_tex.h's statics) on the GPU
+  thread. The loader refuses an unbaked package on the 3DS.
+- **Interfaces as built (stage 1):** Backend is in engine/g3d/native_draw.h (draw(const Packet&, const
+  GxView&); PacketKind DRAW/PREPARE/RELEASE; Packet::materials; MatDynamic::comb); Package::texture_image
+  for texels; World::build_packet; engine/ui/{game,lyt,art,g3d,bar_button,confirm,caption}.h are the
+  shared UI helpers; the island scene shell is engine/wuhu/scene.cpp around engine/wuhu/content.h
+  (IslandContent); music is engine/wuhu/music.h (music_boot/depart/arrive/leave, WIDE_WORLD_ID 0x1000).
+- **Music:** the user chose variant B (stately 3/4, D major 108 bpm, last section in E): its score
+  replaces tools/music/hiroi_sekai.py.
+- **Depth:** the native draws share the depth buffer with the GX path (the Mii), so both must use the
+  same depth mapping (no w-buffer for the island alone). The coplanar overlays (_blend, Kiwa: 0.03-0.4
+  iu above the terrain) need a depth offset toward the camera in the PICA backend (and the soft one).
+- **Hardware rules for PICA shaders (85):** every .out written whole (xyzw) on every path, outside
+  ifu/ifc/for; tools/check_shader_outputs.py must pass (package.sh refuses otherwise); GX_MemoryFill only
+  into VRAM; any new syscall must be in the RSF's SystemCallAccess list.
