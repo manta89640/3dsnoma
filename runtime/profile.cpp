@@ -40,6 +40,9 @@ struct Counts {
 Counts s_counts;
 Counts s_gpu_counts;    // the GPU's thread: self only, "(gpu idle)" while it waits for commands
 Counts s_audio_counts;  // the audio thread: self only, "(audio idle)" between frames
+Counts s_frame_counts;  // since the last game frame (NOMA_LOAD_STATS: what a slow frame did)
+Counts s_frame_gpu;
+bool s_frames_on;
 std::atomic_flag s_lock = ATOMIC_FLAG_INIT;
 int s_every;  // seconds between reports
 
@@ -63,12 +66,31 @@ void sample() {
     // core, this thread preempts it)
     if (s_lock.test_and_set(std::memory_order_acquire))
         return;
-    if (s_gpu_on.load(std::memory_order_relaxed))
+    if (s_gpu_on.load(std::memory_order_relaxed)) {
         sample_host(s_gpu_stack, s_gpu_counts, "(gpu idle)");
+        if (s_frames_on)
+            sample_host(s_gpu_stack, s_frame_gpu, "(gpu idle)");
+    }
     if (s_audio_on.load(std::memory_order_relaxed))
         sample_host(s_audio_stack, s_audio_counts, "(audio idle)");
     s_counts.samples++;
     s_counts.threads[s->thread]++;
+    if (s_frames_on) {
+        Counts& f = s_frame_counts;
+        f.samples++;
+        f.threads[s->thread]++;
+        if (depth == 0)
+            f.self["(no guest code)"]++;
+        else
+            f.self[names[depth - 1]]++;
+        for (u32 i = 0; i < depth; i++) {
+            bool seen = false;
+            for (u32 j = 0; j < i && !seen; j++)
+                seen = names[j] == names[i];
+            if (!seen)
+                f.total[names[i]]++;
+        }
+    }
     if (depth == 0) {
         s_counts.self["(no guest code)"]++;
     } else {
@@ -145,6 +167,36 @@ void profile_start() {
     std::thread(sampler).detach();
 #endif
     log("profile: sampling every millisecond, report every %d s", s_every);
+}
+
+// NOMA_LOAD_STATS (load_stats.cpp, at each game frame): for a slow frame, where its samples were;
+// the counts start again either way
+void profile_frame_end(bool report) {
+    if (s_every <= 0)
+        return;
+    s_frames_on = true;
+    while (s_lock.test_and_set(std::memory_order_acquire)) {
+    }
+    Counts c = std::move(s_frame_counts), gpu = std::move(s_frame_gpu);
+    s_frame_counts = Counts(), s_frame_gpu = Counts();
+    s_lock.clear(std::memory_order_release);
+    if (!report || !c.samples)
+        return;
+    auto top = [](const char* what, const std::unordered_map<const char*, u32>& m, u32 samples, int n) {
+        std::vector<std::pair<u32, const char*>> v;
+        for (auto& kv : m)
+            v.push_back({kv.second, kv.first});
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        char line[512];
+        int at = snprintf(line, sizeof(line), "lstats:   %s (%u ms):", what, samples);
+        for (int i = 0; i < n && i < (int)v.size() && at < (int)sizeof(line) - 64; i++)
+            at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %u%%", v[i].second, 100 * v[i].first / samples);
+        log("%s", line);
+    };
+    top("self ", c.self, c.samples, 8);
+    top("total", c.total, c.samples, 10);
+    if (gpu.samples)
+        top("gpu  ", gpu.self, gpu.samples, 6);
 }
 
 // from loop_poll, on the main thread

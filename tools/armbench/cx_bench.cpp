@@ -15,6 +15,8 @@ void loop_poll() { g_loop_budget = 20000; }
 u32 mmio_read(u32, int) { return 0; }
 void mmio_write(u32, u32, int) {}
 void* lookup_fn_slow(u32) { return nullptr; }
+u64 lstats_cx_begin() { return 0; }
+void lstats_cx_end(u64, bool, u32, u32) {}
 void fatal(const char*, ...) {
     for (;;) {
     }

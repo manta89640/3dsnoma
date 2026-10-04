@@ -34,14 +34,18 @@ static void mkdirs_for(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------- files
-// Writes are buffered (64 KB): the channel formats a 13 MB cache image 512 bytes at a time, and
-// on the 3DS every unbuffered write is an SD card access. Handles of the same file see each
-// other's writes: a handle flushes the others before it reads or measures the file.
+// The file system's work is done on the I/O thread (ios.cpp: host_io), in the order the requests
+// came. Writes are buffered (64 KB): on the 3DS every unbuffered write is an SD card access. Reads
+// of a file opened only to read go through a small buffer: the stdio buffer is what the card reads
+// at once, and the channel's reads are a few bytes to a few KB (a 64 KB buffer made each a 12 ms
+// card access in Azahar). Handles of the same file see each other's writes: a handle flushes the
+// others before it reads or measures the file.
 class FsFile;
 static std::vector<FsFile*> s_open_files;
 
 class FsFile : public IosHandle {
 public:
+    bool host_io() const override { return true; }
     FILE* f = nullptr;
     u32 mode = 0;
     std::string host;
@@ -168,6 +172,8 @@ void tmp_add_parents(const std::string& p) {
 
 class TmpFile : public IosHandle {
 public:
+    bool host_io() const override { return true; }  // (with the rest of the file system: in order)
+    bool in_memory() const override { return true; }
     std::shared_ptr<RamFile> file;  // (still there if it's deleted while open)
     u32 mode = 0, pos = 0;
 
@@ -235,6 +241,8 @@ bool save_host_file(const RamFile& file, const std::string& host) {
 
 }  // namespace
 
+bool fs_in_memory(const std::string& path) { return in_tmp(path); }
+
 std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* err) {
     if (in_tmp(path)) {
         auto it = s_tmp_files.find(path);
@@ -248,7 +256,8 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
         return h;
     }
     std::string host = nand_host_path(path);
-    if (!host_exists(host) || host_is_dir(host)) {
+    struct stat st;  // (one stat: on the 3DS each is an SD card access)
+    if (stat(host.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) {
         *err = FS_ENOENT;
         return nullptr;
     }
@@ -265,10 +274,8 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
         *err = FS_EACCESS;
         return nullptr;
     }
-    setvbuf(h->f, nullptr, _IOFBF, 64 * 1024);
-    fseek(h->f, 0, SEEK_END);
-    h->size = ftell(h->f);
-    fseek(h->f, 0, SEEK_SET);
+    setvbuf(h->f, nullptr, _IOFBF, (mode & 2) ? 64 * 1024 : 4 * 1024);
+    h->size = (long)st.st_size;
     s_open_files.push_back(h.get());
     return h;
 }
@@ -276,6 +283,7 @@ std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* 
 // ---------------------------------------------------------------------------- /dev/fs
 class FsDevice : public IosHandle {
 public:
+    bool host_io() const override { return true; }
     s32 ioctl(u32 cmd, u32 in, u32 in_len, u32 out, u32 out_len) override {
         switch (cmd) {
         case 0x02: {  // GetStats

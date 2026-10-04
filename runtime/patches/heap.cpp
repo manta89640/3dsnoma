@@ -4,6 +4,7 @@
 // calls that led to it where the platform can show them (the host: its own stack, the guest's).
 #include "noma_decomp.h"
 #include "runtime.h"
+#include "load_stats.h"
 
 namespace guest {
 void platform_backtrace(const char* why);
@@ -16,6 +17,7 @@ u32 lib_allocator_HeapBase_AllocFromCurrent_orig(u32 r3, u32 r4);
 // r3: the heap manager (+0x1C the current heap: +0x14 its name), r4: the size
 u32 lib_allocator_HeapBase_AllocFromCurrent(u32 r3, u32 r4) {
     u32 p = lib_allocator_HeapBase_AllocFromCurrent_orig(r3, r4);
+    guest::lstats_alloc(r4);
     if (!p) {
         u32 heap = M2C_FIELD(r3, gp<u32>, 0x1C);
         guest::log("heap: out of memory: %u bytes from heap %s (%08X)", r4,

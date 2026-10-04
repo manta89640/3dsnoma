@@ -13,6 +13,7 @@
 #include "hw/hw.h"
 #include "noma_decomp.h"
 #include "runtime.h"
+#include "load_stats.h"
 
 namespace guest {
 
@@ -141,6 +142,13 @@ void idle_wait() {
     bool reported = false;
     account_thread_time();
     s_last_poll_us = 0;  // waiting is no thread's time
+    struct IdleStats {  // NOMA_LOAD_STATS
+        u64 since;
+        ~IdleStats() {
+            if (g_lstats)
+                lstats_idle(host_time_us() - since);
+        }
+    } idle_stats{since};
     while (load32(RUN_QUEUE_BITS) == 0) {
         poll_devices();
         if (deliverable()) {
@@ -182,6 +190,8 @@ void account_thread_time() {
     u64 now = host_time_us();
     if (s_last_poll_us && s_acct_thread && (s32)load32(s_acct_thread + 0x2D0) < 16)
         g_hiprio_us += now - s_last_poll_us;
+    if (g_lstats && s_last_poll_us && s_acct_thread)
+        lstats_thread(s_acct_thread, now - s_last_poll_us);
     s_last_poll_us = now;
     s_acct_thread = load32(0x800000E4);  // OSGetCurrentThread (already the next one at a switch)
     static int s_debug = getenv("NOMA_DEBUG_PRIO") ? 1 : 0;

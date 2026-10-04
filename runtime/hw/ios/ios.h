@@ -1,6 +1,7 @@
 // IOS (the Wii's ARM-side OS) emulation: the requests the decompiled SDK sends over IPC.
 #pragma once
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -58,6 +59,10 @@ public:
     virtual s32 ioctlv(u32 cmd, const std::vector<IoVec>& in, const std::vector<IoVec>& io);
     // false: keep the request pending (event hooks); it is answered later with ios_complete()
     virtual bool reply_now() { return true; }
+    // the file system's handles (fs.cpp): their commands run on the I/O thread, in order; those of
+    // a file in memory only while other jobs wait (else at once)
+    virtual bool host_io() const { return false; }
+    virtual bool in_memory() const { return false; }
     std::string name;
     u32 cur_request = 0;  // physical address of the request being handled (for ios_complete)
 };
@@ -69,16 +74,21 @@ void ios_complete(u32 request_phys, s32 result);
 // request with n when they are there. False: do the read now (no I/O thread, or the buffer spans
 // two banks). Whatever touches a file on the CPU's thread drains first (ios_async_drain), as the
 // I/O thread may be using it.
-bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n);
+bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n, u32 tag);  // tag: content index
 size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n);  // the read itself (either thread)
-void ios_async_drain();  // wait for every read in flight and send its reply
-void ios_async_poll();   // (poll_devices) replies for the reads done
-bool ios_async_busy();   // reads in flight
-void ios_async_wait(u64 us);  // until a read is done, or at most us
+// Any work for a request, on the I/O thread after the jobs before it; then finish(work's result) on
+// the CPU's thread gives the reply. False: there is no I/O thread (do it now). The work may read and
+// write guest memory (as a device's DMA would) but must not touch what the CPU's thread uses.
+bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish = nullptr);
+void ios_async_drain();  // wait for every job in flight and send its reply
+void ios_async_poll();   // (poll_devices) replies for the jobs done
+bool ios_async_busy();   // jobs not yet answered
+void ios_async_wait(u64 us);  // until a job is done, or at most us
 
 // device factories (by path)
 std::unique_ptr<IosHandle> fs_open_device();
 std::unique_ptr<IosHandle> fs_open_file(const std::string& path, u32 mode, s32* err);
+bool fs_in_memory(const std::string& path);  // /tmp: in memory, no SD card access
 std::unique_ptr<IosHandle> es_open_device();
 std::unique_ptr<IosHandle> di_open_device();
 std::unique_ptr<IosHandle> stm_open_device(const std::string& path);

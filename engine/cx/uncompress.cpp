@@ -9,6 +9,7 @@
 // (--cx) on the 3DS's code and the game's own files.
 #include "noma_decomp.h"
 #include "runtime.h"
+#include "load_stats.h"
 
 namespace g {
 
@@ -347,6 +348,14 @@ void CXReadUncompHuffman(u32 ctx, u32 data, u32 len) {
     const u8* src = bytes(data);
     if (!src || !len)
         return;
+    struct Stats {  // NOMA_LOAD_STATS: the call's time and bytes
+        u32 ctx, in, dest0;
+        u64 t0 = guest::lstats_cx_begin();
+        ~Stats() {
+            if (t0)
+                guest::lstats_cx_end(t0, true, in, guest::load32(ctx + HF_DEST) - dest0);
+        }
+    } stats{ctx, len, guest::load32(ctx + HF_DEST)};
     u8 header_size = guest::load8(ctx + HF_HEADER_SIZE);
     s32 dest_count = (s32)guest::load32(ctx + HF_DEST_COUNT);
     s32 force = (s32)guest::load32(ctx + HF_FORCE);
@@ -506,8 +515,12 @@ u32 CXReadUncompLZ(u32 ctx, u32 data, u32 len) {
     const u8* src = bytes(data);
     if (!src || !len)
         return len ? (u32)-1 : (u32)s.dest_count;
+    u64 t0 = guest::lstats_cx_begin();
+    u32 dest0 = s.dest;
     s32 r = read_lz(s, src, len);
     s.save(ctx);
+    if (t0)
+        guest::lstats_cx_end(t0, false, len, s.dest - dest0);
     return (u32)r;
 }
 

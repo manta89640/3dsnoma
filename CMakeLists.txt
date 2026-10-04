@@ -88,6 +88,7 @@ set(RUNTIME_SOURCES
   runtime/cpu.cpp
   runtime/dispatch.cpp
   runtime/irq.cpp
+  runtime/load_stats.cpp
   runtime/memory.cpp
   runtime/natives.cpp
   runtime/threads.cpp

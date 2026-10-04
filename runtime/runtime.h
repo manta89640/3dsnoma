@@ -79,11 +79,13 @@ void profile_gpu_thread();                 // the GPU's thread: its own stack
 void profile_audio_thread();               // the audio thread: its own stack
 void profile_start();
 void profile_report_due();  // the main thread logs a report when one is due
+void profile_frame_end(bool report);  // (NOMA_LOAD_STATS) a game frame: report its samples if slow
 #else
 static inline void profile_gpu_thread() {}
 static inline void profile_audio_thread() {}
 static inline void profile_start() {}
 static inline void profile_report_due() {}
+static inline void profile_frame_end(bool) {}
 #endif
 
 // ---- CPU state (cpu.cpp)

@@ -2,13 +2,16 @@
 //   0x00 command (1 open, 2 close, 3 read, 4 write, 5 seek, 6 ioctl, 7 ioctlv; 8 = reply)
 //   0x04 result   0x08 fd   0x0C.. arguments (physical addresses)
 #include "ios.h"
+#include "../../load_stats.h"
 
 #include <cstdlib>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include <array>
 #include <atomic>
+#include <functional>
 #include <map>
 
 namespace guest {
@@ -42,6 +45,7 @@ static void remove_tree(const std::string& dir) {
 void ios_init(const std::string& nand_root, const std::string& content_dir) {
     s_nand_root = nand_root;
     s_content_dir = content_dir;
+    lstats_init();
     // /tmp is in memory (fs.cpp), empty at every start as IOS leaves it; one on the card is from an
     // earlier version
     remove_tree(nand_root + "/tmp");
@@ -100,16 +104,25 @@ static void reply(u32 req, s32 result) {
 
 void ios_complete(u32 request_phys, s32 result) { reply(phys_to_virt(request_phys), result); }
 
-// ---- the I/O thread: reads while the guest runs on, as IOS reads beside the Wii's CPU. The
-// requests stay pending; the replies go out from the device poll, in the order of the reads.
+// ---- the I/O thread: what touches the SD card (the contents' reads, the NAND's files) is done
+// there while the guest runs on, as IOS works beside the Wii's CPU: the request stays pending and
+// only the guest thread that sent it waits. The jobs run in the order they came (IOS's file
+// system is one thread too), and the replies go out from the device poll in that order.
 namespace {
 struct IoJob {
+    // a content read: n bytes of f at off into guest memory (host address dst)
     FILE* f;
     u64 off;
     u8* dst;
     u32 n;
     u32 request;
     s32 result;
+    u32 tag;                 // (NOMA_LOAD_STATS) the content index
+    u64 queued, start, end;  // (NOMA_LOAD_STATS) host_time_us
+    // or any work (f null): on the I/O thread, then `finish` on the CPU's thread with its result,
+    // before the reply (which gets what `finish` returns)
+    std::function<s32()> work;
+    std::function<s32(s32)> finish;
 };
 const u32 IO_JOBS = 64;
 IoJob s_jobs[IO_JOBS];
@@ -143,35 +156,74 @@ void io_thread() {
             continue;
         }
         IoJob& j = s_jobs[d % IO_JOBS];
-        j.result = (s32)ios_read_at(j.f, j.off, j.dst, j.n);
+        if (g_lstats)
+            j.start = host_time_us();
+        j.result = j.f ? (s32)ios_read_at(j.f, j.off, j.dst, j.n) : j.work();
+        if (g_lstats)
+            j.end = host_time_us();
         s_job_done.store(d + 1, std::memory_order_release);
         platform_signal(s_io_done);
     }
 }
 }  // namespace
 
-bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n) {
+static bool io_thread_up() {
     if (s_io_state == 0) {
         s_io_wake = platform_signal_new(), s_io_done = platform_signal_new();
         s_io_state = platform_io_thread_start(io_thread) ? 1 : -1;
     }
-    u8* p = host_ptr(addr);
-    if (s_io_state < 0 || !n || !p || host_ptr(addr + n - 1) != p + n - 1)
-        return false;
+    return s_io_state > 0;
+}
+
+// the next job's slot (once one is free: replies sent)
+static IoJob& next_job() {
     u32 put = s_job_put.load(std::memory_order_relaxed);
     while (put - s_job_replied >= IO_JOBS)
         ios_async_wait(1000), ios_async_poll();
-    s_jobs[put % IO_JOBS] = {f, off, p, n, request_phys, 0};
-    s_job_put.store(put + 1, std::memory_order_release);
+    return s_jobs[put % IO_JOBS];
+}
+
+static void queue_job() {
+    s_job_put.store(s_job_put.load(std::memory_order_relaxed) + 1, std::memory_order_release);
     platform_signal(s_io_wake);
+}
+
+bool ios_async_read(u32 request_phys, FILE* f, u64 off, u32 addr, u32 n, u32 tag) {
+    u8* p = host_ptr(addr);
+    if (!io_thread_up() || !n || !p || host_ptr(addr + n - 1) != p + n - 1)
+        return false;
+    IoJob& j = next_job();
+    j.f = f, j.off = off, j.dst = p, j.n = n, j.request = request_phys, j.result = 0, j.tag = tag;
+    j.queued = g_lstats ? host_time_us() : 0;
+    j.work = nullptr, j.finish = nullptr;
+    queue_job();
+    return true;
+}
+
+bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish) {
+    if (!io_thread_up())
+        return false;
+    IoJob& j = next_job();
+    j.f = nullptr, j.off = 0, j.dst = nullptr, j.n = 0, j.request = request_phys, j.result = 0, j.tag = 0;
+    j.queued = g_lstats ? host_time_us() : 0;
+    j.work = std::move(work), j.finish = std::move(finish);
+    queue_job();
     return true;
 }
 
 void ios_async_poll() {
     u32 done = s_job_done.load(std::memory_order_acquire);
     for (; s_job_replied != done; s_job_replied++) {
-        const IoJob& j = s_jobs[s_job_replied % IO_JOBS];
-        ios_complete(j.request, j.result);
+        IoJob& j = s_jobs[s_job_replied % IO_JOBS];
+        s32 result = j.finish ? j.finish(j.result) : j.result;
+        ios_complete(j.request, result);
+        if (g_lstats) {
+            if (j.f)
+                lstats_read(j.tag, j.off, j.n, j.queued, j.start, j.end, host_time_us());
+            else
+                lstats_job(j.queued, j.start, j.end, host_time_us());
+        }
+        j.work = nullptr, j.finish = nullptr;  // (what they hold goes now)
     }
 }
 
@@ -184,38 +236,103 @@ void ios_async_drain() {
         ios_async_wait(1000), ios_async_poll();
 }
 
+// a handle's command (read, write, seek, ioctl, ioctlv; close is the caller's), with its arguments
+// from the request; *now: false when the device answers later (ios_complete)
+static s32 run_command(IosHandle* h, u32 cmd, const u32* a, bool* now) {
+    *now = true;
+    switch (cmd) {
+    case 3:
+        return h->read(phys_to_virt(a[0]), a[1]);
+    case 4:
+        return h->write(phys_to_virt(a[0]), a[1]);
+    case 5:
+        return h->seek((s32)a[0], a[1]);
+    case 6: {
+        s32 r = h->ioctl(a[0], phys_to_virt(a[1]), a[2], phys_to_virt(a[3]), a[4]);
+        *now = h->reply_now();
+        return r;
+    }
+    case 7: {
+        u32 nin = a[1], nio = a[2], vecs = phys_to_virt(a[3]);
+        std::vector<IoVec> in, io;
+        for (u32 i = 0; i < nin + nio; i++) {
+            IoVec v{phys_to_virt(load32(vecs + i * 8)), load32(vecs + i * 8 + 4)};
+            (i < nin ? in : io).push_back(v);
+        }
+        s32 r = h->ioctlv(a[0], in, io);
+        *now = h->reply_now();
+        return r;
+    }
+    default:
+        log("ios: unknown command %u", cmd);
+        return IOS_EINVAL;
+    }
+}
+
+// an opened handle into the fd table: the reply's value
+static s32 opened(const std::string& path, u32 mode, std::unique_ptr<IosHandle> h, s32 err) {
+    s32 result;
+    if (h) {
+        h->name = path;
+        result = s_next_fd++;
+        s_fds[result] = std::move(h);
+    } else {
+        result = err ? err : IOS_ENOENT;
+    }
+    log("ios: open %s (mode %u) -> %d", path.c_str(), mode, result);
+    // NOMA_TRACE_OPEN=path (trace builds): print the recent calls when the guest opens it
+    static const char* s_trace_open = getenv("NOMA_TRACE_OPEN");
+    if (s_trace_open && path == s_trace_open)
+        noma_trace_dump_global();
+    // NOMA_DUMP_MEM_OPEN=path (host): write mem1.bin/mem2.bin each time the guest opens it
+    static const char* s_dump_open = getenv("NOMA_DUMP_MEM_OPEN");
+    if (s_dump_open && path == s_dump_open)
+        memory_dump();
+    return result;
+}
+
 void ios_execute(u32 request_phys) {
     NOMA_PROF_SCOPE("(ios)");
+    // NOMA_LOAD_STATS: a request that keeps the CPU's thread (every guest thread) waiting 5 ms or more
+    struct Slow {
+        u32 req;
+        u64 t0 = g_lstats ? host_time_us() : 0;
+        std::string what;
+        ~Slow() {
+            if (t0 && host_time_us() - t0 >= 5000)
+                log("lstats: ios request %s took %.1f ms (all guest threads waited)", what.c_str(),
+                    (host_time_us() - t0) / 1000.0);
+        }
+    } slow{request_phys};
     u32 req = phys_to_virt(request_phys);
     u32 cmd = load32(req);
     s32 fd = (s32)load32(req + 0x08);
     u32 a[5];
     for (int i = 0; i < 5; i++)
         a[i] = load32(req + 0x0C + i * 4);
-    s32 result = IOS_EINVAL;
-    bool now = true;
+    static bool s_debug = getenv("NOMA_DEBUG_IOS") != nullptr;
 
     if (cmd == 1) {  // open
         std::string path = read_string(phys_to_virt(a[0]), 64);
-        s32 err;
-        std::unique_ptr<IosHandle> h = open_path(path, a[1], &err);
-        if (h) {
-            h->name = path;
-            result = s_next_fd++;
-            s_fds[result] = std::move(h);
-        } else {
-            result = err ? err : IOS_ENOENT;
+        if (slow.t0)
+            slow.what = "open " + path;
+        u32 mode = a[1];
+        // a NAND file: on the I/O thread (fs.cpp), but for /tmp's (in memory) when no job waits
+        if (path.rfind("/dev/", 0) != 0 && (ios_async_busy() || !fs_in_memory(path))) {
+            struct Opened {
+                std::unique_ptr<IosHandle> h;
+                s32 err = 0;
+            };
+            auto o = std::make_shared<Opened>();
+            if (ios_async_call(request_phys, [o, path, mode] {
+                    o->h = fs_open_file(path, mode, &o->err);
+                    return 0;
+                }, [o, path, mode](s32) { return opened(path, mode, std::move(o->h), o->err); }))
+                return;
         }
-        log("ios: open %s (mode %u) -> %d", path.c_str(), a[1], result);
-        // NOMA_TRACE_OPEN=path (trace builds): print the recent calls when the guest opens it
-        static const char* s_trace_open = getenv("NOMA_TRACE_OPEN");
-        if (s_trace_open && path == s_trace_open)
-            noma_trace_dump_global();
-        // NOMA_DUMP_MEM_OPEN=path (host): write mem1.bin/mem2.bin each time the guest opens it
-        static const char* s_dump_open = getenv("NOMA_DUMP_MEM_OPEN");
-        if (s_dump_open && path == s_dump_open)
-            memory_dump();
-        reply(req, result);
+        s32 err;
+        std::unique_ptr<IosHandle> h = open_path(path, mode, &err);
+        reply(req, opened(path, mode, std::move(h), err));
         return;
     }
 
@@ -227,40 +344,45 @@ void ios_execute(u32 request_phys) {
     }
     IosHandle* h = it->second.get();
     h->cur_request = request_phys;
-    switch (cmd) {
-    case 2:  // close
+    if (slow.t0) {
+        char what[96];
+        snprintf(what, sizeof(what), "%s cmd %u (%08X %08X %08X)", h->name.c_str(), cmd, a[0], a[1], a[2]);
+        slow.what = what;
+    }
+    if (h->host_io() && (ios_async_busy() || !h->in_memory())) {
+        // the file system's handles: every command on the I/O thread, after what came before (a
+        // file in memory's only while jobs wait); a closed handle leaves the table now and goes
+        // with its job (the last reference: closed and freed there)
+        std::shared_ptr<IosHandle> closing;
+        if (cmd == 2) {
+            closing.reset(it->second.release());
+            s_fds.erase(it);
+        }
+        std::array<u32, 5> args{a[0], a[1], a[2], a[3], a[4]};
+        if (ios_async_call(request_phys, [h, closing = std::move(closing), cmd, args]() mutable {
+                bool now;
+                s32 r = cmd == 2 ? h->close() : run_command(h, cmd, args.data(), &now);
+                closing.reset();
+                return r;
+            }, [cmd, args, name = h->name](s32 r) {
+                if (s_debug && cmd >= 3)
+                    log("ios: %s: cmd %u (%08X %08X %08X) -> %d", name.c_str(), cmd, args[0], args[1], args[2], r);
+                return r;
+            }))
+            return;
+        if (cmd == 2) {  // (no I/O thread: the handle went with the job, freed unrun; their close() is IOS_OK)
+            reply(req, IOS_OK);
+            return;
+        }
+    }
+    s32 result;
+    bool now = true;
+    if (cmd == 2) {  // close
         result = h->close();
         s_fds.erase(it);
-        break;
-    case 3:
-        result = h->read(phys_to_virt(a[0]), a[1]);
-        break;
-    case 4:
-        result = h->write(phys_to_virt(a[0]), a[1]);
-        break;
-    case 5:
-        result = h->seek((s32)a[0], a[1]);
-        break;
-    case 6:
-        result = h->ioctl(a[0], phys_to_virt(a[1]), a[2], phys_to_virt(a[3]), a[4]);
-        now = h->reply_now();
-        break;
-    case 7: {
-        u32 nin = a[1], nio = a[2], vecs = phys_to_virt(a[3]);
-        std::vector<IoVec> in, io;
-        for (u32 i = 0; i < nin + nio; i++) {
-            IoVec v{phys_to_virt(load32(vecs + i * 8)), load32(vecs + i * 8 + 4)};
-            (i < nin ? in : io).push_back(v);
-        }
-        result = h->ioctlv(a[0], in, io);
-        now = h->reply_now();
-        break;
+    } else {
+        result = run_command(h, cmd, a, &now);
     }
-    default:
-        log("ios: unknown command %u", cmd);
-        break;
-    }
-    static bool s_debug = getenv("NOMA_DEBUG_IOS") != nullptr;
     if (s_debug && cmd >= 3)
         log("ios: %s: cmd %u (%08X %08X %08X) -> %d%s", h->name.c_str(), cmd, a[0], a[1], a[2], result,
             now ? "" : " (pending)");

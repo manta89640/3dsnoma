@@ -1,6 +1,7 @@
 // Video interface: registers, the vertical retrace interrupt at 60 Hz and the frame buffer
 // address the game shows (the GPU emulation turns the EFB copy into a frame on the 3DS).
 #include "hw.h"
+#include "../load_stats.h"
 
 namespace guest {
 
@@ -68,8 +69,10 @@ void vi_tick(u64 now_us) {
     static u32 s_frames;
     s_frames++;
     u32 xfb = vi_current_xfb();
-    if (xfb && xfb != s_shown_xfb)
+    if (xfb && xfb != s_shown_xfb) {
         s_game_frames++, s_shown_xfb = xfb;
+        lstats_frame();
+    }
     platform_present(xfb);
     bool any = false;
     for (u32 o = 0x30; o < 0x40; o += 4) {

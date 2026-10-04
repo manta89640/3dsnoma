@@ -7,6 +7,7 @@
 #include <map>
 
 #include "ios.h"
+#include "../../load_stats.h"
 
 namespace guest {
 
@@ -44,21 +45,44 @@ public:
                 fclose(c.second.f);
     }
 
+    // the file opened on the I/O thread (an SD card access), the handle made when the reply goes
     s32 open_content(u32 index) {
         char name[64];
         snprintf(name, sizeof(name), "/%08x.app", index);
-        FILE* f = fopen((content_dir() + name).c_str(), "rb");
-        if (!f) {
-            log("es: content %u missing (%s%s)", index, content_dir().c_str(), name);
-            return ES_ENOENT;
+        struct Opened {
+            std::string path;
+            FILE* f = nullptr;
+            u64 size = 0;
+            void* names = nullptr;  // (NOMA_LOAD_STATS) its archive's files
+        };
+        auto o = std::make_shared<Opened>();
+        o->path = content_dir() + name;
+        auto work = [o] {
+            if ((o->f = fopen(o->path.c_str(), "rb"))) {
+                fseek(o->f, 0, SEEK_END);
+                o->size = (u64)ftell(o->f);
+                rewind(o->f);
+                o->names = lstats_parse_names(o->path.c_str());
+            }
+            return 0;
+        };
+        auto finish = [this, o, index](s32) -> s32 {
+            if (!o->f) {
+                log("es: content %u missing (%s)", index, o->path.c_str());
+                return ES_ENOENT;
+            }
+            u32 cfd = next_cfd++;
+            contents[cfd] = {o->f, index, 0, o->size};
+            lstats_content_open(index, o->names);
+            log("es: open content %u -> cfd %u", index, cfd);
+            return (s32)cfd;
+        };
+        if (ios_async_call(cur_request, work, finish)) {
+            pending = true;
+            return 0;
         }
-        fseek(f, 0, SEEK_END);
-        u64 size = (u64)ftell(f);
-        rewind(f);
-        u32 cfd = next_cfd++;
-        contents[cfd] = {f, index, 0, size};
-        log("es: open content %u -> cfd %u", index, cfd);
-        return (s32)cfd;
+        work();
+        return finish(0);
     }
 
     bool reply_now() override { return !pending; }
@@ -95,23 +119,36 @@ public:
             if (s_n++ < 40 || s_debug)
                 log("es: read content cfd %u at %llu: %u bytes -> %u", load32(in[0].addr), (unsigned long long)at,
                     io[0].size, n);
-            if (ios_async_read(cur_request, c.f, at, io[0].addr, n)) {
+            if (ios_async_read(cur_request, c.f, at, io[0].addr, n, c.index)) {
                 pending = true;
                 return 0;
             }
             ios_async_drain();
+            u64 t0 = g_lstats ? host_time_us() : 0;
             std::vector<u8> tmp(n);
             size_t got = ios_read_at(c.f, at, tmp.data(), n);
             write_g(io[0].addr, tmp.data(), (u32)got);
+            if (t0) {
+                u64 t1 = host_time_us();
+                lstats_read(c.index, at, n, t0, t0, t1, t1);
+            }
             return (s32)got;
         }
-        case 0x0B: {  // CloseContent
+        case 0x0B: {  // CloseContent: after the reads before it (the I/O thread's jobs run in order)
             auto it = contents.find(load32(in[0].addr));
             if (it == contents.end())
                 return ES_EINVAL;
-            ios_async_drain();
-            fclose(it->second.f);
+            FILE* f = it->second.f;
             contents.erase(it);
+            if (ios_async_call(cur_request, [f] {
+                    fclose(f);
+                    return (s32)IOS_OK;
+                })) {
+                pending = true;
+                return 0;
+            }
+            ios_async_drain();
+            fclose(f);
             return IOS_OK;
         }
         case 0x23: {  // SeekContent: cfd, offset, whence
