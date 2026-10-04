@@ -23,6 +23,10 @@ HEAD) on random scenarios: the state after every frame must be the same.
 --cycles: with the instruction counts, an estimate of ARM11 cycles (tools/armbench/arm11_timing.py:
 the ARM11 MPCore TRM's issue cycles, result latencies and interlocks, the branch predictor; every
 access an L1 hit), with --lines per source line too.
+--gx: instead, the GPU thread's per-draw work (runtime/hw/gx/tnl.cpp, tools/armbench/gx_bench.cpp): ARM
+instructions per draw and per vertex for draws like the room's (layout quads, model draws built
+into the list cache, cached draws' palette slots, fixed and skinned), with a hash of what was
+built; --gx-funcs KIND: where kind KIND's instructions go, per function.
 --cx: instead, engine/cx/uncompress.cpp's LZ and Huffman decoders (tools/armbench/cx_bench.cpp):
 instructions per output byte, the natives' against the streaming code they started from
 (engine/cx/cx_reference.h), and whether their outputs agree; on compressed files given (from your
@@ -245,6 +249,52 @@ def bench_snd(counts):
                   "state hash %08X" % (n, ins, cyc, cyc / n, m.call("snd", n, 6, 1)), flush=True)
 
 
+GX_KINDS = [("layout quad, immediate", 4), ("model draw, into the cache", 8), ("cached draw: fixed slots", 8),
+            ("cached draw: skinned slots", 8)]
+GX_SOURCES = ("tools/armbench/gx_bench.cpp", "runtime/hw/gx/tnl.cpp", "runtime/hw/gx/vertex.cpp",
+              "runtime/hw/gx/pica_vsh.cpp")
+
+
+def bench_gx(funcs_kind=None, draws=64, flush_every=7):
+    with tempfile.TemporaryDirectory() as out:
+        elf = build(out, GX_SOURCES, ("gx",))
+        m = Machine(elf, ("gx",))
+        if funcs_kind is not None:
+            name, verts = GX_KINDS[funcs_kind]
+            syms = sorted((s["st_value"] & ~1, s["st_size"], s.name) for s in
+                          ELFFile(open(elf, "rb")).get_section_by_name(".symtab").iter_symbols()
+                          if s["st_info"]["type"] == "STT_FUNC" and s["st_size"])
+            starts = [a for a, _, _ in syms]
+            import bisect
+
+            def per_func(n_draws):
+                hits = collections.Counter()
+                m.uc.ctl_flush_tb()
+                hook = m.uc.hook_add(UC_HOOK_BLOCK, lambda uc, addr, size, _: hits.update({addr: size // 4}))
+                m.call("gx", funcs_kind, n_draws, verts, flush_every)
+                m.uc.hook_del(hook)
+                per = collections.Counter()
+                for a, n in hits.items():
+                    i = bisect.bisect_right(starts, a) - 1
+                    per[syms[i][2] if i >= 0 and a < syms[i][0] + syms[i][1] else "?"] += n
+                return per
+            per = per_func(draws)
+            per.subtract(per_func(0))
+            demangle = subprocess.run([os.path.join(DEVKITARM, "bin", "arm-none-eabi-c++filt")], input="\n".join(per),
+                                      capture_output=True, text=True).stdout.split("\n")
+            names = dict(zip(per, demangle))
+            total = sum(per.values()) / draws
+            print("%s (%d vertices): %.0f instructions a draw" % (name, verts, total))
+            for f, n in sorted(per.items(), key=lambda x: -x[1])[:25]:
+                if n > 0:
+                    print("%8.1f  %s" % (n / draws, names[f][:110]))
+            return
+        for kind, (name, verts) in enumerate(GX_KINDS):
+            n = (m.instructions("gx", kind, draws, verts, flush_every) - m.instructions("gx", kind, 0, verts, flush_every)) / draws
+            print("%-30s %6.0f ARM instructions a draw of %d vertices (%5.0f a vertex)  hash %08x" % (
+                name, n, verts, n / verts, m.call("gx", kind, draws, verts, flush_every)))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lines", type=int, metavar="KIND")
@@ -254,7 +304,11 @@ def main():
     ap.add_argument("--frame", type=int, nargs="*", metavar="VOICES")
     ap.add_argument("--snd", type=int, nargs="*", metavar="VOICES")
     ap.add_argument("--snd-diff", nargs="?", const="HEAD", metavar="REV")
+    ap.add_argument("--gx", action="store_true")
+    ap.add_argument("--gx-funcs", type=int, metavar="KIND")
     args = ap.parse_args()
+    if args.gx or args.gx_funcs is not None:
+        return bench_gx(args.gx_funcs)
     if args.cx is not None:
         return bench_cx(args.cx)
     if args.frame is not None:
