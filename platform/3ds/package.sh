@@ -11,6 +11,10 @@ META=$ROOT/platform/3ds/meta
 ELF=$BUILD/noma
 OUT=$BUILD
 
+# a real GPU hangs on a vertex shader that leaves a component of an output unwritten (the
+# emulator doesn't mind): no package with one
+python3 "$ROOT/tools/check_shader_outputs.py" "$ROOT/platform/3ds/shaders"
+
 "$TOOLS/bannertool" makesmdh -s "Wii no Ma" -l "Wii no Ma (Wii Room) for 3DS" -p "noma" \
     -i "$META/icon.png" -o "$OUT/noma.smdh"
 "$TOOLS/bannertool" makebanner -i "$META/banner.png" -a "$META/banner.wav" -o "$OUT/noma.bnr"

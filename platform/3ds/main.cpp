@@ -96,6 +96,7 @@ static void log_flush_due(u64 now) {  // (with s_log_lock)
 }
 
 void platform_log_idle() {
+    pica_watchdog();
     if (!s_log_dirty)
         return;
     LightLock_Lock(&s_log_lock);

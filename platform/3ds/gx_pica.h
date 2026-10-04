@@ -13,4 +13,7 @@ public:
     void suspend() override;
 };
 
+// a wait for the GPU that hasn't ended in 3 s, logged (the I/O thread, every 100 ms)
+void pica_watchdog();
+
 }  // namespace guest
