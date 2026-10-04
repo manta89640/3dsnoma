@@ -136,7 +136,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 
 ### Graphics
 
-Where the room's frame goes (Azahar, profile build, after this round): core 0 limits the frame
+Where the room's frame goes (Azahar, profile build, after this round, before the audio round of c20371f): core 0 limits the frame
 rate (the game's main thread ~54% of its samples, the render passes under it ~34% of all of them;
 the sound thread ~38%); the GPU thread is ~40% idle; the PICA itself does little (~7,100 vertices
 and ~160 draw calls a frame, about 30 shader instructions per layout vertex, 400×240 pixels), so
