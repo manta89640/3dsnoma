@@ -51,7 +51,7 @@ OUT = os.path.join(ROOT, "build", "decomp")
 NATIVE_NAMES = {
     "__start", "__init_registers", "__init_data", "__init_hardware", "__flush_cache",
     "__my_flush_cache", "__check_pad3", "__set_debug_bba", "__get_debug_bba",
-    "memcpy", "memset", "__fill_mem",
+    "memcpy", "memset", "__fill_mem", "memcmp",
     "OSSaveContext", "OSLoadContext", "OSSaveFPUContext", "__OSSaveFPUContext",
     "__OSLoadFPUContext", "OSSwitchFPUContext", "OSExceptionVector", "__OSDBIntegrator",
     "__OSDBJump", "OSGetStackPointer", "OSSwitchStack", "OSSwitchFiber", "OSSwitchFiberEx",

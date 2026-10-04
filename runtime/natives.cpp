@@ -21,6 +21,27 @@ u32 memset(u32 dst, u32 c, u32 n) {
 
 void __fill_mem(u32 dst, u32 c, u32 n) { memset_g(dst, (u8)c, n); }
 
+// MSL's memcmp: -1 or 1 by the first bytes that differ (unsigned), 0 if none, in r3; r4 is left
+// holding that byte of the first block (0 when equal), as the byte loop leaves it. The loop polled
+// once a byte: charged in one go.
+u64 memcmp(u32 a, u32 b, u32 n) {
+    const u8 *ha = host_ptr(a), *hb = host_ptr(b);
+    u32 i = 0;
+    if (ha && hb && n && host_ptr(a + n - 1) == ha + (n - 1) && host_ptr(b + n - 1) == hb + (n - 1)) {
+        while (i < n && ha[i] == hb[i])
+            i++;
+    } else {
+        while (i < n && load8(a + i) == load8(b + i))
+            i++;
+    }
+    if ((g_loop_budget -= (s32)(i + 1)) < 0)
+        loop_poll();
+    if (i == n)
+        return NOMA_U64(0u, 0u);
+    const u32 x = load8(a + i), y = load8(b + i);
+    return NOMA_U64(x < y ? 0xFFFFFFFFu : 1u, x);
+}
+
 // ---- PPC special registers
 void PPCMtdec(u32 v) { set_decrementer(v); }
 u32 PPCMffpscr(void) { return 0; }
