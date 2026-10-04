@@ -160,8 +160,9 @@ static void scripted_input() {
     if (!input_script_active())
         return;
     static WiimoteInput in;
-    in.buttons = 0;
+    in.buttons = in.pad = 0;
     in.pointing = true;
+    in.stick_x = in.stick_y = in.cam_x = in.cam_y = 0;
     input_script_apply(in);
     wiimote_set_input(in);
 }
