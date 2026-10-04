@@ -629,10 +629,10 @@ void Stage::Impl::groove(const Music& music) {
         if (b.bpm > 30 && b.bpm < 400)
             bpm = b.bpm;
     } else if (playing) {
-        // No sequence to follow: between two pieces the last tempo goes on; a piece that plays on
-        // without one (a wave jingle) gets the default tempo.
+        // No sequence to follow: between two pieces the last tempo and bar go on; a piece that plays
+        // on without one (a wave jingle) gets the default tempo, and its own bar, not the last's.
         if (state == PlayState::PLAYING && ++without_beat > NO_SEQUENCE_WAIT_FRAMES)
-            bpm = DEFAULT_BPM;
+            bpm = DEFAULT_BPM, bar = b.bar;
         beats += seconds * bpm / 60;
     }
     // a tempo that changed by more than a little: the clips' paces again

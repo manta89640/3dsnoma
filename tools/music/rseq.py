@@ -787,6 +787,9 @@ def header_text(data, score, end, loop, score_path, out_path, namespace):
     rel = lambda p: os.path.relpath(os.path.abspath(p), brsar.ROOT)
     tb = score.get('timebase', 96)
     tempo = score.get('tempo', 120)
+    bar = score.get('bar') or 4
+    if bar != int(bar):   # (the engine counts a bar in whole quarter notes: music_bar_beats)
+        raise MmlError('BAR_BEATS: a bar of %g quarter notes is no whole number of them' % bar)
     lines = [
         '// %s (%s): the port\'s own music, compiled to an RSEQ file' % (score.get('title', '?'),
                                                                         score.get('label', '?')),
@@ -802,7 +805,7 @@ def header_text(data, score, end, loop, score_path, out_path, namespace):
         '// its clock: TIMEBASE ticks a quarter note, TEMPO quarter notes a minute, BAR_BEATS quarter notes',
         '// a bar; it loops from LOOP_START to LOOP_END (ticks from its start): %.2f s a pass' % (
             (end - loop) * 60.0 / (tempo * tb)),
-        'constexpr u32 TIMEBASE = %d, TEMPO = %d, BAR_BEATS = %d;' % (tb, tempo, score.get('bar') or 4),
+        'constexpr u32 TIMEBASE = %d, TEMPO = %d, BAR_BEATS = %d;' % (tb, tempo, bar),
         'constexpr u32 LOOP_START = %d, LOOP_END = %d;' % (loop, end),
         'constexpr u32 SIZE = %d;  // bytes' % len(data),
         'alignas(32) const u8 RSEQ[SIZE] = {',

@@ -108,6 +108,7 @@ PlayState Music::state() const {
 
 Beat Music::beat() const {
     Beat b;
+    b.bar = engine::wuhu::music_bar_beats(current());
     u32 seq = sequence_in(slot());
     if (!seq || state() != PlayState::PLAYING)
         return b;
@@ -121,7 +122,6 @@ Beat Music::beat() const {
     if (!(to_come >= 0.0f && to_come <= 1.0f))
         to_come = 1.0f;
     b.beats = ((double)guest::load32(player + 0x160) + (1.0 - to_come)) / timebase;
-    b.bar = engine::wuhu::music_bar_beats(current());
     return b;
 }
 
