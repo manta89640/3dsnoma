@@ -154,6 +154,16 @@ bool platform_audio_thread_start(void (*fn)()) {
     std::thread(fn).detach();
     return true;
 }
+// (the host's cores are many: the OS's own priority is fine)
+bool platform_worker_start(void (*fn)(void*), void* arg) {
+    std::thread(fn, arg).detach();
+    return true;
+}
+
+static std::string s_data_dir = "data";
+const std::string& data_dir() { return s_data_dir; }
+
+bool platform_native_memory(u32*, u32*) { return false; }
 
 // NOMA_INPUT (runtime/hw/ios/input_script.cpp): scripted Wii Remote input
 static void scripted_input() {
@@ -288,6 +298,7 @@ int main(int argc, char** argv) {
         if (a == "--data" && i + 1 < argc)
             data = argv[++i];
     }
+    guest::s_data_dir = data;
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");
     std::vector<u8> dol = read_file(data + "/main.dol");
     if (dol.empty()) {
