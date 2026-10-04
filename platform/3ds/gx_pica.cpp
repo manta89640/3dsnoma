@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -43,7 +44,7 @@
 #include "gx_pica.h"
 #include "pica_tex.h"
 
-extern "C" u32 __ctru_heap_size;
+extern "C" u32 __ctru_heap_size, __ctru_linear_heap, __ctru_linear_heap_size;
 extern "C" const uint8_t gx_shbin[];
 extern "C" const size_t gx_shbin_size;
 
@@ -183,7 +184,35 @@ struct Direct {
     u32 cull = GPU_CULL_BACK_CCW;
     C3D_Tex* bound[3] = {};
 } D;
-inline bool direct() { return !P.c3d_touched; }
+// NOMA_PICA_C3D=1 (env.txt): every draw and state change through citro3d, none written directly
+// (to tell the direct writes from the rest when the GPU misbehaves)
+const bool s_c3d_only = getenv("NOMA_PICA_C3D") != nullptr;
+inline bool direct() { return !P.c3d_touched && !s_c3d_only; }
+
+// ---- A real console's GPU stopped where the emulator's went on (the first frame, never
+// finished: the shader left outputs unwritten): where the renderer waits for the GPU is noted, and
+// a wait of more than 3 s is logged (pica_watchdog, from the I/O thread). NOMA_DUMP_CMDLIST=N: the first N
+// frames' command lists to cmdlist.bin, each before it goes to the GPU, after a record of the
+// buffers' physical addresses (tools/pica_cmdlist.py reads it).
+std::atomic<const char*> s_waiting{nullptr};
+std::atomic<u64> s_wait_since{0};
+std::atomic<u32> s_wait_frame{0};
+struct GpuWait {
+    explicit GpuWait(const char* what) {
+        s_wait_since.store(svcGetSystemTick());
+        s_waiting.store(what);
+    }
+    ~GpuWait() { s_waiting.store(nullptr); }
+};
+const int s_cmd_frames = getenv("NOMA_DUMP_CMDLIST") ? atoi(getenv("NOMA_DUMP_CMDLIST")) : 0;
+FILE* s_cmd_dump;
+u32* s_frame_list;  // where the open frame's commands start
+
+// The base the vertex and index buffers' offsets count from (GPUREG_ATTRIBBUFFERS_LOC): the lowest of
+// the buffers. The offsets have 28 bits; citro3d's base, 0x18000000 (VRAM), reaches only the FCRAM
+// below 0x28000000, and a New 3DS's 178 MB mode puts the linear heap above it (the emulator doesn't
+// mask the offsets).
+u32 s_buf_base = 0x18000000;
 
 // ---- NOMA_GX_TIMERS=N (env.txt): the GPU thread's time in each part of the draw path, as
 // milliseconds per frame over N frames, with counts (svcGetSystemTick around every part costs
@@ -438,7 +467,7 @@ void draw_elements(u32 count, const u16* indices) {
     if (check_state_on())
         snap_state();
     upload_uniforms();
-    if (P.c3d_touched) {
+    if (P.c3d_touched || s_c3d_only) {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
         P.c3d_touched = false;
         return;
@@ -447,7 +476,7 @@ void draw_elements(u32 count, const u16* indices) {
     u32 pa = osConvertVirtToPhys(indices);
     GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
     GPUCMD_AddWrite(GPUREG_RESTART_PRIMITIVE, 1);
-    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, (pa - 0x18000000) | (1u << 31));
+    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, (pa - s_buf_base) | (1u << 31));
     GPUCMD_AddWrite(GPUREG_NUMVERTICES, count);
     GPUCMD_AddWrite(GPUREG_VERTEX_OFFSET, 0);
     GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
@@ -617,6 +646,20 @@ void upload_palette() {
 // gets them (uniforms, vertices, indices), for tools/pica_replay on the host
 FILE* s_dump;
 int s_dump_frame = -2;
+void write_batch(FILE* f, u32 nverts, const PVertex* verts, const GxTnlSlots* slots, u32 nidx, const u16* idx, u32 base) {
+    u32 hdr[8] = {0x42415443, nverts, nidx, P.consts.bools, P.consts.nlights, P.cull, base, 0};
+    fwrite(hdr, 4, 8, f);
+    for (int i = 0; i < 96; i++) {  // (our copy is in the GPU's order, w first)
+        u32 v[4] = {P.uni[i][3], P.uni[i][2], P.uni[i][1], P.uni[i][0]};
+        fwrite(v, 4, 4, f);
+    }
+    for (u32 i = 0; i < nverts; i++) {  // (the vertex with its slots, as tools/pica_replay reads them)
+        fwrite(&verts[i], sizeof(PVertex), 1, f);
+        fwrite(&slots[i], sizeof(GxTnlSlots), 1, f);
+    }
+    fwrite(idx, 2, nidx, f);
+    fflush(f);  // (a GPU that hangs on the frame leaves the file open)
+}
 void dump_batch(u32 nverts, const PVertex* verts, const GxTnlSlots* slots, u32 nidx, const u16* idx, u32 base) {
     if (s_dump_frame == -2)
         s_dump_frame = getenv("NOMA_DUMP_BATCHES") ? atoi(getenv("NOMA_DUMP_BATCHES")) : -1;
@@ -624,18 +667,25 @@ void dump_batch(u32 nverts, const PVertex* verts, const GxTnlSlots* slots, u32 n
         return;
     if (!s_dump && !(s_dump = fopen("sdmc:/3ds/noma/batches.bin", "wb")))
         return;
-    u32 hdr[8] = {0x42415443, nverts, nidx, P.consts.bools, P.consts.nlights, P.cull, base, 0};
-    fwrite(hdr, 4, 8, s_dump);
-    for (int i = 0; i < 96; i++) {  // (our copy is in the GPU's order, w first)
-        u32 v[4] = {P.uni[i][3], P.uni[i][2], P.uni[i][1], P.uni[i][0]};
-        fwrite(v, 4, 4, s_dump);
-    }
-    for (u32 i = 0; i < nverts; i++) {  // (the vertex with its slots, as tools/pica_replay reads them)
-        fwrite(&verts[i], sizeof(PVertex), 1, s_dump);
-        fwrite(&slots[i], sizeof(GxTnlSlots), 1, s_dump);
-    }
-    fwrite(idx, 2, nidx, s_dump);
+    write_batch(s_dump, nverts, verts, slots, nidx, idx, base);
 }
+
+// ---- NOMA_PICA_STEP=N (env.txt): the first N frames go to the GPU a piece at a time, each waited
+// for (2 s at most): the clear, a command list of one register write, each draw, the display
+// transfer. A GPU that hangs then names what it hung on: logged with the draw's state, its batch
+// written to sdmc:/3ds/noma/hang.bin (batches.bin's layout: tools/pica_replay runs it through the
+// shader). The PICA keeps its registers from one command list to the next, so the frame's state
+// goes on as the renderer set it; only the screen waits for the frame's end.
+const int s_step_frames = getenv("NOMA_PICA_STEP") ? atoi(getenv("NOMA_PICA_STEP")) : 0;
+inline bool stepping() { return (int)P.frame < s_step_frames; }
+enum StepKind { STEP_CLEAR, STEP_LIST, STEP_DRAW, STEP_TRANSFER };
+struct Step {
+    double ms[4] = {};  // by StepKind, this frame
+    double worst = 0;   // the slowest draw
+    u32 pieces = 0, draws = 0, worst_draw = 0;
+    // the last batch drawn (a draw's piece): its indices, the vertices they reach, its GX draw
+    u32 count = 0, first = 0, lo = 0, hi = 0, draw = 0;
+} S;
 
 // the draws with the current state so far, as one; the palette's slots are free again after
 void flush_batch() {
@@ -643,13 +693,14 @@ void flush_batch() {
         NOMA_PROF_SCOPE("(gx flush)");
         Timed timed(Timers::FLUSH);
         upload_palette();
-        if ((int)P.frame == s_dump_frame || s_dump_frame == -2) {
+        if ((int)P.frame == s_dump_frame || s_dump_frame == -2 || stepping()) {
             // the vertices the indices reach (one segment: indices are relative to its start)
             u32 lo = ~0u, hi = 0;
             for (u32 i = 0; i < P.batch_count; i++)
                 lo = std::min<u32>(lo, P.ibuf[P.batch_first + i]), hi = std::max<u32>(hi, P.ibuf[P.batch_first + i]);
             if (lo <= hi)
                 dump_batch(hi - lo + 1, P.vbuf + lo, P.slots + lo, P.batch_count, P.ibuf + P.batch_first, lo);
+            S.count = P.batch_count, S.first = P.batch_first, S.lo = lo, S.hi = hi, S.draw = P.draws;
         }
         draw_elements(P.batch_count, P.ibuf + P.batch_first);
         P.batch_count = 0;
@@ -662,6 +713,7 @@ void flush_batch() {
 void bind_vertices() {
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
+    bi->base_paddr = s_buf_base;  // (C3D_DrawElements and C3D_DrawArrays count from it too)
     BufInfo_Add(bi, P.vbuf, sizeof(PVertex), 6, 0x654210);
     BufInfo_Add(bi, P.slots, sizeof(GxTnlSlots), 1, 0x3);
 }
@@ -672,6 +724,59 @@ inline void slots_written(u32 first, u32 n) {
 
 // what the CPU wrote this frame goes to memory for the GPU (citro3d's C3D_FrameEnd(0) would
 // flush the whole linear heap: the guest's memory is in it)
+void frame_list_starts() {
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    s_frame_list = buf + off;
+    s_wait_frame.store(P.frame);
+}
+
+// cmdlist.bin: little-endian words. "PHYS" n, then n x (name[12], va, pa, size); "LIST" frame,
+// seq, va, pa, words, then the words (the frame's commands so far: a frame read back in the middle
+// is two lists, and a clear's split leaves a FINALIZE inside)
+void dump_word(u32 w) { fwrite(&w, 4, 1, s_cmd_dump); }
+void dump_phys(const char* name, const void* va, u32 size) {
+    char n[12] = {};
+    strncpy(n, name, sizeof(n) - 1);
+    fwrite(n, 1, sizeof(n), s_cmd_dump);
+    dump_word((u32)va), dump_word(va ? osConvertVirtToPhys(va) : 0), dump_word(size);
+}
+void dump_open() {
+    if (!s_cmd_frames || !(s_cmd_dump = fopen("sdmc:/3ds/noma/cmdlist.bin", "wb")))
+        return;
+    u32* cmdbuf;
+    u32 size, off;
+    GPUCMD_GetBuffer(&cmdbuf, &size, &off);
+    dump_word(0x53594850), dump_word(7);
+    dump_phys("linear", (void*)__ctru_linear_heap, __ctru_linear_heap_size);
+    dump_phys("color", P.top->frameBuf.colorBuf, 240 * 400 * 4);
+    dump_phys("depth", P.top->frameBuf.depthBuf, 240 * 400 * 4);
+    dump_phys("vbuf", P.vbuf, POOL_VERTICES * sizeof(PVertex));
+    dump_phys("slots", P.slots, POOL_VERTICES * sizeof(GxTnlSlots));
+    dump_phys("ibuf", P.ibuf, IBUF_INDICES * sizeof(u16));
+    dump_phys("cmdbuf", cmdbuf, size * 4);
+    fflush(s_cmd_dump);
+    log("pica: the first %d frames' command lists go to cmdlist.bin", s_cmd_frames);
+}
+void dump_frame_list() {
+    if (!s_cmd_dump)
+        return;
+    if ((int)P.frame >= s_cmd_frames) {
+        fclose(s_cmd_dump);
+        s_cmd_dump = nullptr;
+        return;
+    }
+    static u32 s_seq;
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    u32 words = (u32)(buf + off - s_frame_list);
+    dump_word(0x5453494C), dump_word(P.frame), dump_word(s_seq++), dump_word((u32)s_frame_list);
+    dump_word(osConvertVirtToPhys(s_frame_list)), dump_word(words);
+    fwrite(s_frame_list, 4, words, s_cmd_dump);
+    fflush(s_cmd_dump);
+    log("pica: frame %u's command list (%u words) dumped", P.frame, words);
+}
+
 void flush_geometry() {
     if (P.vused)
         GSPGPU_FlushDataCache(P.vbuf, P.vused * sizeof(PVertex));
@@ -689,7 +794,129 @@ void end_frame() {
     if (check_state_on())
         check_state_list();
     flush_geometry();
+    dump_frame_list();
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+}
+
+// ---- NOMA_PICA_STEP (see above): the pieces
+const char* const k_step_names[4] = {"the clear", "a command list of one register write", "a draw",
+                                     "the display transfer"};
+
+// the GPU's queue finished within `ms` (citro3d then has a new frame open); polled, as the GPU's
+// thread has nothing else to do meanwhile
+bool step_wait(u32 ms) {
+    const u64 t0 = svcGetSystemTick(), limit = (u64)ms * (SYSCLOCK_ARM11 / 1000);
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (svcGetSystemTick() - t0 >= limit)
+            return false;
+        svcSleepThread(100 * 1000);
+    }
+    return true;
+}
+
+// what the GPU hung on, as the log can say it; then the wait goes on, as a frame's start would
+void step_hung(StepKind k) {
+    log("pica step: frame %u: %s (the frame's piece %u) hasn't finished in 2 s: the GPU hangs on it", P.frame,
+        k_step_names[k], S.pieces);
+    if (k == STEP_CLEAR || k == STEP_TRANSFER) {
+        u16 fw = 0, fh = 0;
+        void* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fw, &fh);
+        log("pica step: color buffer pa %08lX, depth buffer pa %08lX, 240x400; the screen's buffer va %p pa %08lX, %ux%u",
+            osConvertVirtToPhys(P.top->frameBuf.colorBuf), osConvertVirtToPhys(P.top->frameBuf.depthBuf), fb,
+            osConvertVirtToPhys(fb), fw, fh);
+    }
+    if (k == STEP_DRAW && S.count) {
+        // its vertices: ranges and values that aren't numbers
+        float lo[4][3], hi[4][3];
+        for (int a = 0; a < 4; a++)
+            for (int c = 0; c < 3; c++)
+                lo[a][c] = 1e30f, hi[a][c] = -1e30f;
+        u32 bad = 0, smax[4] = {};
+        for (u32 i = S.lo; i <= S.hi; i++) {
+            const PVertex& v = P.vbuf[i];
+            const float* src[4] = {v.pos, v.tc[0], v.tc[1], v.tc[2]};
+            for (int a = 0; a < 4; a++)
+                for (int c = 0; c < 3; c++) {
+                    float x = src[a][c];
+                    if (!std::isfinite(x)) {
+                        bad++;
+                        continue;
+                    }
+                    lo[a][c] = std::min(lo[a][c], x), hi[a][c] = std::max(hi[a][c], x);
+                }
+            for (int c = 0; c < 3; c++)
+                bad += !std::isfinite(v.nrm[c]);
+            for (int s = 0; s < 4; s++)
+                smax[s] = std::max<u32>(smax[s], P.slots[i].s[s]);
+        }
+        log("pica step: GX draw %u: %u indices at ibuf+%u, vertices %u-%u; position x %g..%g y %g..%g z %g..%g; "
+            "texgen 0 %g..%g %g..%g %g..%g; %u values not finite; slots up to %u %u %u %u; bools %04lX, %lu lights",
+            S.draw, S.count, S.first, S.lo, S.hi, lo[0][0], hi[0][0], lo[0][1], hi[0][1], lo[0][2], hi[0][2], lo[1][0],
+            hi[1][0], lo[1][1], hi[1][1], lo[1][2], hi[1][2], bad, smax[0], smax[1], smax[2], smax[3],
+            (unsigned long)P.consts.bools, (unsigned long)P.consts.nlights);
+        char tex[192] = "";
+        int n = 0;
+        for (int u = 0; u < 3; u++)
+            if (P.tex[u])
+                n += snprintf(tex + n, sizeof(tex) - n, " unit %d: format %u %ux%u pa %08lX;", u, (u32)P.tex[u]->fmt,
+                              P.tex[u]->width, P.tex[u]->height, osConvertVirtToPhys(P.tex[u]->data));
+        log("pica step: textures%s blend %08lX depth %08lX alpha test %08lX cull %lu scissor %lu %08lX %08lX",
+            n ? tex : " none;", (unsigned long)D.blend, (unsigned long)D.depth, (unsigned long)D.alpha_test,
+            (unsigned long)D.cull, (unsigned long)D.scissor[0], (unsigned long)D.scissor[1],
+            (unsigned long)D.scissor[2]);
+        if (FILE* f = fopen("sdmc:/3ds/noma/hang.bin", "wb")) {
+            write_batch(f, S.hi - S.lo + 1, P.vbuf + S.lo, P.slots + S.lo, S.count, P.ibuf + S.first, S.lo);
+            fclose(f);
+            log("pica step: the draw's batch is in hang.bin (tools/pica_replay)");
+        }
+    }
+    GpuWait w("for a step (C3D_FrameBegin)");
+    C3D_FrameBegin(0);
+}
+
+// the commands since the last piece (none for the clear), alone on the GPU; the frame then goes on
+void step_piece(StepKind k) {
+    if (k == STEP_LIST)
+        GPUCMD_AddWrite(GPUREG_VTX_FUNC, 1);  // (clears the post-vertex cache: harmless anywhere)
+    if (k == STEP_DRAW) {  // (as citro3d ends a list that drew: the frame buffer's cache written out)
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    }
+    if (check_state_on())
+        check_state_list();
+    flush_geometry();
+    dump_frame_list();
+    C3D_RenderTargetDetachOutput(P.top);  // (the screen gets the frame at its end)
+    S.pieces++;
+    const u64 t0 = svcGetSystemTick();
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    if (!step_wait(2000))
+        step_hung(k);
+    const double ms = (double)(svcGetSystemTick() - t0) * 1000.0 / SYSCLOCK_ARM11;
+    S.ms[k] += ms;
+    if (k == STEP_DRAW) {
+        S.draws++;
+        if (ms > S.worst)
+            S.worst = ms, S.worst_draw = S.draw;
+    }
+    C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    C3D_FrameDrawOn(P.top);
+    frame_list_starts();
+}
+
+// after end_frame: the display transfer alone (its list had nothing left), and the frame's line
+void step_transfer() {
+    S.pieces++;
+    const u64 t0 = svcGetSystemTick();
+    if (!step_wait(2000))
+        step_hung(STEP_TRANSFER);
+    S.ms[STEP_TRANSFER] = (double)(svcGetSystemTick() - t0) * 1000.0 / SYSCLOCK_ARM11;
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);  // (closes the empty frame step_wait opened)
+    log("pica step: frame %u on the GPU a piece at a time: clear %.2f ms, a command list %.2f ms, %u draws %.2f ms "
+        "(longest %.2f ms: GX draw %u), display transfer %.2f ms",
+        P.frame, S.ms[STEP_CLEAR], S.ms[STEP_LIST], S.draws, S.ms[STEP_DRAW], S.worst, S.worst_draw,
+        S.ms[STEP_TRANSFER]);
+    S = Step();
 }
 
 // ---------------------------------------------------------------- textures
@@ -1111,6 +1338,7 @@ void begin_frame() {
         // the emulated retrace already, and a slow frame shouldn't wait for the next vblank too.
         // This only waits for the GPU to finish the previous frame.
         NOMA_PROF_SCOPE("(gx wait)");
+        GpuWait w("for the last frame (C3D_FrameBegin)");
         C3D_FrameBegin(0);
     }
     NOMA_PROF_SCOPE("(gx frame)");
@@ -1123,7 +1351,10 @@ void begin_frame() {
         C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
     P.resume = false;
     C3D_FrameDrawOn(P.top);
+    frame_list_starts();
     P.c3d_touched = true;
+    if (stepping())  // (NOMA_PICA_STEP: the clear alone, then a command list of one register write)
+        step_piece(STEP_CLEAR), step_piece(STEP_LIST);
     P.vmax = std::max(P.vmax, P.vused);
     P.imax = std::max(P.imax, P.iused);
     P.vused = P.iused = 0;
@@ -1248,6 +1479,10 @@ bool PicaRenderer::init() {
     P.slots = (GxTnlSlots*)linearAlloc(POOL_VERTICES * sizeof(GxTnlSlots));
     P.rows = (GxTnlRows*)malloc(POOL_VERTICES * sizeof(GxTnlRows));
     P.ibuf = (u16*)linearAlloc(IBUF_INDICES * sizeof(u16));
+    if (P.vbuf && P.slots && P.ibuf)
+        s_buf_base = std::min({osConvertVirtToPhys(P.vbuf), osConvertVirtToPhys(P.slots), osConvertVirtToPhys(P.ibuf)}) &
+                     ~0xFu;
+    log("pica: vertex and index buffers from physical %08lX", (unsigned long)s_buf_base);
     P.dl = new DlEntry[DL_ENTRIES];
     if (!P.vbuf || !P.slots || !P.rows || !P.ibuf)
         return false;
@@ -1255,7 +1490,8 @@ bool PicaRenderer::init() {
     C3D_CullFace(GPU_CULL_NONE);
     aptHook(&s_apt_cookie, apt_hook, nullptr);
     P.ready = true;
-    log("pica: renderer ready");
+    log("pica: renderer ready%s", s_c3d_only ? " (everything through citro3d: NOMA_PICA_C3D)" : "");
+    dump_open();
     return true;
 }
 
@@ -1276,6 +1512,10 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     if (!max_indices || count >= IMM_VERTICES || cull == 3)  // (3: all culled)
         return;
     begin_frame();
+    if (stepping() && P.batch_count) {  // (NOMA_PICA_STEP: the draw before this one, alone)
+        flush_batch();
+        step_piece(STEP_DRAW);
+    }
     // (a strip drawn in pieces builds two vertices more per piece: some room beyond count)
     const u32 room = count + 2 * (count / 4 + 1);
     if (P.vused + room > IMM_VERTICES || P.iused + max_indices > IBUF_INDICES) {
@@ -1704,6 +1944,7 @@ bool read_back() {
         P.cull = ~0u;
     }
     // outside a frame this waits for the GPU's queue, then for the transfer
+    GpuWait w("for a read-back (C3D_SyncDisplayTransfer)");
     C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), s_readback,
                             GX_BUFFER_DIM(240, 400),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -1715,6 +1956,7 @@ bool read_back() {
         C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         C3D_FrameBegin(0);
         C3D_FrameDrawOn(P.top);
+        frame_list_starts();
         P.c3d_touched = true;
         // the frame's immediate vertices and indices are reused from the start (the GPU
         // finished with them; the lists' vertices stay)
@@ -1828,11 +2070,18 @@ void PicaRenderer::draw_done() {
             set_efb_offset(0, 0);  // the whole frame
             gx_efb_copy_test(readback_rgba, "sdmc:/3ds/noma/efbcopy_3ds");
         }
+        const bool step = stepping();
+        if (step && P.batch_count) {  // (NOMA_PICA_STEP: the frame's last draw alone)
+            flush_batch();
+            step_piece(STEP_DRAW);
+        }
         {
             NOMA_PROF_SCOPE("(gx end)");
             Timed timed(Timers::END);
             end_frame();
         }
+        if (step)
+            step_transfer();
         timers_frame_end();
         P.in_frame = false;
         if (s_dump && (int)P.frame == s_dump_frame) {
@@ -1873,6 +2122,21 @@ void PicaRenderer::draw_done() {
 // An applet (the keyboard) takes the GPU: citro3d's own APT hook waits for what was submitted
 // and sets all state again afterwards, so only the open frame matters. Its draws so far go to the
 // render target without being shown, and the next draw goes on with it, uncleared.
+// (the I/O thread, every 100 ms) a wait for the GPU of more than 3 s: logged once. (Not with the
+// GPU's registers: reading the PICA's while it was stuck froze the whole console.)
+void pica_watchdog() {
+    static bool s_reported;
+    const char* what = s_waiting.load();
+    if (!what || s_reported)
+        return;
+    u64 t = svcGetSystemTick() - s_wait_since.load();
+    if (t < 3ull * SYSCLOCK_ARM11)
+        return;
+    s_reported = true;
+    log("pica: waiting %llu ms %s in frame %u: the GPU hasn't finished", t / (SYSCLOCK_ARM11 / 1000), what,
+        s_wait_frame.load());
+}
+
 void PicaRenderer::suspend() {
     if (!P.ready || !P.in_frame)
         return;

@@ -212,9 +212,15 @@
   ifu stq0
     call divide_q
   .end
-  mul otc0.xy, tcscale[0].xyxy, r13
+  ; (every component of every output is written for every vertex, z and w as 0 here though the
+  ; output map drops them: a real PICA never finishes a draw whose shader leaves one unwritten --
+  ; the emulator lets it pass. Writing only x and y hung a New 3DS at its first frame; the Jak
+  ; port's GPU hung on the same. tools/check_shader_outputs.py keeps it so.)
+  mov r13.zw, consts.xxxx
+  mul otc0, tcscale[0].xyxy, r13
 
-  ; ---- texgen 1
+  ; ---- texgen 1 (0 when unused)
+  mov r13, consts.xxxx
   ifu tg1
     mova a0.y, idx.zzzz
     mov r12.xyz, tc1
@@ -226,10 +232,12 @@
     ifu stq1
       call divide_q
     .end
-    mul otc1.xy, tcscale[0].zwzw, r13
   .end
+  mov r13.zw, consts.xxxx
+  mul otc1, tcscale[0].zwzw, r13
 
-  ; ---- texgen 2
+  ; ---- texgen 2 (0 when unused, as texgen 1)
+  mov r13, consts.xxxx
   ifu tg2
     mova a0.y, idx.wwww
     mov r12.xyz, tc2
@@ -241,7 +249,8 @@
     ifu stq2
       call divide_q
     .end
-    mul otc2.xy, tcscale[1].xyxy, r13
   .end
+  mov r13.zw, consts.xxxx
+  mul otc2, tcscale[1].xyxy, r13
   end
 .end
