@@ -359,7 +359,9 @@ def decompiled_functions(names, natives):
         out.append(body)
     text = "\n".join(out)
     text = re.sub(r"\b(" + "|".join(map(re.escape, natives)) + r")\(", r"dec_\1(", text)
-    return '#include "noma_decomp.h"\nnamespace g {\n' + text + "}  // namespace g\n", sorted(seen)
+    # (the renamed ones declared first: one may call another defined after it)
+    protos = "".join(m.group(1) + ";\n" for m in re.finditer(r"^([A-Za-z_][\w<> ]* dec_\w+\([^)]*\))\s*\{", text, re.M))
+    return '#include "noma_decomp.h"\nnamespace g {\n' + protos + text + "}  // namespace g\n", sorted(seen)
 
 
 def bench_gxsdk(trials=3000):
@@ -417,6 +419,43 @@ def bench_gxsdk(trials=3000):
         sys.exit(1 if bad else 0)
 
 
+def bench_lyt(trials=4000):
+    """engine/lyt/quad.cpp's quads against the decompiled nw4r::lyt::detail::DrawQuad (fn_80464570) and
+    its alpha variant (fn_80464AD0), on random quads: the same FIFO bytes; instructions a quad"""
+    cxx = os.path.join(DEVKITARM, "bin", "arm-none-eabi-g++")
+    base = [f for f in FLAGS if f != "-O2"]
+    natives = ["fn_80464570", "fn_80464AD0"]
+    with tempfile.TemporaryDirectory() as out:
+        dec, pulled = decompiled_functions(natives, natives)
+        open(os.path.join(out, "dec.cpp"), "w").write(dec)
+        print("decompiled functions in the bench: %s" % ", ".join(pulled))
+        objs = []
+        for src, opt in ((os.path.join(out, "dec.cpp"), DECOMP_FLAGS), (os.path.join(ROOT, "engine/lyt/quad.cpp"), ["-O2"]),
+                         (os.path.join(ROOT, "tools/armbench/lyt_bench.cpp"), ["-O2"])):
+            obj = os.path.join(out, os.path.basename(src) + ".o")
+            subprocess.check_call([cxx] + base + opt + INCLUDES + ["-c", src, "-o", obj])
+            objs.append(obj)
+        elf = os.path.join(out, "bench.elf")
+        subprocess.check_call([cxx] + base + ["-O2", "-nostartfiles", "-Wl,--gc-sections", "-Wl,-e,run", "-Wl,-u,count",
+                                              "-Wl,-Ttext=0x10000"] + objs + ["-lc", "-lgcc", "-o", elf])
+        m = Machine(elf, ("run", "count", "gx_mem1"))
+        dol = open(os.path.join(ROOT, "orig/HCIJ/sys/main.dol"), "rb").read()
+        word = lambda o: int.from_bytes(dol[o:o + 4], "big")
+        for k in range(18):
+            off, addr, size = word(4 * k), word(0x48 + 4 * k), word(0x90 + 4 * k)
+            if size and 0x80000000 <= addr and addr + size <= 0x80900000:
+                m.uc.mem_write(m.fn["gx_mem1"] + addr - 0x80000000, dol[off:off + size])
+        same = m.call("run", 0, 0, trials) == m.call("run", 1, 0, trials)
+        print("%d random quads: %s" % (trials, "the same FIFO bytes" if same else "DIFFERENT"))
+        for alpha in (0, 1):
+            for n_tex in (0, 1, 2):
+                n = [(m.instructions("count", nat, alpha, n_tex, 64) - m.instructions("count", nat, alpha, n_tex, 0)) / 64
+                     for nat in (0, 1)]
+                print("DrawQuad%s, %d texture coordinate sets: decompiled %5.0f, native %5.0f ARM instructions a quad" % (
+                    " (alpha)" if alpha else "", n_tex, n[0], n[1]))
+        sys.exit(0 if same else 1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lines", type=int, metavar="KIND")
@@ -429,9 +468,12 @@ def main():
     ap.add_argument("--gx", action="store_true")
     ap.add_argument("--gx-funcs", type=int, metavar="KIND")
     ap.add_argument("--gxsdk", action="store_true")
+    ap.add_argument("--lyt", action="store_true")
     args = ap.parse_args()
     if args.gxsdk:
         return bench_gxsdk()
+    if args.lyt:
+        return bench_lyt()
     if args.gx or args.gx_funcs is not None:
         return bench_gx(args.gx_funcs)
     if args.cx is not None:
