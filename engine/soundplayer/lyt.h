@@ -177,6 +177,22 @@ inline void alpha_to_children(u32 pane, bool on) {
     guest::store8(pane + 0xBB, on ? (u8)(f | 2) : (u8)(f & ~2));
 }
 
+// nw4r::lyt's location adjust. On a 16:9 screen (the channel's setting here) the channel's 2D
+// DrawInfo (lbl_80882DE0; set up by fn_8013F368) has it on (+0x50 bit 0x20) with the scale (0.75,
+// 1) at +0x44: a pane flagged for it (+0xBB bit 4) is drawn at that scale, and with it everything
+// under it, the text too. The channel's screens hang their parts under such panes (their scene
+// layouts' locators), so the TV's 16:9 widening gives them back their shapes. A layout drawn on
+// its own takes the same by flagging its top pane, and then counts its widths in units 1/0.75 as
+// wide; location_adjust_x() is the scale (1 on a 4:3 screen).
+inline f32 location_adjust_x() {
+    u32 draw_info = guest::load32(GA_lbl_80882DE0);
+    return draw_info && (guest::load8(draw_info + 0x50) & 0x20) ? load_f32(draw_info + 0x44) : 1.0f;
+}
+inline void location_adjust(u32 pane, bool on) {
+    u8 f = guest::load8(pane + 0xBB);
+    guest::store8(pane + 0xBB, on ? (u8)(f | 4) : (u8)(f & ~4));
+}
+
 // ---- colours
 
 struct Rgb {

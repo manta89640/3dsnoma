@@ -50,9 +50,11 @@ const char* const ROW_LEX = "layout/Message_Inbox/Message_List_Text.lex";
 const char* const UP_LEX = "layout/Profile/Profile_Up_Btn.lex";
 const char* const DOWN_LEX = "layout/Profile/Profile_Down_Btn.lex";
 
-// Geometry, in layout units (608 x 456, the origin at the centre, y up). The window is in the
-// screen's left half, clear of the Home tab at the bottom left; the rows' places are counted from
-// the window's centre.
+// Geometry, in layout units (608 x 456, the origin at the centre, y up), as it shows on the screen.
+// The window is in the screen's left half, clear of the Home tab at the bottom left; the rows'
+// places are counted from the window's centre. The window takes the channel's location adjust
+// (lyt.h: drawn 3/4 as wide on a 16:9 screen, as the channel's own lists are, their text with
+// them), so the widths inside it are made 1/0.75 as wide (`wide`) to show at these sizes.
 const f32 WINDOW_X = -154, WINDOW_Y = 42;
 const f32 WINDOW_W = 284, WINDOW_H = 292;
 const int VISIBLE = 6;                // rows shown at once
@@ -67,6 +69,8 @@ const f32 FONT_W = 22.08f, FONT_H = 26.22f;  // the dialogs' and balloons' text 
 const f32 HEADER_FONT_W = 17.6f, HEADER_FONT_H = 20.9f;
 const f32 TAB_SCALE = 0.8f, TAB_H = 44 * TAB_SCALE;
 const u32 NAME_CHARS = 32;            // room in each text box
+// widths inside the window: 1 / the location adjust's scale (set as the list is made)
+f32 wide = 1;
 
 // the playing row's bar: cyan, lighter when the pointer or the D-pad's highlight is on it (the
 // colour a pushed button flashes); grey when paused
@@ -141,11 +145,11 @@ struct RowPanes {
         root = root_pane(layout);
         alpha_to_children(root, true);
         if (u32 bound = find_pane(layout, "Bound_Btn"))
-            resize(bound, ROW_W, PITCH - 2);
+            resize(bound, ROW_W * wide, PITCH - 2);
         bar = find_pane(layout, "Pic_Bar");
-        resize(bar, ROW_W, ROW_H);
+        resize(bar, ROW_W * wide, ROW_H);
         line = find_pane(layout, "B_Line");
-        resize(line, ROW_W, load_f32(line + 0x50));
+        resize(line, ROW_W * wide, load_f32(line + 0x50));
         text = find_pane(layout, "B_TextBox_00");
         text_reserve(text, NAME_CHARS);
         char_space(text, -1);
@@ -153,14 +157,14 @@ struct RowPanes {
         date = find_pane(layout, "B_TextBox_Date");
     }
     void name_style() {
-        move(text, TEXT_X, 0);
-        resize(text, TEXT_W, 35);
+        move(text, TEXT_X * wide, 0);
+        resize(text, TEXT_W * wide, 35);
         text_position(text, TEXT_LEFT);
         font_size(text, FONT_W, FONT_H);
     }
     void header_style() {
-        move(text, HEADER_X, -4);
-        resize(text, HEADER_W, 30);
+        move(text, HEADER_X * wide, -4);
+        resize(text, HEADER_W * wide, 30);
         text_position(text, TEXT_LEFT);
         font_size(text, HEADER_FONT_W, HEADER_FONT_H);
     }
@@ -255,9 +259,11 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
 
     // the window: moved and resized (its animations scale and fade Wind_01 and Loc_Text and slide
     // Loc_Window; Loc_Top, above them, is free to move)
+    wide = 1.0f / location_adjust_x();
     m.window = layout_new(WINDOW_LEX);
+    location_adjust(find_pane(m.window, "Loc_Top"), true);
     move(find_pane(m.window, "Loc_Top"), WINDOW_X, WINDOW_Y);
-    resize(find_pane(m.window, "Wind_01"), WINDOW_W, WINDOW_H);
+    resize(find_pane(m.window, "Wind_01"), WINDOW_W * wide, WINDOW_H);
     for (const char* page : {"Text_Page_Num", "Text_Total_Num", "Text_Slash"})
         show(find_pane(m.window, page), false);
     // the rows and tabs hang under Loc_Text, which the FadeIn fades in last: its alpha reaches them
@@ -270,8 +276,8 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
     set_alpha(m.bar.bar, 255);
     paint(m.bar.text, WHITE);
     show(m.bar.line, false);
-    move(m.bar.date, MARK_X, 0);
-    resize(m.bar.date, 28, 30);
+    move(m.bar.date, MARK_X * wide, 0);
+    resize(m.bar.date, 28 * wide, 30);
     text_position(m.bar.date, TEXT_CENTRE);
     font_size(m.bar.date, FONT_W, FONT_H);
     text_reserve(m.bar.date, 2);
@@ -347,7 +353,7 @@ void TrackList::Impl::assign(Row& r, int entry) {
         set_text(r.panes.text, HEADER);
         paint(r.panes.text, HEADER_GREY);
     } else {
-        fit_text(r.panes.text, catalog()[entries[entry]].name, TEXT_W, FONT_W, FONT_H, 0.7f);
+        fit_text(r.panes.text, catalog()[entries[entry]].name, TEXT_W * wide, FONT_W, FONT_H, 0.7f);
     }
 }
 
@@ -511,7 +517,7 @@ void TrackList::Impl::place_bar(const Music& music) {
         show(root, false);
     } else {
         if (e != bar_entry) {
-            fit_text(bar.text, catalog()[entries[e]].name, TEXT_W, FONT_W, FONT_H, 0.7f);
+            fit_text(bar.text, catalog()[entries[e]].name, TEXT_W * wide, FONT_W, FONT_H, 0.7f);
             bar_entry = e;
         }
         char16_t mark = state == PlayState::PAUSED ? PAUSE : NOTE;
