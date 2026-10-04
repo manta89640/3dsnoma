@@ -16,7 +16,13 @@ inline u32 controller() { return guest::load32(GA_lbl_80882C9C); }     // the in
 // D-pad LEFT 0x1, RIGHT 0x2, DOWN 0x4, UP 0x8)
 inline u32 buttons_triggered() { return guest::load32(controller() + 0xB44); }
 inline u32 buttons_held() { return guest::load32(controller() + 0xB40); }
-enum : u32 { PAD_LEFT = 0x1, PAD_RIGHT = 0x2, PAD_DOWN = 0x4, PAD_UP = 0x8, PAD_B = 0x400, PAD_A = 0x800 };
+enum : u32 {
+    PAD_LEFT = 0x1, PAD_RIGHT = 0x2, PAD_DOWN = 0x4, PAD_UP = 0x8, PAD_PLUS = 0x10,
+    PAD_B = 0x400, PAD_A = 0x800, PAD_MINUS = 0x1000,
+};
+// the pointer is on the screen (KPADStatus dpd_valid_fg, s8): on the 3DS, while the touch screen or
+// the circle pad was used in the last three seconds
+inline bool pointer_on_screen() { return (s8)guest::load8(controller() + 0xB9E) > 0; }
 
 // ---- lib::SceneManager
 inline void change_scene(u32 factory) { g::fn_8018E0C8(scene_manager(), factory); }
@@ -34,6 +40,12 @@ inline void wipe_in(u32 type) {
 
 // ---- layout::Button (0x69C bytes)
 const u32 VTABLE_LAYOUT_BUTTON = GA_lbl_80794960, LAYOUT_BUTTON_SLOTS = 21;
+
+// ---- the exclusive button group (0x10 bytes): a button's push locks the group's other buttons
+const u32 GROUP_SIZE = 0x10;
+inline void group_ctor(u32 g) { g::fn_8018F520(g); }
+inline void group_dtor_delete(u32 g) { g::fn_8018F620(g, 1); }
+inline void group_add(u32 button, u32 g) { g::fn_8018F238(button, g); }
 
 // ---- layout::Cursor (0x300 bytes)
 const u32 CURSOR_SIZE = 0x300;
