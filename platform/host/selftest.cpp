@@ -12,6 +12,7 @@
 #include "engine/audio/ax_reference.h"
 #include "engine/audio/ax_render.h"
 #include "engine/cx/cx_reference.h"
+#include "hw/gx/raster.h"
 
 namespace guest {
 
@@ -996,6 +997,45 @@ static void selftest_fill() {
 // OSCalcCRC16 (engine/os/crc.cpp, a byte at a time) against the SDK's loop it replaces (half a byte
 // at a time through the DOL's table of 16): random blocks of 0 B to 1 MB at any alignment, and the
 // channel's save file size
+// gx_copy_to_texture_lookup (the 3DS's EFB copies from its read-back) against gx_copy_to_texture on
+// random copies: every format, full and half size, intensity, rectangles cut by the block grid
+namespace {
+const u32 *s_efb_px, *s_efb_col, *s_efb_row;
+void efb_fetch(u32 x, u32 y, s32* out) {
+    u32 p = s_efb_px[s_efb_col[x & 1023] + s_efb_row[y & 1023]];
+    out[0] = (s32)(p >> 24), out[1] = (s32)((p >> 16) & 255), out[2] = (s32)((p >> 8) & 255), out[3] = (s32)(p & 255);
+}
+}  // namespace
+static void selftest_efb() {
+    u32 rng = 12345;
+    auto next = [&] { return rng = rng * 1103515245u + 12345u, rng >> 8; };
+    std::vector<u32> px(240 * 400), col(1024), row(1024);
+    std::vector<u8> a, b;
+    u32 bad = 0, n = 0;
+    for (int t = 0; t < 3000; t++) {
+        for (u32& p : px)
+            p = next() ^ next() << 16;
+        for (u32 i = 0; i < 1024; i++)
+            col[i] = std::min<u32>(i * 400 / 640, 399) * 240, row[i] = 239 - std::min<u32>(i * 240 / 456, 239);
+        EfbCopy c;
+        static const u32 fmts[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        c.fmt = fmts[t % 13];
+        c.w = 1 + next() % 300, c.h = 1 + next() % 300, c.sx = next() % 340, c.sy = next() % 200;
+        c.half = t % 5 == 1, c.intensity = t % 7 == 2;
+        u32 w = c.half ? std::max<u32>(1, c.w / 2) : c.w, h = c.half ? std::max<u32>(1, c.h / 2) : c.h;
+        c.stride = (w + 7) / 8 * 64;
+        size_t size = (size_t)c.stride * ((h + 7) / 4 + 2);
+        a.assign(size, 0xCD), b.assign(size, 0xCD);
+        s_efb_px = px.data(), s_efb_col = col.data(), s_efb_row = row.data();
+        gx_copy_to_texture(c, efb_fetch, a.data());
+        gx_copy_to_texture_lookup(c, px.data(), col.data(), row.data(), b.data());
+        n++;
+        if (a != b && bad++ < 4)
+            log("selftest efb: fmt %u %ux%u half %u intensity %u differs", c.fmt, c.w, c.h, (u32)c.half, (u32)c.intensity);
+    }
+    log("selftest efb: %u copies, %s", n, bad ? "DIFFERENT" : "ok");
+}
+
 static void selftest_crc() {
     axref::Rng rnd{1616};
     const u32 base = 0x90200000;
@@ -1052,6 +1092,8 @@ bool run_selftest(const std::string& name) {
         selftest_fill();
     else if (name == "crc")
         selftest_crc();
+    else if (name == "efb")
+        selftest_efb();
     else if (name == "all") {
         selftest_rfl();
         selftest_time();
@@ -1066,6 +1108,7 @@ bool run_selftest(const std::string& name) {
         selftest_cx();
         selftest_fill();
         selftest_crc();
+        selftest_efb();
     }
     else
         return false;

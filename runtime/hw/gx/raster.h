@@ -22,6 +22,10 @@ EfbCopy gx_efb_copy_params(u32 command);
 using EfbFetch = void (*)(u32 x, u32 y, s32* rgba);
 // write a copy of the EFB rectangle to the texture at c.dst, or to `out` (laid out the same way)
 void gx_copy_to_texture(const EfbCopy& c, EfbFetch fetch, u8* out = nullptr);
+// the same from a read-back buffer: EFB pixel (x, y) is pixels[col[x & 1023] + row[y & 1023]], as
+// 0xRRGGBBAA. The common copies (RGB565, RGB5A3, RGBA8 at full size, not intensity) go straight
+// from it; the others through gx_copy_to_texture.
+void gx_copy_to_texture_lookup(const EfbCopy& c, const u32* pixels, const u32* col, const u32* row, u8* out = nullptr);
 // NOMA_EFB_COPY_TEST=N (3DS): at frame N the whole frame goes through the EFB-to-texture path
 // (RGBA8, and RGB565 at half size) and is saved decoded as <prefix>_rgba8.bmp / _rgb565.bmp,
 // to compare with the host's frame dumps

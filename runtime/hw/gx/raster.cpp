@@ -808,6 +808,59 @@ void gx_copy_to_texture(const EfbCopy& c, EfbFetch efb_rgba, u8* out) {
         gx_texture_invalidate(dst, blocks_y * row_bytes);
 }
 
+namespace {
+const u32* s_lk_pixels;
+const u32 *s_lk_col, *s_lk_row;
+void lookup_fetch(u32 x, u32 y, s32* out) {
+    u32 p = s_lk_pixels[s_lk_col[x & 1023] + s_lk_row[y & 1023]];
+    out[0] = (s32)(p >> 24), out[1] = (s32)((p >> 16) & 255), out[2] = (s32)((p >> 8) & 255), out[3] = (s32)(p & 255);
+}
+}  // namespace
+
+void gx_copy_to_texture_lookup(const EfbCopy& c, const u32* pixels, const u32* col, const u32* row, u8* out) {
+    if (c.half || c.intensity || (c.fmt != 4 && c.fmt != 5 && c.fmt != 6) || !c.w || !c.h) {
+        s_lk_pixels = pixels, s_lk_col = col, s_lk_row = row;
+        gx_copy_to_texture(c, lookup_fetch, out);
+        return;
+    }
+    // as gx_copy_to_texture: 4x4 blocks (RGBA8: 64 bytes, its AR halves then its GB halves),
+    // texels past the rectangle repeat its last row and column
+    const u32 w = c.w, h = c.h, fmt = c.fmt, bbytes = fmt == 6 ? 64 : 32;
+    const u32 blocks_x = (w + 3) / 4, blocks_y = (h + 3) / 4;
+    for (u32 by = 0; by < blocks_y; by++) {
+        u32 rows[4];
+        for (u32 j = 0; j < 4; j++)
+            rows[j] = row[(c.sy + std::min(by * 4 + j, h - 1)) & 1023];
+        for (u32 bx = 0; bx < blocks_x; bx++) {
+            const u32 at = by * c.stride + bx * bbytes;
+            u8* o = out ? out + at : host_ptr(0x80000000 | ((c.dst + at) & 0x1FFFFFFF));
+            if (!o)
+                continue;
+            u32 cols[4];
+            for (u32 i = 0; i < 4; i++)
+                cols[i] = col[(c.sx + std::min(bx * 4 + i, w - 1)) & 1023];
+            for (u32 i = 0; i < 16; i++) {
+                const u32 p = pixels[cols[i & 3] + rows[i >> 2]];
+                const u32 r = p >> 24, g = (p >> 16) & 255, b = (p >> 8) & 255, a = p & 255;
+                if (fmt == 6) {
+                    o[2 * i] = (u8)a, o[2 * i + 1] = (u8)r, o[32 + 2 * i] = (u8)g, o[32 + 2 * i + 1] = (u8)b;
+                    continue;
+                }
+                u32 v;
+                if (fmt == 4)
+                    v = (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
+                else if (a >= 224)
+                    v = 0x8000 | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3);
+                else
+                    v = (a >> 5) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4);
+                o[2 * i] = (u8)(v >> 8), o[2 * i + 1] = (u8)v;
+            }
+        }
+    }
+    if (!out)
+        gx_texture_invalidate(c.dst, blocks_y * c.stride);
+}
+
 int gx_efb_copy_test_frame() {
     static int frame = getenv("NOMA_EFB_COPY_TEST") ? atoi(getenv("NOMA_EFB_COPY_TEST")) : -1;
     return frame;
