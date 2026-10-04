@@ -84,7 +84,7 @@ inline u32 layout_new(const char* path) {
     u32 w = g::operator_new(LAYOUT_SIZE);
     if (!w)
         guest::fatal("soundplayer: out of guest memory for %s", path);
-    g::fn_8013B3B4(w, Name(path), 0);  // LayoutWrapper::LayoutWrapper(path, flags)
+    g::layout_LayoutWrapper_ctor(w, Name(path), 0);  // LayoutWrapper::LayoutWrapper(path, flags)
     return w;
 }
 
@@ -94,39 +94,39 @@ inline u32 layout_new_in(const char* path, u32 parent, const char* locator) {
     if (!w)
         guest::fatal("soundplayer: out of guest memory for %s", path);
     // LayoutWrapper::LayoutWrapper(path, parent nw4r::lyt::Layout*, locator name, flags)
-    g::fn_8013B540(w, Name(path), guest::load32(parent + 0xC), Name(locator), 0);
+    g::layout_LayoutWrapper_ctorAttached(w, Name(path), guest::load32(parent + 0xC), Name(locator), 0);
     return w;
 }
 
 // LayoutWrapper::~LayoutWrapper (it leaves its locator), then the memory
 inline void layout_delete(u32 w) {
     if (w)
-        g::fn_8013B5FC(w, 1, 0, 0, 0);
+        g::layout_LayoutWrapper_dtor(w, 1, 0, 0, 0);
 }
 
 inline u32 root_pane(u32 w) { return guest::load32(guest::load32(w + 0xC) + 0x10); }
 
 // LayoutWrapper::FindPane: a pane of the layout (or of one hanging from it) by name, or 0
 inline u32 find_pane(u32 w, const char* name) {
-    return g::fn_8013B774(w, Name(name), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    return g::layout_LayoutWrapper_FindPane(w, Name(name), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }
 
 // LayoutWrapper::FindAnim: the animation "<layout>_<name>.brlan" of the layout, or 0
-inline u32 find_anim(u32 w, const char* name) { return g::fn_8013B848(w, Name(name)); }
+inline u32 find_anim(u32 w, const char* name) { return g::layout_LayoutWrapper_FindAnim(w, Name(name)); }
 
-// the animation's last frame (nw4r::lyt::AnimTransform::GetFrameSize, fn_80462660, less one)
-inline f32 last_frame(u32 anim) { return anim ? (f32)((u16)g::fn_80462660(anim, 0) - 1) : 0.0f; }
+// the animation's last frame (nw4r::lyt::AnimTransform::GetFrameSize, nw4r_lyt_AnimTransform_GetFrameSize, less one)
+inline f32 last_frame(u32 anim) { return anim ? (f32)((u16)g::nw4r_lyt_AnimTransform_GetFrameSize(anim, 0) - 1) : 0.0f; }
 
 // LayoutWrapper::SetAnimFrame: the layout posed at this frame of the animation (the animation
 // playing stops; the pose stays)
 inline void pose(u32 w, u32 anim, f32 frame) {
     if (anim)
-        g::fn_8013B9BC(w, anim, 1, frame);
+        g::layout_LayoutWrapper_SetAnimFrame(w, anim, 1, frame);
 }
 
-// LayoutWrapper::PlayAnim (fn_8013BB30): the animation plays once, from frame 0 a frame at a time
+// LayoutWrapper::PlayAnim (layout_LayoutWrapper_PlayAnim): the animation plays once, from frame 0 a frame at a time
 // (a task of the game's runs it), then stops on its last frame. The std::tr1::function it calls
-// at the end is an empty one, as the button layouts pass for their Focus. (fn_8013BCAC, which
+// at the end is an empty one, as the button layouts pass for their Focus. (layout_LayoutWrapper_PlayAnimLoop, which
 // the button layouts use for their "Wait", plays an animation over and over.)
 inline void play(u32 w, u32 anim) {
     if (!anim)
@@ -134,19 +134,19 @@ inline void play(u32 w, u32 anim) {
     GFRAME(0x20);
     for (u32 i = 0; i < 0x20; i += 4)
         guest::store32(_gframe.sp + i, 0);
-    g::fn_8013BB30(w, anim, _gframe.sp, 0, 0, 0.0, 1.0);
-    g::fn_80014960(_gframe.sp, (u32)-1, 0, 0, 0);  // the function's destructor
+    g::layout_LayoutWrapper_PlayAnim(w, anim, _gframe.sp, 0, 0, 0.0, 1.0);
+    g::std_tr1_function_dtor(_gframe.sp, (u32)-1, 0, 0, 0);  // the function's destructor
 }
 
 // LayoutWrapper::GetPlayingAnim: an animation is playing
-inline bool animating(u32 w) { return g::fn_8013BE1C(w) != 0; }
+inline bool animating(u32 w) { return g::layout_LayoutWrapper_GetPlayingAnim(w) != 0; }
 
 // LayoutWrapper::Update: the animations applied, the panes' matrices worked out (once a frame
 // for a layout of its own, after its panes have been moved)
-inline void layout_update(u32 w) { g::fn_8013BE74(w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
+inline void layout_update(u32 w) { g::layout_LayoutWrapper_Update(w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
 
 // LayoutWrapper::Draw (with the layouts hanging from it)
-inline void layout_draw(u32 w) { g::fn_8013BECC(w); }
+inline void layout_draw(u32 w) { g::layout_LayoutWrapper_Draw(w); }
 
 // ---- panes
 
@@ -171,14 +171,14 @@ inline void alpha_to_children(u32 pane, bool on) {
 }
 
 // nw4r::lyt's location adjust. On a 16:9 screen (the channel's setting here) the channel's 2D
-// DrawInfo (lbl_80882DE0; set up by fn_8013F368) has it on (+0x50 bit 0x20) with the scale (0.75,
+// DrawInfo (layout_sDrawInfo; set up by layout_DrawInfo_SetLocationAdjust) has it on (+0x50 bit 0x20) with the scale (0.75,
 // 1) at +0x44: a pane flagged for it (+0xBB bit 4) is drawn at that scale, and with it everything
 // under it, the text too. The channel's screens hang their parts under such panes (their scene
 // layouts' locators), so the TV's 16:9 widening gives them back their shapes. A layout drawn on
 // its own takes the same by flagging its top pane, and then counts its widths in units 1/0.75 as
 // wide; location_adjust_x() is the scale (1 on a 4:3 screen).
 inline f32 location_adjust_x() {
-    u32 draw_info = guest::load32(GA_lbl_80882DE0);
+    u32 draw_info = guest::load32(GA_layout_sDrawInfo);
     return draw_info && (guest::load8(draw_info + 0x50) & 0x20) ? load_f32(draw_info + 0x44) : 1.0f;
 }
 inline void location_adjust(u32 pane, bool on) {
@@ -236,7 +236,7 @@ inline f32 text_width(u32 box) {
     GFRAME(0x10);
     const f32 width = load_f32(box + 0x4C);
     store_f32(box + 0x4C, 4096.0f);
-    g::fn_8045B820(_gframe.sp, box);  // TextBox::GetTextDrawRect
+    g::nw4r_lyt_TextBox_GetTextDrawRect(_gframe.sp, box);  // TextBox::GetTextDrawRect
     store_f32(box + 0x4C, width);
     return load_f32(_gframe.sp + 8) - load_f32(_gframe.sp);
 }
@@ -265,7 +265,7 @@ inline void fit_text(u32 box, const std::u16string& s, f32 width, f32 w, f32 h, 
 const u32 BUTTON_SIZE = 0x69C, PLAY_BUTTON_SIZE = 0x788;
 // the classes' vtables, for engine::system::hookable_button_class: layout::Button has 21
 // virtuals, and layout::movie::PlayButton as many
-const u32 VTABLE_LAYOUT_BUTTON = GA_lbl_80794960, VTABLE_PLAY_BUTTON = GA_lbl_80796B4C;
+const u32 VTABLE_LAYOUT_BUTTON = GA_layout_Button_vtable, VTABLE_PLAY_BUTTON = GA_layout_movie_PlayButton_vtable;
 const u32 LAYOUT_BUTTON_SLOTS = 21;
 
 // layout::Button::Button(path, parent nw4r::lyt::Layout*, locator name, cursor): hangs from the
@@ -278,14 +278,14 @@ inline u32 button_new(const char* path, u32 parent, const char* locator, u32 cur
     return b;
 }
 
-// layout::movie::PlayButton::PlayButton (fn_80145558, the same arguments): the video player's
+// layout::movie::PlayButton::PlayButton (layout_movie_PlayButton_ctor, the same arguments): the video player's
 // play/pause button, a layout::Button whose looks switch between "plays" and "paused" on every
 // push (see controls.cpp)
 inline u32 play_button_new(const char* path, u32 parent, const char* locator, u32 cursor) {
     u32 b = g::operator_new(PLAY_BUTTON_SIZE);
     if (!b)
         guest::fatal("soundplayer: out of guest memory for %s", path);
-    g::fn_80145558(b, Name(path), guest::load32(parent + 0xC), Name(locator), cursor);
+    g::layout_movie_PlayButton_ctor(b, Name(path), guest::load32(parent + 0xC), Name(locator), cursor);
     return b;
 }
 
@@ -318,19 +318,19 @@ inline bool group_busy(u32 b) {
 
 // the sounds a button plays: the labels' pointers in the program's data (they must last)
 inline u32 sound_label(u32 slot) { return guest::load32(slot); }
-const u32 SE_OVER_M = GA_lbl_8087D778;        // WAV_SE_010_ICON_OVER_M: focus
-const u32 SE_CLICK_S = GA_lbl_8087D780;       // WAV_SE_012_ICON_CLICK_S: a list's arrows
-const u32 SE_CLICK_GENERAL = GA_lbl_8087D788;  // WAV_SE_016_CLICK_GENERAL: push
+const u32 SE_OVER_M = GA_layout_sSeIconOverM;        // WAV_SE_010_ICON_OVER_M: focus
+const u32 SE_CLICK_S = GA_layout_sSeIconClickS;       // WAV_SE_012_ICON_CLICK_S: a list's arrows
+const u32 SE_CLICK_GENERAL = GA_layout_sSeClickGeneral;  // WAV_SE_016_CLICK_GENERAL: push
 inline void set_sounds(u32 b, u32 focus_slot, u32 push_slot) {
     guest::store32(b + 0x4BC, focus_slot ? sound_label(focus_slot) : 0);
     guest::store32(b + 0x4C0, push_slot ? sound_label(push_slot) : 0);
 }
 
 // ---- the screen's wipe (layout::parts::Wipe, game::wipe(): +0x10C the kind playing; its layouts
-// per kind at +0, +4, ...: fn_80154FB8 gives the one playing)
+// per kind at +0, +4, ...: layout_parts_Wipe_GetCurrentLayout gives the one playing)
 inline bool wipe_playing() {
     u32 wipe = game::wipe();
-    return wipe && animating(g::fn_80154FB8(wipe));  // Wipe: the layout of the kind playing
+    return wipe && animating(g::layout_parts_Wipe_GetCurrentLayout(wipe));  // Wipe: the layout of the kind playing
 }
 
 // The screen's parts open (their FadeIns start, their buttons become usable) once the white fade

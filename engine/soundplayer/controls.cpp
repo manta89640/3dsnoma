@@ -16,11 +16,11 @@
 // layout::movie::PlayButton (0x788 bytes) switches its look on every push itself: +0x6AC is 1 while
 // it shows the pause bars (playing) and 0 while it shows ▶; +0x69C/+0x6A0/+0x6A4/+0x6A8 are its
 // animations Push_Play, Push_Stop, Focus_Play, Focus_Stop, of which its button layout's "Push" and
-// "Focus" are made to play the pair for its look (fn_801456B4, its OnPress). As the music can also
+// "Focus" are made to play the pair for its look (layout_movie_PlayButton_OnClick, its OnPress). As the music can also
 // pause, play or stop from elsewhere (the D-pad, the list, a jingle ending), the look is set here
 // to the music's state whenever no push is in progress: the same switch, then Play_to_Stop or
 // Stop_to_Play (or, under the pointer, the new Focus at its end), and its balloon's text (再生 /
-// 一時停止: fn_80145A80).
+// 一時停止: layout_movie_PlayButton_UpdateBalloon).
 #include "engine/soundplayer/controls.h"
 
 #include "engine/soundplayer/game.h"
@@ -65,7 +65,7 @@ enum : u32 {
     PB_PUSH_PLAY = 0x69C, PB_PUSH_STOP = 0x6A0, PB_FOCUS_PLAY = 0x6A4, PB_FOCUS_STOP = 0x6A8,
     PB_SHOWS_PAUSE = 0x6AC,
 };
-const u32 ANIM_PUSH = GA_lbl_8087D7E8, ANIM_FOCUS = GA_lbl_8087D7F0;  // "Push", "Focus"
+const u32 ANIM_PUSH = GA_layout_movie_PlayButton_sPush, ANIM_FOCUS = GA_layout_movie_PlayButton_sFocus;  // "Push", "Focus"
 
 }  // namespace
 
@@ -151,15 +151,15 @@ void Controls::Impl::show_playing(bool playing) {
     u32 layout = button_layout(play);
     guest::store8(play + PB_SHOWS_PAUSE, playing ? 1 : 0);
     u32 focus = guest::load32(play + (playing ? PB_FOCUS_STOP : PB_FOCUS_PLAY));
-    // ButtonLayout's map of its standard animations (fn_801244EC(map, name, anim): ButtonLayout's
+    // ButtonLayout's map of its standard animations (layout_ButtonLayout_SetAnim(map, name, anim): ButtonLayout's
     // SetAnim, the map's entry for the name set to anim)
-    g::fn_801244EC(layout, ANIM_PUSH, guest::load32(play + (playing ? PB_PUSH_PLAY : PB_PUSH_STOP)));
-    g::fn_801244EC(layout, ANIM_FOCUS, focus);
+    g::layout_ButtonLayout_SetAnim(layout, ANIM_PUSH, guest::load32(play + (playing ? PB_PUSH_PLAY : PB_PUSH_STOP)));
+    g::layout_ButtonLayout_SetAnim(layout, ANIM_FOCUS, focus);
     if (focused(play))
         pose(layout, focus, last_frame(focus));
     else
         lyt::play(layout, find_anim(layout, playing ? "Play_to_Stop" : "Stop_to_Play"));
-    g::fn_80145A80(play);  // its balloon: 一時停止 or 再生
+    g::layout_movie_PlayButton_UpdateBalloon(play);  // its balloon: 一時停止 or 再生
 }
 
 // "♪ name", "∥ name", or the prompt; a new track's name fades in

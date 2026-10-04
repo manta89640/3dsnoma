@@ -7,7 +7,7 @@
 // 3D sound handles, two globals every Mii body and BodyController reads; then the Miis' actor
 // manager over the stage's ScnRoot with only the animation files the dances use, and the faces at
 // 128 pixels (a head is some 40 pixels high here). Every member of the household (model::Family)
-// is spawned (fn_80209B34 works outside the room) and given a SpecialAnim behaviour at once (a Mii
+// is spawned (room_SpawnMii works outside the room) and given a SpecialAnim behaviour at once (a Mii
 // without one would get the room's AI). There's no camera manager: camera 1, the stage's, is
 // written before every calc. Torn down in the TvScene's order; each global goes back to 0 with its
 // object.
@@ -187,7 +187,7 @@ f32 frame_at(const Clip& c, double u) {
 u32 heap_free(std::string* name) {
     u32 heap = guest::load32(guest::load32(GA_lib_allocator_HeapBase_sRoot) + 0x1C);
     *name = guest::read_string(guest::load32(heap + 0x14), 16);
-    if (guest::load32(heap + 0x8) != GA_lbl_807AE918)
+    if (guest::load32(heap + 0x8) != GA_lib_allocator_HeapStd_HeapStdImpl_vtable)
         return 0;
     return guest::load32(heap + 0x28) - guest::load32(heap + 0x24);
 }
@@ -253,19 +253,19 @@ Stage::Impl::Impl() {
     std::vector<u8> ids;
     miis.reserve(MAX_MIIS);
     {
-        // model::Family (0x10 bytes): the household from the channel's save; fn_801A4904 ctor,
-        // fn_801A4B1C count, fn_801A4B24 person i (0x48 bytes: +0 the Mii's RFLCreateID, 8
-        // bytes), fn_801A4A7C dtor
+        // model::Family (0x10 bytes): the household from the channel's save; model_Family_ctor ctor,
+        // model_Family_GetCount count, model_Family_GetPerson person i (0x48 bytes: +0 the Mii's RFLCreateID, 8
+        // bytes), model_Family_dtor dtor
         GFRAME(0x20);
         u32 family = (u32)&GS(u32, 0x8);
-        g::fn_801A4904(family, 0);
-        u32 n = std::min<u32>(g::fn_801A4B1C(family, 0), MAX_MIIS);
+        g::model_Family_ctor(family, 0);
+        u32 n = std::min<u32>(g::model_Family_GetCount(family, 0), MAX_MIIS);
         for (u32 i = 0; i < n; i++) {
-            u32 person = g::fn_801A4B24(family, i);
+            u32 person = g::model_Family_GetPerson(family, i);
             for (u32 k = 0; k < 8; k++)
                 ids.push_back(guest::load8(person + k));
         }
-        g::fn_801A4A7C(family, (u32)-1);
+        g::model_Family_dtor(family, (u32)-1);
     }
     u32 n = (u32)ids.size() / 8;
 

@@ -78,19 +78,19 @@ inline std::vector<u8> two_tone_ia4(const Coverage& shape, f32 radius, f32 opaci
 // ---- text in the channel's font
 
 // The channel's font, wbf1.brfna (the Wii's system font, which every text box of the channel's
-// layouts uses): an nw4r::ut::ArchiveFont that the font manager (lbl_80882E60) holds at +0x20.
-// fn_800DE11C (the manager's load) reads wbf1.brfna from the channel's content, builds the font
-// over it with all its glyph sheets unpacked (fn_8048B020, ArchiveFont::Construct), registers it
+// layouts uses): an nw4r::ut::ArchiveFont that the font manager (lib_FontManager_sInstance) holds at +0x20.
+// lib_FontManager_LoadSystemFont (the manager's load) reads wbf1.brfna from the channel's content, builds the font
+// over it with all its glyph sheets unpacked (nw4r_ut_ArchiveFont_Construct, ArchiveFont::Construct), registers it
 // for the layouts under that name and sets +0x174. 0 while it isn't loaded.
 inline u32 system_font() {
-    u32 manager = guest::load32(GA_lbl_80882E60);
+    u32 manager = guest::load32(GA_lib_FontManager_sInstance);
     if (!manager || !guest::load8(manager + 0x174))
         return 0;
     return manager + 0x20;
 }
 
 // A character's glyph, from the font's nw4r::ut::Font::GetGlyph (its virtual at +0x50; the
-// ArchiveFont's is fn_8048B0F0, through ArchiveFontBase::GetGlyphFromIndex fn_8048B140), which fills
+// ArchiveFont's is nw4r_ut_ArchiveFont_GetGlyph, through ArchiveFontBase::GetGlyphFromIndex nw4r_ut_ArchiveFontBase_GetGlyphFromIndex), which fills
 // a Glyph: +0x0 the glyph sheet (a texture), +0x4 the ink's offset from the pen (s8), +0x5 the
 // ink's width, +0x6 the advance (s8), +0x7 the cell's height, +0x8 the sheet's GX format, +0xC the
 // sheet's width (u16), +0x10/+0x12 the cell's place on the sheet (u16). A character the font

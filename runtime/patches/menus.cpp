@@ -10,7 +10,7 @@
 // is no D-pad focus and no default focus), so nothing else has to skip them.
 // The room's bar also gets a sixth button, the Sound Player's (engine/soundplayer), in いろんな間's
 // place, いろんな間 moving into the shop's; the Sound Player's scene factory is made with the
-// application's (fn_80247FC0), and SceneTransit::Go (fn_800706E0) opens the Sound Player for the
+// application's (app_SceneFactories_ctor), and SceneTransit::Go (controller_living_SceneTransit_Go) opens the Sound Player for the
 // button's own To.
 
 #include "engine/soundplayer/sound_player.h"
@@ -24,8 +24,8 @@ void layout_option_Option_ctor_orig(u32 r3, u32 r4, u32 r5);
 u32 layout_option_Option_SetActive_orig(u32 r3, u32 r4);
 u32 controller_theater_LayoutController_ctor_orig(u32 r3, u32 r4, u32 r5, u32 r6);
 void layout_living_MoveBtn_ctor_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7);
-u32 fn_800706E0_orig(u32 r3, u32 r4);
-void fn_80247FC0_orig(u32 r3);
+u32 controller_living_SceneTransit_Go_orig(u32 r3, u32 r4);
+void app_SceneFactories_ctor_orig(u32 r3);
 
 namespace {
 
@@ -136,8 +136,8 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     if (guest::net_offline())
         hide(button(TV));
     // layout::Layout (the button's +0x14): detach from its locator, attach under another
-    fn_8013B72C(button(IRONNA) + 0x14);
-    fn_8013B6C0(button(IRONNA) + 0x14, locator(button(SHOP)));
+    layout_LayoutWrapper_Detach(button(IRONNA) + 0x14);
+    layout_LayoutWrapper_Attach(button(IRONNA) + 0x14, locator(button(SHOP)));
     if (count <= BACK)
         return;
     for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
@@ -145,26 +145,26 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
             nw4r_lyt_Pane_SetVisible(pane, 0);
     // (r4 the bar's scene layout, r5 the cursor, r7 the bar's focus group; the strings are the
     // bar's own: "layout/Move_Btn/Move_Btn_Ironna_Btn.lex", "Loc_ironna_Btn")
-    fn_8012DB20(r3, GA_lbl_807902D8 + 0x1D0, r4, GA_lbl_807902D8 + 0x1F8, r5, r7, TO_SOUND_PLAYER);
+    layout_living_MoveBtn_AddTransitButton(r3, GA_layout_living_MoveBtn_sData + 0x1D0, r4, GA_layout_living_MoveBtn_sData + 0x1F8, r5, r7, TO_SOUND_PLAYER);
     if (guest::load32(r3 + 0xD08) > BACK + 1)
         engine::soundplayer::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 1)));
 }
 
 // The application's scene factories, made at the start (one block of them): the Sound Player's
 // is made with them (engine/soundplayer: its guest objects last as long as the program).
-void fn_80247FC0(u32 r3) {
-    fn_80247FC0_orig(r3);
+void app_SceneFactories_ctor(u32 r3) {
+    app_SceneFactories_ctor_orig(r3);
     engine::soundplayer::boot();
 }
 
 // controller::living::SceneTransit::Go(To): the scene a room bar button leads to, once the room
 // has been wiped out. The Sound Player's button asks for its own To.
-u32 fn_800706E0(u32 r3, u32 r4) {
+u32 controller_living_SceneTransit_Go(u32 r3, u32 r4) {
     if (r4 == TO_SOUND_PLAYER) {
         engine::system::change_scene(engine::soundplayer::scene_factory());
         return 0;
     }
-    return fn_800706E0_orig(r3, r4);
+    return controller_living_SceneTransit_Go_orig(r3, r4);
 }
 
 }  // namespace g

@@ -1,6 +1,6 @@
 // The Sound Player's tracks (see catalog.h).
 //
-// The sound archive as nw4r::snd keeps it (sound::SoundManager at lbl_80882E48: +0 its
+// The sound archive as nw4r::snd keeps it (sound::SoundManager at sound_SoundManager_sInstance: +0 its
 // MemoryArchive, whose +4 is the nw4r::snd::MemorySoundArchive; that one's +4 the
 // SoundArchiveFileReader): the reader's +0x28 is the INFO block (past its 8-byte header), +0x2C the
 // SYMB block, +0x30 SYMB's string table {u32 count, u32 offsets from SYMB}. INFO starts with
@@ -111,7 +111,7 @@ std::u16string name_of_label(const std::string& label) {
 
 std::vector<Track> read_catalog() {
     std::vector<Track> out;
-    u32 manager = guest::load32(GA_lbl_80882E48);  // sound::SoundManager
+    u32 manager = guest::load32(GA_sound_SoundManager_sInstance);  // sound::SoundManager
     u32 memory_archive = manager ? guest::load32(manager) : 0;
     u32 reader = memory_archive ? guest::load32(memory_archive + 4 + 4) : 0;
     if (!reader) {
