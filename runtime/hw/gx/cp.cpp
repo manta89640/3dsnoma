@@ -160,6 +160,7 @@ static void load_bp(u32 cmd) {
     switch (reg) {
     case 0x45:  // draw done
         if ((v & 0xFF) == 2) {
+            NOMA_PROF_SCOPE("(gx draw done)");
             s_stats.finish++;
             s_renderer->draw_done();
             pe_finish();
@@ -175,19 +176,25 @@ static void load_bp(u32 cmd) {
         s_stats.tokens++;
         pe_token((u16)v, true);
         break;
-    case 0x65:  // load a palette into TMEM
+    case 0x65: {  // load a palette into TMEM
+        NOMA_PROF_SCOPE("(gx tmem)");
         gx_load_tlut(g_gx.bp[0x64], v);
         break;
+    }
     case 0x63:  // preload a texture into TMEM (0: GXTexModeSync, no load)
-        if (v)
+        if (v) {
+            NOMA_PROF_SCOPE("(gx tmem)");
             gx_preload(g_gx.bp[0x60], g_gx.bp[0x61], g_gx.bp[0x62], v);
+        }
         break;
-    case 0x52:  // EFB copy
+    case 0x52: {  // EFB copy
+        NOMA_PROF_SCOPE("(gx efb copy)");
         s_stats.copies++;
         s_renderer->efb_copy(v);
         if (s_debug)
             dump_stats();
         break;
+    }
     default: break;
     }
 }

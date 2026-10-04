@@ -2072,6 +2072,7 @@ void PicaRenderer::efb_copy(u32 value) {
         if (P.warned++ < 4)
             log("pica: EFB depth copy to a texture (not emulated)");
     } else if (read_back()) {
+        NOMA_PROF_SCOPE("(gx copy convert)");
         Timed timed(Timers::COPY);
         T.copies++;
         gx_copy_to_texture(c, readback_rgba);
