@@ -307,6 +307,104 @@ def bench_gx(funcs_kind=None, draws=64, flush_every=7):
                 name, w, h, old / (w * h), new / (w * h), "same texture" if same else "TEXTURE DIFFERS"))
 
 
+# --gxsdk: engine/gx/gx_sdk.cpp's natives against the decompiled functions they replace
+GXSDK_FUNCS = ["__GXSetDirtyState", "__GXSetSUTexRegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
+               "__GXSetMatrixIndex", "GXSetTevColorS10", "GXSetTevKColor", "GXSetTevSwapModeTable", "GXLoadTexMtxImm",
+               "GXLoadTexObjPreLoaded"]
+DECOMP_FLAGS = ["-O1", "-w", "-fno-strict-aliasing", "-fwrapv", "-ftrivial-auto-var-init=zero"]
+
+
+def decompiled_functions(names, natives):
+    """The decompiled source of `names` and of what they call that isn't a native (by name), the
+    natives' decompiled versions renamed dec_*."""
+    import re
+    src_dir = os.path.join(ROOT, "build/decomp/src")
+    texts = {}
+    for fn in sorted(os.listdir(src_dir)):
+        if fn.endswith(".cpp"):
+            texts[fn] = open(os.path.join(src_dir, fn), errors="replace").read()
+    def find(name):
+        pat = re.compile(r"^[A-Za-z_][\w<> ]* " + re.escape(name) + r"\(.*?^}\n", re.S | re.M)
+        for t in texts.values():
+            m = pat.search(t)
+            if m:
+                return m.group(0)
+        return None
+    decl = open(os.path.join(ROOT, "build/decomp/include/decl.h")).read()
+    known = set(re.findall(r"^[\w<> ]+? (\w+)\(", decl, re.M))
+    out, todo, seen = [], list(names), set()
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = find(name)
+        if body is None:
+            raise SystemExit("no decompiled %s" % name)
+        for callee in set(re.findall(r"\b(\w+)\(", body)):
+            if callee in known and callee != name and callee not in seen:
+                todo.append(callee)
+        out.append(body)
+    text = "\n".join(out)
+    text = re.sub(r"\b(" + "|".join(map(re.escape, natives)) + r")\(", r"dec_\1(", text)
+    return '#include "noma_decomp.h"\nnamespace g {\n' + text + "}  // namespace g\n", sorted(seen)
+
+
+def bench_gxsdk(trials=3000):
+    cxx = os.path.join(DEVKITARM, "bin", "arm-none-eabi-g++")
+    base = [f for f in FLAGS if f != "-O2"]
+    with tempfile.TemporaryDirectory() as out:
+        dec, pulled = decompiled_functions(GXSDK_FUNCS, GXSDK_FUNCS)
+        open(os.path.join(out, "dec.cpp"), "w").write(dec)
+        print("decompiled functions in the bench: %s" % ", ".join(pulled))
+        objs = []
+        for src, opt in ((os.path.join(out, "dec.cpp"), DECOMP_FLAGS), (os.path.join(ROOT, "engine/gx/gx_sdk.cpp"), ["-O2"]),
+                         (os.path.join(ROOT, "tools/armbench/gxsdk_bench.cpp"), ["-O2"])):
+            obj = os.path.join(out, os.path.basename(src) + ".o")
+            subprocess.check_call([cxx] + base + opt + INCLUDES + ["-I" + os.path.join(ROOT, "engine"), "-c", src, "-o", obj])
+            objs.append(obj)
+        elf = os.path.join(out, "bench.elf")
+        subprocess.check_call([cxx] + base + ["-O2", "-nostartfiles", "-Wl,--gc-sections", "-Wl,-e,run", "-Wl,-u,count", "-Wl,-Ttext=0x10000"] +
+                              objs + ["-lc", "-lgcc", "-o", elf])
+        m = Machine(elf, ("run", "count", "gx_sent", "gx_sent_n", "gx_mem1"))
+        # the DOL's sections into MEM1 (the GX library reads its own tables)
+        dol = open(os.path.join(ROOT, "orig/HCIJ/sys/main.dol"), "rb").read()
+        word = lambda o: int.from_bytes(dol[o:o + 4], "big")
+        for k in range(18):
+            off, addr, size = word(4 * k), word(0x48 + 4 * k), word(0x90 + 4 * k)
+            if size and 0x80000000 <= addr and addr + size <= 0x80900000:
+                m.uc.mem_write(m.fn["gx_mem1"] + addr - 0x80000000, dol[off:off + size])
+        bad = 0
+        for i, name in enumerate(GXSDK_FUNCS):
+            same = m.call("run", i, 0, 0, trials) == m.call("run", i, 1, 0, trials)
+            n = [(m.instructions("count", i, nat, 256) - m.instructions("count", i, nat, 0)) / 256 for nat in (0, 1)]
+            print("%-24s decompiled %6.1f, native %6.1f ARM instructions a call; %d random states: %s" % (
+                name, n[0], n[1], trials, "same" if same else "DIFFERENT"))
+            if same:
+                continue
+            bad += 1
+            lo, hi = 0, trials  # the first state they differ on
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if m.call("run", i, 0, lo, mid - lo) != m.call("run", i, 1, lo, mid - lo):
+                    hi = mid
+                else:
+                    lo = mid
+            outs = []
+            for nat in (0, 1):
+                m.call("run", i, nat, lo, 1)
+                n_sent = int.from_bytes(m.uc.mem_read(m.fn["gx_sent_n"], 4), "little")
+                sent = bytes(m.uc.mem_read(m.fn["gx_sent"], n_sent))
+                mem = bytes(m.uc.mem_read(m.fn["gx_mem1"] + 0x800000, 0x11000))
+                outs.append((sent, mem))
+            (s0, m0), (s1, m1) = outs
+            print("    state %d: sent %s | %s" % (lo, s0[:64].hex(), s1[:64].hex()) if s0 != s1 else "    state %d: same bytes sent (%d)" % (lo, len(s0)))
+            diffs = [k for k in range(len(m0)) if m0[k] != m1[k]][:8]
+            for k in diffs:
+                print("    memory %08X: decompiled %02X native %02X" % (0x80800000 + k, m0[k], m1[k]))
+        sys.exit(1 if bad else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lines", type=int, metavar="KIND")
@@ -318,7 +416,10 @@ def main():
     ap.add_argument("--snd-diff", nargs="?", const="HEAD", metavar="REV")
     ap.add_argument("--gx", action="store_true")
     ap.add_argument("--gx-funcs", type=int, metavar="KIND")
+    ap.add_argument("--gxsdk", action="store_true")
     args = ap.parse_args()
+    if args.gxsdk:
+        return bench_gxsdk()
     if args.gx or args.gx_funcs is not None:
         return bench_gx(args.gx_funcs)
     if args.cx is not None:

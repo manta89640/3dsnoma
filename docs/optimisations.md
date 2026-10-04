@@ -145,7 +145,6 @@ no GPU-side work pays before the CPU sides do. On the Old 3DS the GPU thread sha
 
 | What | Where | Expected | Effort | Risk |
 |---|---|---|---|---|
-| The GX SDK natively on core 0: the GX calls are ~10% of core 0's samples in a profile build (GXLoadTexObjPreLoaded, __GXSetDirtyState, GXSetTevSwapModeTable, GXLoadTexMtxImm, GXSetArray, GXSetTevColorS10, ... per material and draw). `engine/gx/gx_sdk.cpp` (unwired) has the hottest ones but writes through `gx_fifo_write`, which is now slower than the decompiled code's inline `gather_put`: switch it, diff-test against the decompiled code (FIFO bytes and `__GXData`), wire through NATIVE_NAMES | `engine/gx/gx_sdk.cpp` | est. 3–5% of core 0 | 2 days | Low with a diff test |
 | The layouts' quads natively (nw4r::lyt's DrawQuad family fn_80464570/fn_80464AD0 and the pane draw fn_80460EF0: ~5% of core 0 in a profile build), then g3d's material setup (fn_80443630, ResMatChan) | `engine/lyt`, `engine/g3d` | est. 3–5% of core 0 | Days | Must match the streams |
 | Our own PICA state writes instead of `C3D_DrawElements` after a state change (~150 a frame): citro3d's context update walks both shaders' 96 uniform flags and rebinds every dirty part on each | `platform/3ds/gx_pica.cpp` | est. ~0.5 ms a frame on the GPU thread | 1–2 days | Low |
 | Cached draws without palette work: every frame now starts with an empty palette, so cached draws keep their slots (rewrites ~5,160 → ~30 vertices a frame), but each still looks its matrices up (~600 ARM11 instructions, ~800 draws a frame) because each draw loads a new matrix into the same XF row; a slot per draw that stays its own, or fixed attributes for fixed-matrix draws, would make them nearly free | `runtime/hw/gx/tnl.cpp`, `gx_pica.cpp` | est. ~1–2 ms a frame on the GPU thread | 2 days | Batch count |
@@ -184,6 +183,17 @@ main (c9dfb61): the room-making frame 1.27 s, the room shown at 19.35 s; in the 
 | `-ffp-contract=off` for host builds | Apple clang fuses `a*b+c` into FMADD by default and the 3DS's VFP never does, so host and 3DS results can differ in the last bit. |
 
 ## Ruled out
+
+- **The GX SDK's hot calls as natives** (`engine/gx/gx_sdk.cpp`: __GXSetDirtyState and its parts,
+  the TEV color/swap setters, GXLoadTexMtxImm, GXLoadTexObjPreLoaded; unwired). Measured with
+  `tools/armbench/armbench.py --gxsdk`, which runs them against the decompiled functions on random
+  states (FIFO bytes, `__GXData` and the return value identical, 3,000 states each): only 10–24%
+  fewer ARM11 instructions a call (GXSetTevSwapModeTable 179 → 148, GXLoadTexObjPreLoaded
+  480 → 394, GXLoadTexMtxImm 373 → 339). The work is the bytes into the write-gather buffer and the
+  `__GXData` updates, which the decompiled code already does inline; the profile build overstates
+  such small functions (its shadow stack costs as much as their bodies). About 1% of core 0: not
+  worth a decompile run. Batching a call's commands in a local buffer was slower still (an extra
+  copy and newlib's generic `memcpy`).
 
 - **Faster CPU transform (`xform.cpp`: one reciprocal for s/t/q, ×1/255).** The transform runs in
   the PICA's vertex shader now; `xform.cpp` is only the host's reference.
