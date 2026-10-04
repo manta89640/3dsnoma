@@ -6,7 +6,7 @@
 //           by one spot light), built into the list cache (with its matrix rows)
 //   kind 2: kind 1 drawn again from the cache: only its fixed slots (a new matrix in the same XF row)
 //   kind 3: a skinned draw from the cache (a matrix index per vertex, three matrices): its slots
-//   kind 4: kind 2 in frames as the renderer has them: 28 draws a frame in batches of 7, the palette
+//   kind 4: kind 2 in frames as the renderer has them: 24 draws a frame in batches of 6, the palette
 //           empty at each frame's start, each draw hinted with the slots it had the frame before
 // tex(direct, fmt, w, h, hash) converts a w x h texture of GX format fmt (random bytes and palette) into PICA
 // texture memory: decoded to RGBA8 then tiled (direct 0), or straight from the GX tiles (direct 1,
@@ -167,13 +167,13 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
         s_pal.flushed();
     }
     GxTnlSlots fixed = {};
-    static GxTnlSlots hints[28];
-    static bool hinted[28];
+    static GxTnlSlots hints[24];
+    static bool hinted[24];
     for (u32 d = 0; d < draws && kind == 4; d++) {
-        const u32 i = d % 28;
+        const u32 i = d % 24;
         if (i == 0)
             s_pal = GxTnlPalette();
-        if (i % 7 == 0)
+        if (i % 6 == 0)  // (six lit draws' matrices and the texture matrix fill the palette's 14 groups)
             s_pal.flushed();
         load_matrix(0, d);
         const GxTnlPlan& plan = gx_tnl_plan(0, su, 1, clip, 1);

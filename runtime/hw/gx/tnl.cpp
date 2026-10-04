@@ -470,7 +470,50 @@ bool gx_tnl_rows_vary(const GxTnlPlan& p) {
     return false;
 }
 
+namespace {
+
+// the rows of `kind` from XF row `xf_row` at exactly `slot` (the slot a draw had last frame): its
+// groups empty and free (filled now), or holding these rows (refilled if XF changed them and no
+// pending vertex reads them); false otherwise
+bool pal_reuse(GxTnlPalette& pal, u8 kind, u8 xf_row, u32 slot) {
+    const u32 need = pal_groups_of(kind), g = slot / 3;
+    if (slot % 3 || g + need > PAL_GROUPS)
+        return false;
+    GxTnlPalette::Entry& e = pal.entries[g];
+    if (!e.kind) {
+        const u16 mask = (u16)(((1u << need) - 1) << g);
+        if ((pal.used_groups & mask) || (need == 2 && pal.entries[g + 1].kind))
+            return false;
+        pal_fill(pal, g, kind, xf_row);
+        pal.used |= slots_mask(3 * g, 3 * need);
+        pal.used_groups |= mask;
+        pal.ref |= mask;
+        return true;
+    }
+    return pal_try(pal, g, kind, xf_row) == (int)slot;
+}
+
+}  // namespace
+
 bool gx_tnl_fixed_slots(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots* hint, GxTnlSlots* out) {
+    // the slots the draw had last time, when they can be had again (each frame starts with an
+    // empty palette, so a frame drawing what the last one did usually finds them free)
+    if (hint) {
+        bool ok = pal_reuse(pal, p.nrm_eye ? PAL_R3N : PAL_R3, p.def_pos_index, hint->s[0]);
+        GxTnlSlots o;
+        o.s[0] = hint->s[0];
+        for (u32 k = 0; k < 3 && ok; k++) {
+            const GxTnlPlan::Tc& t = p.tc[k];
+            o.s[1 + k] = t.src == TNL_SRC_ZERO ? 0 : hint->s[1 + k];
+            if (t.src != TNL_SRC_ZERO)
+                ok = pal_reuse(pal, t.stq ? PAL_R3 : PAL_R2, t.def_index, hint->s[1 + k]);
+        }
+        if (ok) {
+            s_pal_stats.reused++;
+            *out = o;
+            return true;
+        }
+    }
     SlotMaps m;
     if (!m.init(p, pal, hint))
         return false;

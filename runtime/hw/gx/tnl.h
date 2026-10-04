@@ -143,7 +143,7 @@ u32 gx_tnl_array_ranges(const GxVertexFormat& f, const u8* data, u32 count, GxTn
 u32 gx_tnl_approximated();
 // what the palette did so far: entries filled, checked against XF memory (and found stale), room searched
 struct GxTnlPalStats {
-    u32 fills, checks, stale, scans;
+    u32 fills, checks, stale, scans, reused;  // reused: fixed-slot draws that got last frame's slots again
 };
 GxTnlPalStats gx_tnl_pal_stats();
 
