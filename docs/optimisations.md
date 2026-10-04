@@ -145,7 +145,9 @@ s (25.2 s before the round); the start's long frame (2.72 → 2.01 s) is I/O-bou
 archive alone is 1.1 s, file system jobs 0.25 s, the main thread's CPU 0.47 s; the room-making frame
 (3.15 → 1.48 s) is the sound thread ~39%, waits for reads ~15% (243 reads, 1.7 MB), LZ ~6% (1.7 →
 3.0 MB, 150 ms), the allocator's own search ~4%, the rest the scene's own code; the next frame (1.2
-s) is the GPU thread's first textures and the save written to the card.
+s) is the GPU thread's first textures and the save written to the card. With the audio round also on
+main (c9dfb61): the room-making frame 1.27 s, the room shown at 19.35 s; in the room ~33 fps, p99
+~50 ms (the steady state is CPU-bound, not loading).
 
 | What | Where | Expected | Effort | Exact? |
 |---|---|---|---|---|
