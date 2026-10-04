@@ -1030,6 +1030,64 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
         st.cells_visible, st.cells_total, st.instances_visible, st.instances_total);
 }
 
+// ---------------------------------------------------------------- the world's cost, at the island's scale
+// 49 more cells of 4,000 units with 8 batches each (the plan's 39 cells, 330 cell draws) and 515 trees
+// (WSR's tree count) scattered over 28,000 x 28,000: the host's time for a frame's update, cull and both
+// packets (the 3DS's ARM11 is roughly 10-20 times slower a core: an estimate, not a measurement)
+void test_world_cost() {
+    Scene sc;
+    Rng r{99};
+    for (int z = -3; z <= 3; z++)
+        for (int x = -3; x <= 3; x++) {
+            fm::Cell cl = {};
+            const Vec3 c = {x * 4000.0f, 0, z * 4000.0f};
+            const f32 box[6] = {c.x - 2000, -100, c.z - 2000, c.x + 2000, 1500, c.z + 2000};
+            memcpy(cl.bbox, box, sizeof(box));
+            cl.n_lods = 1;
+            cl.first[0] = (u32)sc.p.cbat.size(), cl.count[0] = 8;
+            for (int k = 0; k < 8; k++)
+                sc.p.cbat.push_back(sc.p.add_box_batch({c.x + (k % 4) * 900.0f - 1350, 50, c.z + (k / 4) * 1800.0f - 900},
+                                                       {400, 50, 800}, k == 7 ? sc.mat_xlu : sc.mat_ground));
+            cl.group = sc.p.strs.add("grp_big");
+            sc.p.cells.push_back(cl);
+        }
+    for (int i = 0; i < 515; i++) {
+        fm::Instance in = {};
+        in.model = sc.model_tree, in.anim = fm::NONE16, in.flags = fm::INST_STATIC;
+        const f32 mtx[3][4] = {{1, 0, 0, r.unit() * 28000 - 14000}, {0, 1, 0, 0}, {0, 0, 1, r.unit() * 28000 - 14000}};
+        memcpy(in.mtx, mtx, sizeof(mtx));
+        sc.p.insts.push_back(in);
+    }
+    std::string error;
+    g3::Package* pkg = load_bytes(sc.p.bytes(), &error);
+    expect(pkg != nullptr, "the big scene loads: %s", error.c_str());
+    if (!pkg)
+        return;
+    g3::World w(*pkg);
+    g3::Packet opa, xlu;
+    g3::Camera cam;
+    cam.aspect = 400.0f / 240.0f, cam.near_ = 1.5f, cam.far_ = 80000;
+    const int frames = 200;
+    const auto t0 = std::chrono::steady_clock::now();
+    u32 items = 0;
+    for (int f = 0; f < frames; f++) {
+        const f32 a = f * 0.03f;
+        cam.eye = {0, 300, 0}, cam.target = {std::cos(a) * 5000, 0, std::sin(a) * 5000};
+        w.update((f32)f);
+        w.set_camera(cam);
+        w.build_packet(g3::Pass::OPAQUE, &opa);
+        w.build_packet(g3::Pass::TRANSLUCENT, &xlu);
+        items += (u32)(opa.items.size() + xlu.items.size());
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
+    const g3::WorldStats& st = w.stats();
+    log("selftest g3d: cost: %u cells, %u instances: %.3f ms a frame on the host for update, cull and both packets "
+        "(last frame: %u/%u cells, %u/%u instances, %u items; %u items a frame on average)",
+        st.cells_total, st.instances_total, ms, st.cells_visible, st.cells_total, st.instances_visible,
+        st.instances_total, st.items_opaque + st.items_translucent, items / frames);
+    delete pkg;
+}
+
 // ---------------------------------------------------------------- the packet ring
 struct TestBackend : g3::Backend {
     std::vector<std::string> calls;
@@ -1322,6 +1380,7 @@ void selftest_g3d() {
             delete pkg;
         }
     }
+    test_world_cost();
     const char* path = getenv("NOMA_G3D_PACKAGE");
     test_real_package(path ? path : "wuhu/island.ng3d");
     log("selftest g3d: %d checks, %d failed: %s", s_checks, s_failures, s_failures ? "MISMATCH" : "ok");
