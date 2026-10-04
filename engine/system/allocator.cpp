@@ -50,11 +50,47 @@ u32 heap_fill(u32 dst, u32 size) {
     return dst + size;
 }
 
+// The heap whose memory holds addr: from `heap` down its tree of child heaps (children in a list at
+// 0xC, its first entry at 0x10, siblings at 0x4), into each child whose Contains (vtable slot 0x14)
+// says yes, until none does. Every free asks it from the root. The heap kinds' Contains are done here
+// (the call through the vtable cost more than the comparison); any other is called.
+u32 find_contain_heap(u32 heap, u32 addr) {
+    enum : u32 {
+        HEAP_STD_CONTAINS = 0x80189E24,  // [0x1C, 0x20)
+        HEAP_UNT_CONTAINS = 0x8018A108,  // [0x1C, 0x1C + 0x24 * 0x28): blocks of one size
+        ROOT_CONTAINS = 0x803654A0,      // everything
+    };
+    u32 child = guest::load32(heap + 0x10);
+    while (child != heap + 0xC) {
+        if (--guest::g_loop_budget < 0)
+            guest::loop_poll();
+        const u32 fn = guest::load32(guest::load32(child + 0x8) + 0x14);
+        bool in;
+        if (fn == HEAP_STD_CONTAINS) {
+            in = guest::load32(child + 0x1C) <= addr && addr < guest::load32(child + 0x20);
+        } else if (fn == HEAP_UNT_CONTAINS) {
+            const u32 start = guest::load32(child + 0x1C);
+            in = start <= addr && addr < start + guest::load32(child + 0x24) * guest::load32(child + 0x28);
+        } else if (fn == ROOT_CONTAINS) {
+            in = true;
+        } else {
+            in = ::gcall<u32>(fn, child, addr) != 0;
+        }
+        if (in)
+            heap = child, child = guest::load32(child + 0x10);
+        else
+            child = guest::load32(child + 0x4);
+    }
+    return heap;
+}
+
 }  // namespace engine::system
 
 // ---- the guest ABI (decl.h)
 namespace g {
 
 u32 lib_allocator_Fill(u32 dst, u32 size) { return engine::system::heap_fill(dst, size); }
+
+u32 lib_allocator_HeapBase_FindContainHeap(u32 heap, u32 addr) { return engine::system::find_contain_heap(heap, addr); }
 
 }  // namespace g

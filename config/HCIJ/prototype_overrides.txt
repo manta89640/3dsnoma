@@ -38,3 +38,5 @@ keyboard_Keyboard_SetTitle: void (u32 r3, u32 r4)
 keyboard_Keyboard_SetMaxLines: void (u32 r3, u32 r4)
 keyboard_Keyboard_SetMaxLength: void (u32 r3, u32 r4)
 keyboard_Keyboard_GetDefaultMaxLength: u32 (void)
+# lib::allocator's heap search (engine/system/allocator.cpp): m2c saw the caller's OSLockMutex result in f1
+lib_allocator_HeapBase_FindContainHeap: u32 (u32 r3, u32 r4)
