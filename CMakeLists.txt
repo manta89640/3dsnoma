@@ -58,6 +58,7 @@ endif()
 set(ENGINE_SOURCES
   engine/audio/aux.cpp
   engine/audio/ax_render.cpp
+  engine/collision/kcl.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
   engine/g3d/g3d.cpp
@@ -94,6 +95,8 @@ set(ENGINE_SOURCES
   engine/system/keyboard.cpp
   engine/system/thread.cpp
   engine/ut/font.cpp
+  engine/wuhu/follow_camera.cpp
+  engine/wuhu/player.cpp
 )
 
 # ---- the Wii runtime (memory, threads, interrupts, hardware and IOS emulation) ----
@@ -174,7 +177,7 @@ if(NINTENDO_3DS)
   target_link_libraries(noma noma_decomp citro3d ctru m)
 else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
-                           platform/host/selftest.cpp)
+                           platform/host/selftest.cpp platform/host/selftest_walk.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
   target_link_libraries(noma-host noma_decomp)
 endif()
