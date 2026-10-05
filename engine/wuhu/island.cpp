@@ -249,6 +249,7 @@ private:
     u32 frame_ = 0;  // the World's clock (sixtieths of a second since the island came up: FrameClock's)
     FrameClock clock_;
     u32 log_every_ = 600, log_frames_ = 0;
+    u32 npc_seen_ = 0;  // frames ミドハ was in view and drawn, since the last frame line
     u64 log_us_ = 0;
     // the World's frame as a job (world_frame): what it is given, what it makes, and what it took
     bool job_ = false;                   // a job is out (the World is the helper's until take_job)
@@ -525,6 +526,7 @@ void Island::update(const Controls& controls, bool frozen) {
     // (the last frame's job, if its draws never came; its stats for the log line: read only here,
     // between the job's take and the next one's start)
     take_job();
+    npc_seen_ += mii_->npc_visible();
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -551,11 +553,11 @@ void Island::update(const Controls& controls, bool frozen) {
         world_us_ += guest::host_time_us() - t0;
     }
     if (npc_body_)
-        mii_->place_npc(npc_body_->position() * k_, npc_body_->yaw());
+        mii_->place_npc(npc_body_->position() * k_, npc_body_->yaw(), npc_body_->params().height * k_);
     mii_->update(engine::g3d::scaled(cam, k_), player_->position() * k_, player_->yaw(), player_->state(),
                  (player_->distance() - walked) * k_);
     engine::math::Mtx34 head;
-    if (look_ && mii_->npc_head(&head))
+    if (look_ && mii_->npc_visible() && mii_->npc_head(&head))
         look_->update(head, engine::g3d::scaled(cam, k_), (f32)frame_);
 }
 
@@ -613,20 +615,23 @@ void Island::log_frame() {
         std::snprintf(world, sizeof(world), "world %.2f ms a frame on the helper (waited %.2f)", world_ms, waited_ms);
     else
         std::snprintf(world, sizeof(world), "world %.2f ms a frame", world_ms);
+    char npc[48] = "";
+    if (npc_body_)
+        std::snprintf(npc, sizeof(npc), ", ミドハ drawn %u of %u frames", (unsigned)npc_seen_, (unsigned)log_frames_);
     world_us_ = waited_us_ = 0;
-    log_us_ = now, log_frames_ = 0;
+    log_us_ = now, log_frames_ = 0, npc_seen_ = 0;
     const engine::g3d::WorldStats& s = world_->stats();
     const Vec3 p = player_->position();
     static const char* const STATES[] = {"wait", "walk", "run", "fall"};
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
                "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, "
-               "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
+               "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f%s",
                fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
                (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
                (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
-               player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
+               player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance(), npc);
 }
 
 void Island::draw_opaque() {
@@ -641,7 +646,7 @@ void Island::draw_opaque() {
     if (island_shown_)
         emit(engine::g3d::Pass::OPAQUE);
     mii_->draw_opaque();
-    if (look_) {
+    if (look_ && mii_->npc_visible()) {
         mii_->view();
         look_->emit(engine::g3d::Pass::OPAQUE);
     }
@@ -654,7 +659,7 @@ void Island::draw_translucent() {
     mii_->view();
     if (island_shown_)
         emit(engine::g3d::Pass::TRANSLUCENT);
-    if (look_)
+    if (look_ && mii_->npc_visible())
         look_->emit(engine::g3d::Pass::TRANSLUCENT);
     mii_->draw_translucent();
 }

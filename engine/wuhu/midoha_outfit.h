@@ -11,7 +11,8 @@
 //     node's space in the bind pose; the bind pose is the body's own, ResNodeData +0x70);
 //   * weight sets: the distinct (bone, weight) lists, at most 4 each (81 of them);
 //   * vertices: position, normal, texture coordinate (the bind pose), each with one set;
-//   * batches: the triangles in groups using at most 7 sets each, with the (slot, set) loads before
+//   * batches: the triangles in groups using at most 4 sets each (what the 3DS GX path's matrix
+//     palette holds whole beside the rest, so that the list cache keeps them), with the (slot, set) loads before
 //     each (the slots keep what earlier batches loaded).
 // Each frame (draw): for each bone its view matrix (the body's view matrix array, by its matrix id:
 // ScnMdlSimple +0xF4, made by the root's calc), times its inverse bind; for each set the weighted
