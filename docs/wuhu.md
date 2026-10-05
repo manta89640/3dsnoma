@@ -8,46 +8,58 @@ Numbers are measured on the PAL disc (SP2P01) unless marked est.
 
 ## Staging
 
-    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL]
+    cmake -S . -B build-host -G Ninja && cmake --build build-host --target ng3d-bake
+    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--keep-raw]
 
 - `ROOT` is the extraction of your Wii Sports Resort disc (its `files/` is the disc's root);
   default `../wii-sports-extract/wii-sports-resort` beside this repository.
 - `DATA` is the port's data directory (`tools/stage_data.py`'s, `sdmc:/3ds/noma` on the 3DS). The
-  package goes to `DATA/wuhu/island.ng3d` (12,155,376 bytes), and `DATA/wuhu/island.json` records
+  package goes to `DATA/wuhu/island.ng3d` (13,266,560 bytes), and `DATA/wuhu/island.json` records
   what went in: classes, counts, decisions, sizes, the checks below.
-- `--bake TOOL` runs `TOOL DATA/wuhu/island.raw.ng3d DATA/wuhu/island.ng3d` after writing: the
-  renderer's offline converter of the GX texels to PICA ones. Without it, the textures stay GX
-  texels, which the loader converts.
+- The package is baked: the stager writes it with GX texels to `DATA/wuhu/island.unbaked.ng3d`
+  (12,339,440 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
+  `build-host/ng3d-bake` unless `--bake` names another), checks that no texture is left in GX's
+  format, and deletes the unbaked file unless `--keep-raw` (keep it for `tools/g3d/preview.py`,
+  which reads GX texels). Without the tool it stops and says how to build it: the 3DS refuses an
+  unbaked package, because converting GX texels at load time on the CPU thread would race the GX
+  path's texture uploads, which share `pica_tex.h`'s tables, on the GPU thread. `--no-bake` writes
+  an unbaked package anyway (the host converts as it loads, in about 37 ms).
 - It takes about 4 s on a Mac and reads only the archives it needs (Yaz0 U8 `.carc`, unpacked in
-  memory). Before writing it checks every reference in the package and that the package reads
-  back to the same bytes; it stops if either fails.
+  memory); two runs give the same bytes. Before writing it checks every reference in the package,
+  that the package reads back to the same bytes, and that every warp spot has room for the Mii
+  (below); it stops if any fails.
 
 The tools: `tools/g3d/brres.py` reads BRRES (models, textures, CHR0/SRT0/CLR0 keyframes, SCN0
 light sets), `tools/g3d/gxtex.py` decodes GX textures, `tools/g3d/convert.py` turns BRRES
-objects into package records, `tools/g3d/ng3d.py` writes and reads packages (`ng3d.py selftest`
-compares its structs with `engine/g3d/ng3d_format.h`; `ng3d.py check FILE` validates a package
-and round-trips it), and `tools/g3d/preview.py` renders a package to PNG.
-`tools/wuhu/check_views.py` renders a package from its `view_*` cameras and compares the pictures
-with references.
+objects into package records (a model can be built from parts of several: the sky with the sun in
+it, Wedge Island with its stretch of sea), `tools/g3d/ng3d.py` writes and reads packages
+(`ng3d.py selftest` compares its structs with `engine/g3d/ng3d_format.h`; `ng3d.py check FILE`
+validates a package and round-trips it), and `tools/g3d/preview.py` renders an unbaked package to
+PNG. `tools/wuhu/check_views.py` renders a package from its `view_*` cameras and compares the
+pictures with references.
 
 ## The package
 
+The baked file's sections:
+
 | section | records | bytes | what |
 |---|---|---|---|
-| TDAT | 90 textures | 4,211,328 | GX texels with their mip levels (TEXS: the records) |
-| VDAT | 350 vertex buffers | 3,887,168 | 167,227 vertices, 20-36 bytes each (VTXB: the records) |
+| TDAT | 92 textures | 5,158,912 | PICA texels with their mip levels (TEXS: the records); 4,229,920 bytes as GX texels unbaked |
+| VDAT | 348 vertex buffers | 4,012,112 | 171,702 vertices, 20-36 bytes each (VTXB: the records) |
 | BLOB | 5 KCL files | 2,961,008 | the island's collision, as shipped (COLL: the records) |
-| IDAT | 419,628 indices | 839,256 | u16 triangle lists |
-| KEYS | 9,816 keys | 117,792 | animation keys (TRAK: 467 tracks, ANIM: 20 animations) |
-| MATS | 88 materials | 47,520 | GX register images (TMTX: 125 texture matrices) |
-| BTCH | 567 batches | 22,680 | draws: a material, a vertex buffer, an index range |
+| IDAT | 431,853 indices | 863,706 | u16 triangle lists |
+| KEYS | 9,870 keys | 118,440 | animation keys (TRAK: 477 tracks, ANIM: 20 animations) |
+| MATS | 90 materials | 48,600 | GX register images (TMTX: 128 texture matrices) |
+| BTCH | 549 batches | 21,960 | draws: a material, a vertex buffer, an index range |
+| NODE | 150 nodes | 15,000 | the models' node trees (13 models) |
 | CYLS | 479 cylinders | 9,580 | tree trunks |
-| the other 17 | | 58,382 | strings, texture/vertex-buffer/collision records, texture matrices, nodes, models, cells and their batch lists, instances, animations and tracks, environment, lights, light sets, fogs, markers |
+| MARK | 139 markers | 4,448 | spawn, landmarks, camera presets, warps |
+| the other 15 | | 51,978 | strings, texture/vertex-buffer/collision records, texture matrices, models, cells and their batch lists, instances, animations and tracks, environment, lights, light sets, fogs |
 
-The header, the section table and alignment take the other 662 bytes.
+The header, the section table and alignment take the rest.
 
-At run time (est., from the package): textures 5.14 MB once in their PICA formats (all levels),
-geometry 4.73 MB, collision 2.96 MB, everything resident.
+At run time (est., from the package): textures 5.16 MB in their PICA formats (all levels; the
+loader counts 5,013 KB), geometry 4.88 MB, collision 2.96 MB, everything resident.
 
 ## Sources
 
@@ -55,22 +67,24 @@ Paths are inside the extraction's `files/`; an archive's members after the colon
 
 | asset | source | role | staged as |
 |---|---|---|---|
-| `WS2_common_island` (9 models, 72 textures, island and sea animations) | `Stage/Static/StageArc.carc:Island/G3D/WS2_common_island.brres` (7,236,352 B) | the island, sea, sky | cells (island, island_V), models (sea, sky), animations |
+| `WS2_common_island` (9 models, 72 textures, island and sea animations) | `Stage/Static/StageArc.carc:Island/G3D/WS2_common_island.brres` (7,236,352 B) | the island, sea, sky | cells (island, island_V), models (sea, sky, Wedge Island), animations |
 | `sea2_day` | `StageArc.carc:Island/G3D/WS2_common_seatex.brres` | the sea's day colour (WSR swaps it for the placeholder `sea2_dummy` at run time) | a texture |
+| the sun | `StageArc.carc:Sun/G3D/WS2_common_sun_model.brres` (and its SRT0) | the sun in the sky | a part of the sky model |
 | placed objects | `Stage/PlnScene/PlnEnv0.carc:WS2_pln_island_tag0.pmp` (1,228 records) | Island Flyover's day placement: the complete set (research placement.md 0) | baked props, instances |
 | the objects' models | `StageArc.carc:<Class>/G3D/*.brres` (table below) | trees, boats, cars, ... | baked props, models |
 | collision | `StageArc.carc:Island/WS2_common_island1..5.kcl` (2.96 MB, 42,934 triangles) | the ground and walls | BLOB as shipped |
 | tree trunks | `Common/ArcScene/common.carc:WS2_common_tree{,2,3}.kcl` (trunk triangles, attribute 0x1105) | trunk size per tree class | cylinders |
-| lights | `PlnEnv0.carc:WS2_pln_F0/WS2_pln_F0_Light.plight` | the day's lights and ambient colours | LITE, LSET |
+| lights | `Common/BicScene/common.carc:Env/WS2_bic_F0/WS2_bic_F0_Light.plight` | the ground-level day's lights and ambient colours | LITE, LSET |
 | light sets | `Common/Static/common.carc:G3D/WS2_Scene.brres` (SCN0) | which lights and ambient each material light set uses | LSET |
-| fog 0 | `StageArc.carc:Binary/WS2_common_binary/ws2_common_day.pfobj` | the island's day fog (WSR writes it into fog 0) | FOGS[0] |
-| fog 1 | `PlnEnv0.carc:WS2_pln_F0/WS2_pln_F0_fog.pfog` entry 1 | the sea's far materials' fog | FOGS[1] |
-| landmarks | `Stage/Shared/Activity.carc:LandMarkData/LandMarkData.exbin` | the Flyover's 80 named places | markers |
+| fog table | `common.carc:Env/WS2_bic_F0/WS2_bic_F0_fog.pfog` | fog 0 (off) | FOGS[0] |
+| the sea's fog | `StageArc.carc:Binary/WS2_common_binary/ws2_common_day.pfobj` | the island writes it into fog 1 and switches it on | FOGS[1] |
+| the sun's place | `common.carc:Env/WS2_bic_F0/WS2_bic_F0_Env.penv` | where the sun stands, its size | the sun's direction and scale |
+| landmarks | `Stage/Shared/Activity.carc:LandMarkData/LandMarkData.exbin` | the Flyover's 80 named places | markers, the warps' names |
 | camera shots | `Stage/Shared/SeqData.carc:Map/WS2_seq1_IslandCamParam.exbin` | the title sequence's 15 ground-level shots | markers |
-| spectator body | `StageArc.carc:Audience/G3D/WS2_common_avaC0.brres` | the Mii scale k | ENVR |
+| the WSR Mii's body | `Common/Kokeshi/common.carc:G3D/WS2_avaA1.brres` | k's check (head_set's height) | the inventory |
 
-The island's materials use light set 0 and fog 0; props light set 1; flags light set 6; the sea's
-far materials fog 1. No island material references `lm_0`/`lm_1` (character light maps).
+The island's materials use light set 0 and fog 0 (off); props light set 1; flags light set 6; the
+open sea's two materials fog 1. No island material references `lm_0`/`lm_1` (character light maps).
 
 ## The island at Island Flyover's visibility
 
@@ -82,12 +96,29 @@ detail, so it is the canonical set:
   Kiwa edge strips, Island_16_Model (Wedge Island, the golf island, at full detail), Island_17c
   (the harbour pier), Island_18 (rope barriers), Island_19b (Mt. Wuhu with its cave and lava
   chamber), Island_20b (the underwater cave), Island_21 (the round stage), Island_3b/3c/8b (court,
-  town buildings, hotel).
-- **Hidden:** Island_16b (the golf island's light model), 17 and 17b (pier variants), 19 and 20
-  (mountain and coast without caves), 19c and 20c (their night versions), Island_22 (a villa,
-  hidden in every mode), Water16b (the light golf island's sea rim), Light1-4 (the night lights).
+  town buildings, hotel). All but Island_16 go into the cells (49,659 triangles); Wedge Island is
+  an instance of its own (below).
+- **Hidden:** 17 and 17b (pier variants), 19 and 20 (mountain and coast without caves), 19c and 20c
+  (their night versions), Island_22 (a villa, hidden in every mode), Light1-4 (the night lights).
+  Island_16b and Water16b (the golf island's light model and its sea rim) are hidden in mode 13
+  and staged as Wedge Island's far model.
 - `WS2_common_island_V` (198 triangles, a translucent blend over the volcano's inside) goes into
   the cells with the island.
+
+### Wedge Island far away
+
+WSR's ground-level modes (1-4, 6-10, 15-16) show the golf island's light model, Island_16b, with
+its own sea rim, Water16b, instead of Island_16 and Water16. From the main island the two can't be
+told apart, even through a 6x zoom (research env_choice/env.md, its quay renders). So Wedge Island
+is a still instance (`INST_STATIC`, class 0) of a model made of `Island_16_Model` and the sea's
+`Water16` (10,794 triangles), whose model chain (`Model.lod_next`) goes to `Island_16b_Model` and
+`Water16b` (4,065 triangles: no shore foam, simpler waves) from 12,000 units off the island's
+centre. Everywhere on Wedge Island and its islets (all within 5,000 units of the centre) the full
+model is drawn, from the main island and its islets (25,000 and more) the light one: the switch
+happens over open sea. Through the `view_distant` camera this takes the frame from 37,814 triangles
+to 31,095 and from 159 draws to 125. Being an instance, Wedge Island is culled whole (one sphere,
+radius 6,640) instead of by cell; its trees and props stay in their cells. Its two models carry the
+whole island model's node list (the sea's too), unused but for two nodes: about 10 KB.
 
 ## Cells and detail levels
 
@@ -95,23 +126,22 @@ The island and the props that stand still are one static world cut into cells of
 x/z: a 12 x 10 grid from (-36,000, -16,000), 44 cells with geometry (Cell index = z * 12 + x).
 Terrain triangles go to the cell of their centroid; a placed object goes whole to the cell of its
 position. A cell has a batch per material (per detail level for trees), its vertex buffers
-deduplicated and split before 65,536 vertices (the largest has 5,684). A cell's `group` is the
-island node with most of its triangles (`Island_16_Model` for Wedge Island's cells).
+deduplicated and split before 65,536 vertices. A cell's `group` is the island node with most of
+its triangles.
 
-Each cell lists its batches for three levels, by the eye's distance to the cell's box:
+Each cell lists its batches for three levels, by the eye's distance to the cell's box (a cell with
+terrain alone has one list for all three):
 
 | level | from | what | whole world |
 |---|---|---|---|
-| 0 | 0 | terrain, trees at full detail, every prop | 482 batches, 120,243 triangles |
-| 1 | 3,000 | terrain, the trees' lighter models, palms, boats, fountain, the two gates | 453, 94,596 |
-| 2 | 20,000 | terrain | 367, 59,833 |
+| 0 | 0 | terrain, trees at full detail, every prop | 435 batches, 110,267 triangles |
+| 1 | 3,000 | terrain, the trees' lighter models, palms, boats, fountain, the two gates | 406, 84,620 |
+| 2 | 20,000 | terrain | 320, 49,857 |
 
 Why these distances: on the 3DS's 240-line top screen with a 45-degree view, a 230-unit tree is
 about 22 pixels tall at 3,000 units, where `WS2_common_tree_H` and `_M` look alike, and a 30-unit
 car or parasol is 3 pixels; at 20,000 units a tree is 3 pixels and only Wedge Island and the far
-islets are that far from anywhere on the main island. Through the six reference cameras with a
-45-degree, 5:3 frustum (est., cell boxes only): 7-27 cells, 82-348 batches and 15,038-67,496
-triangles a frame (town 279 batches, 66,497 triangles; overview 348, 67,496).
+islets are that far from anywhere on the main island.
 
 ## Placed objects
 
@@ -156,7 +186,8 @@ a plain circle stands in for that. The cruisers' and liner's routes are 29-key C
 models don't have: here the route drives the model's root node, retimed to frames of the island's
 clock. An airship placed at the origin with the default `flight` CHR0 would fly a 2,500-unit
 circle at sea level through the island: the Flyover must place it by code not traced, so the title
-sequence's flight is used instead.
+sequence's flight is used instead. (The fn_ addresses in this file are Wii Sports Resort's
+main.dol, not Wii no Ma's; Wii no Ma's functions go by their names.)
 
 A moving model's box (`Model.bbox`, `radius`, model space) holds every pose its instances'
 animations give it, not only its rest pose: the cars, cruisers, liner and airship run world routes
@@ -178,16 +209,17 @@ night's torches, campfire and fireworks (`WS2_pln_island_tag2.pmp`).
 |---|---|---|---|
 | `world_srt` | 2,400 | SRT0 `WS2_common_island` (lava), SRT0 `WS2_common_fountain` (300, repeated 8 times) | texture matrices of the cells' materials |
 | `world_clr` | 200 | CLR0 `WS2_common_island` (lava, the volcano's inside), CLR0 `WS2_common_island_V` | colour registers |
-| `sea_srt` | 20,000 | SRT0 `WS2_common_sea_P` and `WS2_common_sea_nami` (1,000, repeated 20 times): the Flyover's set (main.dol 0x806BE698) | the sea's texture matrices |
+| `sea_srt` | 20,000 | SRT0 `WS2_common_sea_P` and `WS2_common_sea_nami` (1,000, repeated 20 times): the Flyover's set (main.dol 0x806BE698) | the sea's texture matrices (Wedge Island's sea rim shares its materials) |
 | `sea_clr` | 1,000 | CLR0 `WS2_common_sea_nami` | the waves' material alpha |
-| `sky_srt` | 9,999 | SRT0 `WS2_common_vr` | the clouds' scroll |
+| `sky_srt` | 39,996 | SRT0 `WS2_common_vr` (9,999, repeated 4 times) and SRT0 `WS2_common_sun_model` (4,000, repeated 10 times, 0.01 % slower to fit) | the clouds' scroll, the sun's rays turning |
 | 15 node animations | 299-111,848 | the objects' CHR0s (above) | instances |
 
 SRT0 keys are nw4r's Hermite keys (frame, value, slope); CLR0 colours (a value a frame) become
 linear keys per component, collinear ones dropped, and a component whose mask byte is set (the
 material keeps its own) gets no track. An animation made of several (lava and fountain, sea and
-waves) runs to their common length, the shorter ones' keys repeated. A material animation sets all
-five components of a texture matrix it touches (nw4r does), so constants are tracks too.
+waves, clouds and sun) runs to their common length, the shorter ones' keys repeated. A material
+animation sets all five components of a texture matrix it touches (nw4r does), so constants are
+tracks too.
 
 ## Materials and textures
 
@@ -200,7 +232,7 @@ swap-table bits and its konst selections in two writes, so the reader runs the l
 register file instead of taking the first write. (The research renderer took the first write, so
 its pictures have the swap-table bits as konst selections: wrong on the sea and the lava.)
 
-- 88 materials. 6 have indirect stages (the lava `ef_volSurface`, the sea's `mt_za_water` and the
+- 90 materials. 6 have indirect stages (the lava `ef_volSurface`, the sea's `mt_za_water` and the
   river's `mt_zc_w_nagare` with their `_off` twins, the fountain's water), flagged and dropped as
   the engine drops them: the warp is lost, the scrolls stay. No material reads texture
   coordinates past tex1, or colour channel 1.
@@ -209,34 +241,86 @@ its pictures have the swap-table bits as konst selections: wrong on the sea and 
 - Texgen `matrix` is the texgen's own texture matrix when nw4r applies one (its SRT is in use, or
   it maps the environment or a projection); an environment-mapping texgen (normalised) has it as
   its post matrix too.
-- 90 textures, 4,209,440 bytes of GX texels with every level down to 8x8 (the PICA's smallest).
-  Each records the PICA format the loader converts it to: CMPR as ETC1 (37 textures, 2.61 MB) or,
-  when a block uses CMPR's transparent texel, ETC1A4 (14, 1.14 MB once converted), I8 as L8 (13),
-  IA8 as LA8 (11), IA4 as LA4 (2), RGB565 as RGB565 (4), RGB5A3 and RGBA8 as RGBA8 (9, 0.72 MB
-  once converted): 5.14 MB in all once converted. A texture is never shared by name across files
+- 92 textures, 4,229,920 bytes of GX texels with every level down to 8x8 (the PICA's smallest),
+  5,158,912 bytes once baked. CMPR becomes ETC1 (37 textures) or, when a block uses CMPR's
+  transparent texel, ETC1A4 (14), I8 L8 (15, the sun's two among them), IA8 LA8 (11), IA4 LA4 (2),
+  RGB565 RGB565 (4), RGB5A3 and RGBA8 RGBA8 (9). A texture is never shared by name across files
   (56 names have different pictures in different WSR files).
 
 ## Environment
 
-- **Lights** (from `WS2_pln_F0_Light.plight`, intensity multiplied in): Map_Light, the sun, white
-  at (10,000, 48,000, 60,000); Obj_Light #736e5a at (1,000, 100,000, 25,000); and the other sets'
-  lights. EGG's type-0 lights are positions in the world (the sun 77,000 units off, unattenuated)
-  and are kept as point lights; every light also carries the direction toward its aim point (the
-  origin), for a renderer that only does directional lights. Across the island the sun's
-  direction varies up to about 25 degrees (Wedge Island against the origin).
-- **Light sets** (SCN0 `WS2_Scene`, a material's light set number is its index): 0 Map (Map_Light,
-  ambient #788287: the island), 1 Obj (Map_Light and Obj_Light, ambient #4d5173: props), 2
-  Abatar, 3 SWF stadium, 4 JSK sea, 5 player object, 6 Flag (Flag_Light, ambient #bec8d2), 7 canoe
-  sea, 8 Obj2, 9 cycling fence. Lights switched off in the day file are left out of their sets.
-- **Fogs:** 0 linear 27,978-65,527 #83d5ff (`ws2_common_day.pfobj`: the island); 1 linear
-  2,000-30,000 #66d1ff (Pln F0's entry 1: the sea's far materials, which turn light blue with
-  distance as in the Flyover).
-- **k = 9.200** Wii no Ma Mii units per island unit. Both games hang the same RFL head from a body
-  node: Wii no Ma's Mii body (`g3d/Mii/Model.lex`, Female_Body and Male_Body) has its Head node at
-  70 + 38.9 = 108.9 in a Mii 158 tall (height scale 1); WSR's spectator body has `head_set` at
-  9.86 (its bind matrix) times the spectators' placement scale 1.2 = 11.84 island units. k =
-  108.9 / 11.84: a 158-tall Mii is 17.2 island units, about 1.5 m at the research's estimate of
-  9 cm a unit. (The spectator model's bounding box alone, 2.56-10.92, is a body without its head.)
+WSR's island scenes don't share one environment, and the Flyover's (Pln F0) is made for flying:
+its fog turns the sea pale a few thousand units out and its sun comes from the south-south-east.
+The package takes the day as WSR runs it at ground level, in cycling (mode 11), the island's own
+ground-level day (research env_choice/env.md, its set (f), decoded from the files and main.dol):
+
+- **Lights** (`WS2_bic_F0_Light.plight`, intensity multiplied in), in the sets of SCN0
+  `WS2_Scene` (a material's light set number is the set's index):
+
+  | set | name | ambient | lights |
+  |---|---|---|---|
+  | 0 | Map (the island) | #788287 | Map_Light: white, at (-30,000, 48,000, 60,000), 35.6 degrees up, from the south-south-west |
+  | 1 | Obj (props) | #877a63 | Map_Light, Obj_Light: #8c795a at (0, 100,000, 25,000), 76 degrees up |
+  | 6 | Flag (flags) | #bec8d2 | Flag_Light: white, directional (below) |
+  | 8 | Obj2 | #646464 | Map_Light (Obj2_Light is off in this file) |
+  | 2-5, 7, 9 | Abatar, stadium, jet-ski sea, player object, canoe sea, cycling fences | | not used by the island's materials |
+
+  A light is on only when its flags have bits 0 and 0x40 (EGG's LightObject, fn_801BC6E0):
+  Abatar_Light (flags 0x7A1) is off, so set 2 has no light. EGG's type-0 lights are positions in
+  the world, unattenuated: Map_Light and Obj_Light, 82,000 and 103,000 units out, are kept as
+  point lights (the engine lights with the direction from them toward the origin; across the island
+  that differs from the true direction by up to 6 degrees on the east beach, 23 on Wedge Island).
+  Flag_Light at (-10, 0, 50), PlayerObj_Light and Sea_Light sit within 400 units of the origin and
+  light props thousands of units away: they are directions written as positions, staged as
+  directional lights from there toward the origin. The Pln F0 lights (the Flyover's: sun from the
+  south-south-east, Obj ambient #4d5173) are the alternative, in env_recommended.json.
+- **Fogs:** fog 0 off: every daytime `.pfog` WSR has (Pln, Bic, the title sequence, skydiving) has
+  fog 0 type NONE, so WSR never fogs the terrain, the props, the distant islands or the sky by day.
+  Fog 1 is `ws2_common_day.pfobj`, linear in view depth from 27,978 to 65,527 to #83d5ff: the
+  island object writes its `.pfobj` into the FogManager's second fog (fn_80275B38 points at
+  fogs[1]; fn_802757F0 loads it there and sets its enable bit whatever the file's own flag says).
+  Only the open sea's materials, `mt_za_water` and `mt_za_water_off`, use fog 1: the sea fades into
+  the haze at the horizon. (Stage 1 had this the wrong way round, after the research's first
+  reading: the `.pfobj` in fog 0, which washed out the sky 62,000-70,000 units off, and Pln F0's
+  fog 1, 2,000-30,000 #66d1ff, which turned the near sea pale.) WSR rescales fog 1's start and end
+  each frame by the camera's pitch (fn_80274A5C): at walking pitches under 15 degrees that is at
+  most 3 %, left out.
+- **The sky** (`WS2_common_vr`) follows the eye (the engine draws it centred on the eye, first,
+  without depth). Its materials are unfogged in the package whatever their fog index says (WSR's
+  sky is fog 0, off by day; a fog 0 turned on later, a night's, must not reach the dome). The
+  clear colour is fog 1's #83d5ff, so that the gap under the dome's lower edge (231 units under
+  the eye) meets the fogged sea in its own colour; the package has no clear colour of its own
+  (the scene sets it; `tools/g3d/preview.py` takes the first fog in use).
+- **The sun** (CmnObj class 1, 太陽) is a part of the sky model: `WS2_common_sun_model`, a glow disc
+  (`P_sun_core1d`, alpha-blended, warm white) and a fan of rays (`P_sun_spreadline5_2` twice,
+  added, turning both ways: the sky animation). WSR's sun update (fn_802A8D80) puts it at the
+  scene's `.penv` position with x and z taken relative to the camera (so it keeps its direction as
+  the eye moves, like the dome) and scales it each frame to `size * |view z| / (0.5 * 2.39 *
+  10000 * 456)`: a constant size on the screen, 10,000 model units on 200 of 456 lines at size 200,
+  which makes the glow disc 27 degrees across. So it sits in the `.penv`'s direction (Bic F0:
+  (-34,200, 25,000, 93,964), 14.0 degrees up, 20 degrees west of +z) 60,000 units out (inside the
+  dome and the camera's far plane), turned as its billboard would be when looked at, at the scale
+  WSR gives it there (2.20). Its batches follow the dome's in the sky's draw order (gradient,
+  clouds, glow, rays): as in WSR, whose sun is translucent and drawn after the opaque clouds, the
+  sun shines over the clouds, and the island and the sea, drawn after the sky, cover it. The visible
+  sun is lower than Map_Light (35.6 degrees): that is where WSR draws it, in sight of a level
+  camera. WSR keeps its height absolute, so from the highest ground you walk to (2,200 units) it is
+  1.2 degrees lower than staged. Left out: `WS2_common_sunshine` (a glare over the whole screen)
+  and `WS2_common_sun_lensfx` (flares along the screen), whose alpha and place come from where the
+  sun is on the screen and a read of the depth buffer (GXPeekZ, fn_802A89C4).
+- **k = 10.0** Wii no Ma Mii units per island unit (research k.md, design section 8). Both games
+  hang the same RFL head (`RFL_Res.dat`, byte for byte the same in both) from a body node, its
+  origin at the chin. WSR's player body (`WS2_avaA1.brres`, every Kokeshi body alike) has `head_set`
+  9.70 above the feet (measured by the stager) and draws the head at scale 0.08 (the KokeshiManager,
+  fn_80246F70); Wii no Ma's (`g3d/Mii/Model.lex`) has its Head node at 108.86 and the head at 0.69
+  (Wii no Ma's `mii_ModelRes_ctor`, 0x80191368) at height scale 1. With the typical hairstyle's top
+  69.2 RFL units above the chin, a Mii is 9.70 + 0.08 x 69.2 = 15.24 island units and 108.86 + 0.69
+  x 69.2 = 156.6 Wii no Ma units tall: 10.3. Feature by feature the ratio is 9.6-11 (the neck
+  10.1-11.2, the shoulders 10.0-11.1, the channel's default Mii 9.55), and the island's own measures
+  agree: a doubles tennis court is 236.3 units long, 23.77 m, so 10.1 cm a unit, taking a Wii no Ma
+  unit as a centimetre. Rounded to 10: a 158-tall Mii is 15.8 island units, about 1.6 m. (Stage 1's
+  9.2 came from the spectators' body, whose `head_set` sits at 9.86 times their placement scale
+  1.2.)
 - World box (cells): x -35,120..10,985, y -217..4,639, z -14,693..20,651. The sea model reaches
   +-114,000 and the sky dome 70,000.
 
@@ -251,8 +335,40 @@ its pictures have the swap-table bits as konst selections: wrong on the sea and 
   aren't markers.
 - Camera presets (kind 2, position = eye, dir = target): `seqcam_0`..`seqcam_14` (the title
   sequence's shots) and `view_town`, `view_coast`, `view_beach`, `view_interior`, `view_distant`,
-  `view_overview` (the research's reference views: their vertical fields of view are 55, 55, 55,
-  65, 40, 50 degrees, in `stage_wuhu.py` VIEWS).
+  `view_overview` (the research's reference views) and `view_wedge` (research env_choice's
+  quay_wedge: from the plaza's sea front at a walking eye's height toward Wedge Island, 27,000
+  units off). Their vertical fields of view (55, 55, 55, 65, 40, 50, 50 degrees) are in
+  `stage_wuhu.py` VIEWS.
+- **Warps** (kind 3, `MK_WARP`): the exploration menu's 40 places, in the order it lists them,
+  each with its name, the feet on the ground and a facing (unit vector on x/z):
+
+  | region | places |
+  |---|---|
+  | the town | the plaza by the coin-toss fountain; the liner's deck; the Swordplay stage and its stands; New Town |
+  | the beaches and the coasts | Powder White Beach; the hotel; the tennis court; Stardust Beach; Sweet Beach; the sandy hill's fireworks site; the lighthouse's cape and the sea cave under it; the villa cove; a sea cave's ledge |
+  | the mountain | the Red Gate Bridge; the suspension bridge; Wind Park; the lone cedar; the rock in the lava; the volcano's summit rim |
+  | the castle and the ruins | the castle; the ruins; the ruins' heights |
+  | the islands | Pointy Rock and the islet north of it; Poseidon's and Triton's rings; the two uninhabited islands; two islets in the north-east; Azuki islet's fireworks site; Wedge Island's hotel, marina, beginners' golf, Crab Rock Twins; the islet north of it; the intermediate and advanced golf islets |
+
+  27 of them are places you can't walk to (research reach/reach.md section 9: islets, Wedge Island,
+  the villa cove under 700-unit sea cliffs, the summit rim, the fenced tennis court, the liner's
+  deck, the stage over water, sea caves, cliff-ringed plateaus); the other 13 are landmarks you can
+  walk to, a few a region, for getting about faster. The names are the landmarks' own (from
+  LandMarkData, so in the package and not in this repository); a place with no landmark of its own
+  takes a name the stager composes: a landmark's name with の観客席 (its stands), の山頂 (the
+  summit) or の北の小島, or 北東の小島, 北東の小島（南）, ゴルフ島の北の小島. The spots are the research's,
+  from its walk graph over the island's collision at 50-degree slopes and 8-unit steps (each with
+  10 units of walkable ground all round, facing its landmark or the volcano or the main island),
+  kept as a small table in the stager. The stager checks each on the collision with the Mii's body
+  at k (15.8 tall: spheres of radius 3.16 at 7.11 and 11.85 above the feet, a 3.95 step,
+  engine/wuhu/player.cpp's proportions): the ground within 2 units of the feet, walkable (50
+  degrees at most, not lava, water or a fence) there and within a step at 5 units all round, no
+  water over it, nothing solid between a step and 20 units up, the spheres clear of walls (fences
+  and faces steeper than 72.5 degrees, the player's rule) and of tree trunks; the feet are put on
+  the ground found. Two of the research's spots failed and were moved to the nearest that pass:
+  the lone cedar's stood in its trunk (now 17.5 units south of it), and the summit rim's was 5
+  units from the rim's edge (now 52.5 units along it). The nearest wall to any spot is 11.2 units
+  away (the marina) or more.
 
 ## Collision
 
@@ -267,13 +383,17 @@ parasols, windmills, boats in `PlnCol_1.carc`): not staged.
 ## Left out (fidelity gaps)
 
 - Indirect texturing: the water's and lava's warp (the engine has no dependent reads).
-- The water reflection (`WS2_common_island_R`, drawn mirrored by WSR; usable as a far LOD later),
+- The water reflection (`WS2_common_island_R`, drawn mirrored by WSR),
   `WS2_common_under` (a navy skirt under the sea drawn with depth test off before the island),
   the night models (`island_L`, `vr_N`) and the evening sky (`vr_E`): daytime only.
-- The sun (`Sun/G3D/*`: a billboarded disc, its shine and lens flare) and billboards in general.
+- The sun's glare and lens flares (`WS2_common_sunshine`, `WS2_common_sun_lensfx`): their alpha
+  follows the sun's place on the screen and whether the depth buffer hides it. The sun's height
+  doesn't follow the eye's (1.2 degrees at the highest walkable ground). Billboards in models drawn
+  by the cells are baked as placed.
+- Fog 1's per-frame rescale by the camera's pitch (at most 3 % at walking pitches).
 - Particle effects: the waterfalls' mist, the volcano's smoke, the fountain's spray, whales'
   spouts (`Effect/Static/effect.carc`).
-- Bloom and depth of field (`WS2_pln_F0_Bloom.pblm`, `_dof.pdof`), the caves' darker ambient
+- Bloom and depth of field (`WS2_bic_F0_Bloom.pblm`, `_dof.pdof`), the caves' darker ambient
   (WSR fades the ambient colours inside 42 "shadow area" boxes, PMP group 5 type 3).
 - Flags' cloth motion (SHP0) and every PAT0: flags stand at rest.
 - Rigid multi-bone shapes (gulls, hawks, whales): a triangle that spans two bones (270 of them)
@@ -282,41 +402,52 @@ parasols, windmills, boats in `PlnCol_1.carc`): not staged.
 - Whales stay where they are placed (WSR also moves them along routes); gulls and hawks circle
   instead of flocking; the airship takes the title sequence's flight.
 - The ambient sounds (PMP group 5), the time of day.
-- Model nodes whose batches aren't one run in the model's draw order (7 of the sea's: each has
-  opaque and translucent batches) have `n_batches` 0: renderers find a node's batches by
-  `Batch.node`.
+- Model nodes whose batches aren't one run in the model's draw order (10: the sea's, and Wedge
+  Island's sea rims, each with opaque and translucent batches split by the island's) have
+  `n_batches` 0: renderers find a node's batches by `Batch.node`.
 
 ## How it was checked
 
 - `ng3d.py selftest`: 23 structs (fields, types, array sizes), 23 static_asserts, 25 section tags
-  and 12 enums against `engine/g3d/ng3d_format.h` (changing a field's type or a tag in a copy of
+  and 13 enums against `engine/g3d/ng3d_format.h` (changing a field's type or a tag in a copy of
   the header is caught).
-- `ng3d.py check DATA/wuhu/island.ng3d`: every reference in range, every payload inside its
-  section and of the size its levels or layout take, key frames in order; read and written again,
-  the same 12,155,376 bytes. A package another writer laid out (the renderer's `ng3d-bake`) passes
-  when its records come back the same.
-- The package rendered by `tools/g3d/preview.py` from the six `view_*` cameras at 1280x720,
-  compared with the research's renders of the BRRES (`tools/wuhu/check_views.py`; PSNR in dB, and
-  the share of pixels more than 16 levels off):
+- `ng3d.py check`: the unbaked package (every reference in range, every payload inside its section
+  and of the size its levels or layout take, key frames in order, marker kinds; read and written
+  again, the same 12,339,440 bytes) and the baked one (the same records, laid out by ng3d-bake).
+  Two staging runs give byte-identical files.
+- The engine's loader and world on the baked package (`NOMA_SELFTEST=g3d` with
+  `NOMA_G3D_PACKAGE`, host): loaded and checked in 0.2 ms with no texture converted (unbaked:
+  37 ms converting 92), k = 10, 140 checks passed. Through the view cameras (a 400:240 frustum,
+  near 1.5, far 80,000; frame 600):
 
-  | view | full package | terrain only | terrain, research conventions, vs research with KSEL fixed |
+  | view | cells | instances | draws (opaque + translucent) | triangles |
+  |---|---|---|---|---|
+  | town | 19/120 | 25/95 | 256 + 86 | 81,306 |
+  | coast | 33 | 27 | 258 + 95 | 70,128 |
+  | beach | 16 | 17 | 103 + 28 | 24,854 |
+  | interior | 10 | 26 | 149 + 39 | 36,588 |
+  | distant | 43 | 27 | 109 + 16 | 31,095 (stage 1: 37,814) |
+  | overview | 36 | 34 | 327 + 115 | 84,936 |
+  | wedge | 47 | 25 | 129 + 19 | 44,509 |
+
+- The package rendered by `tools/g3d/preview.py` from those cameras at 1280x720 against stage 1's
+  package (PSNR in dB, mean difference in levels, share of pixels more than 16 levels off): the
+  differences are the environment's, as they should be -- the sky deep blue instead of fogged pale,
+  the near sea deep blue instead of fog 1's #66d1ff, the light from the south-south-west, the sun
+  where it shows -- and, far off, Wedge Island's light model; the volcano's lava chamber, lit by
+  nothing that changed, is the same.
+
+  | view | PSNR | mean | > 16 levels |
   |---|---|---|---|
-  | town | 18.19 / 19.95% | 26.60 / 8.01% | 39.18 / 0.78% |
-  | coast | 23.73 / 15.20% | 23.81 / 15.13% | 42.49 / 0.22% |
-  | beach | 22.14 / 19.78% | 22.91 / 19.53% | 52.10 / 0.01% |
-  | interior | 22.59 / 31.30% | 22.70 / 31.25% | 52.18 / 0.00% |
-  | distant | 16.92 / 65.21% | 17.00 / 65.21% | 37.27 / 1.40% |
-  | overview | 20.60 / 61.18% | 21.09 / 60.46% | 39.45 / 0.43% |
+  | town | 16.33 | 19.6 | 37.0 % |
+  | coast | 17.07 | 19.8 | 44.6 % |
+  | beach | 17.22 | 17.8 | 40.9 % |
+  | interior | 56.42 | 0.0 | 0.0 % |
+  | distant | 13.42 | 42.8 | 90.1 % |
+  | overview | 17.90 | 24.6 | 81.7 % |
+  | wedge | 12.58 | 48.3 | 93.0 % |
 
-  The full package differs from the research renders as it should: trees, props, boats, birds and
-  balloons are there now. Terrain only (cell level 2, no instances) still differs by the KSEL fix
-  (the sea and the lava; terrain with the research's conventions against the original research
-  renders: town 38.69, interior 20.98, distant 24.05, overview 23.72 dB), the material animations
-  at frame 0 (the lava's colours, the sea's scroll scale), fog 1 on the sea's far materials (the
-  research used fog 0 for all), the sky following the eye (the research left it at the origin)
-  and the sun as a point light. With the research renderer's conventions (no material animation,
-  the sky at the origin, fog 0 everywhere, the sun as a directional light from the origin) and
-  the research renderer patched only for the KSEL masking, the package's pictures match to
-  37-52 dB; what remains is CMPR's in-between colours (GX's 5:3 weights here, as the port's
-  texture decoder has them, DXT1's 1/3 there) on the sea's sun glint, and the mip chain stopping
-  at 8x8 near the horizon.
+  Stage 1 compared its package's terrain with the research's renders of the BRRES: with the
+  research renderer's conventions they matched to 37-52 dB (the rest CMPR's in-between colours on
+  the sea's sun glint and the mip chain stopping at 8x8). The island's geometry, materials and
+  textures haven't changed since, but for Wedge Island's far model and the sun.

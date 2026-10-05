@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage Wuhu Island for the native g3d: Wii Sports Resort's island -> DATA/wuhu/island.ng3d.
 
-    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL] [--keep-raw] [--json OUT]
+    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--keep-raw] [--json OUT]
 
 ROOT is your Wii Sports Resort extraction (default ../wii-sports-extract/wii-sports-resort next to
 this repository; files/ under it is the disc's root). DATA is the port's data directory (the one
@@ -9,7 +9,7 @@ tools/stage_data.py makes); the package goes to DATA/wuhu/island.ng3d, a summary
 it to DATA/wuhu/island.json. Nothing of the disc is copied anywhere else, and nothing it makes
 belongs in the repository.
 
-What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md section 0.3):
+What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md sections 0.3, 8):
   - WS2_common_island as Island Flyover (mode 13) shows it, cut into cells of CELL units on x/z by
     triangle centroid, a batch per (cell, material), and the placed objects of
     PlnEnv0.carc/WS2_pln_island_tag0.pmp group 1 (what the Flyover's 1-player mode spawns: exclude
@@ -17,15 +17,23 @@ What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md 
     one from 3,000 units), boats at anchor, the fountain, the venues' gates (to 20,000 units), and
     near the eye only parasols, tents, parked cars, kayaks, flags at rest, poles, tees, buoys and
     the venues' small props; WS2_common_island_V too.
+  - Wedge Island (Island_16 and its sea rim) as a still instance whose far model is its light one
+    (Island_16b), as WSR shows it from the ground.
   - the moving ones as models placed by instances with their own node animation: windmills,
     balloons, the airship, moving cars, cruisers and the liner on their routes, whales, gulls and
     hawks on circles.
-  - WS2_common_sea (all but Water16b; sea2_dummy -> sea2_day) and WS2_common_vr (the sky) as
-    models; the island's, sea's, sky's and fountain's texture and colour animations.
-  - the day environment (lights and light sets, fogs), k, markers (spawn, landmarks, camera
-    presets) and the island's collision (WS2_common_island1..5.kcl, tree trunks as cylinders).
---bake TOOL: after writing, run `TOOL RAW OUT` (the renderer's ng3d-bake, which converts the GX
-texels to PICA ones offline): RAW = DATA/wuhu/island.raw.ng3d, OUT = DATA/wuhu/island.ng3d.
+  - WS2_common_sea (all but Water16 and 16b; sea2_dummy -> sea2_day) and WS2_common_vr (the sky,
+    with the sun in it) as models; the island's, sea's, sky's, sun's and fountain's texture and
+    colour animations.
+  - the ground-level day environment (Bic F0's lights and light sets; fog 0 off, the open sea's fog
+    1), k = 10, markers (spawn, landmarks, camera presets, the exploration menu's warps, each
+    checked on the collision) and the island's collision (WS2_common_island1..5.kcl, tree trunks as
+    cylinders).
+The package is baked: after writing it, TOOL UNBAKED OUT runs (the renderer's ng3d-bake, default
+build-host/ng3d-bake, which converts the GX texels to PICA ones offline), with UNBAKED =
+DATA/wuhu/island.unbaked.ng3d (kept with --keep-raw: tools/g3d/preview.py reads GX texels) and OUT =
+DATA/wuhu/island.ng3d. Without the tool it stops: the 3DS refuses an unbaked package. --no-bake
+writes one anyway (the host converts GX texels as it loads).
 """
 import argparse
 import json
@@ -50,6 +58,10 @@ import nintendo_formats as nf  # noqa: E402
 from ng3d import NONE16  # noqa: E402
 
 DEFAULT_WSR = os.path.join(os.path.dirname(ROOT), "wii-sports-extract/wii-sports-resort")
+# the renderer's offline converter of GX texels to PICA ones (tools/ng3d_bake.cpp, the host build):
+# the 3DS loads only baked packages (converting at load time would race the GX path's texture
+# uploads, which share pica_tex.h's tables, on the GPU thread)
+DEFAULT_BAKE = os.path.join(ROOT, "build-host", "ng3d-bake")
 
 # ----------------------------------------------------------------------------------- choices
 # Island Flyover's node visibility (main.dol's table at 0x8066A37C, column 13 = Pln day; research
@@ -77,15 +89,134 @@ TAG_LEVELS = {TAG_ALL: (0, 1, 2), TAG_PROP: (0, 1), TAG_NEAR: (0,), TAG_MID: (1,
 SPAWN = (-2029.0, 69.0, 2330.0)
 SPAWN_DIR = (0.0, 0.0, -1.0)
 
-# k: Wii no Ma's Mii units per island unit. Both games hang the Mii's head (the same RFL head) from
-# a body node: Wii no Ma's Mii body (g3d/Mii/Model.lex Female_Body / Male_Body) has its Head node
-# 70 + 38.9 = 108.9 above the feet of a 158-tall Mii (height scale 1); WSR's spectator body
-# (Audience/G3D/WS2_common_avaC0.brres) has head_set at its bind height, times the spectators'
-# placement scale. The ratio of the two neck heights is k.
-NOMA_MII_HEIGHT = 158.0
-NOMA_MII_HEAD_Y = 108.9
+# k: Wii no Ma's Mii units per island unit (docs/wuhu_design.md section 8; research k.md). A Mii
+# matched to a Mii: both games hang the same RFL head (RFL_Res.dat, byte for byte the same in both)
+# from a body node, its origin at the chin. WSR's player body (Common/Kokeshi/common.carc
+# G3D/WS2_avaA1.brres, every Kokeshi body alike) has head_set 9.70 above the feet, and the head is
+# drawn at scale 0.08 (WSR main.dol's KokeshiManager, fn_80246F70); Wii no Ma's (g3d/Mii/Model.lex)
+# has its Head node at 108.86 and the head at scale 0.69 (Wii no Ma's mii_ModelRes_ctor,
+# 0x80191368), at height scale 1. With the typical hairstyle's top 69.2 RFL units above the chin, a
+# Mii is 9.70 + 0.08 * 69.2 = 15.24 island units and 108.86 + 0.69 * 69.2 = 156.6 Wii no Ma units
+# tall: 10.3. Feature by feature k is 9.6-11 (the neck 10.1-11.2, the shoulders 10.0-11.1, the
+# channel's default Mii 9.55), and the island's own measures agree (a doubles tennis court is 236.3
+# units long, 23.77 m: 10.1 cm a unit, taking a Wii no Ma unit as a centimetre). Rounded: 10. (Stage
+# 1's 9.2 came from the spectators' body, whose head_set sits at 9.86 times their placement scale
+# 1.2.)
+MII_UNITS_PER_ISLAND_UNIT = 10.0
+NOMA_MII_HEIGHT = 158.0          # Wii no Ma units, height scale 1 (engine/wuhu/player.h)
+NOMA_HEAD_Y, NOMA_HEAD_SCALE = 108.86, 0.69
+WSR_HEAD_SCALE, RFL_HAIR_TOP = 0.08, 69.2
 
-# research render_island.py's cameras (eye, target, vertical fov): the reference views
+# The day's environment as WSR runs it at ground level (research env_choice/env.md: cycling, mode
+# 11, the island's own ground-level day): Bic F0's lights, Bic F0's fog table -- whose fog 0 is off,
+# as every day .pfog has it: WSR never fogs the terrain, the props or the sky by day -- with
+# ws2_common_day.pfobj written into fog 1 and switched on by the island (fn_80275B38 points the island
+# at the FogManager's second fog, fn_802757F0 loads the .pfobj there and sets its enable bit), which
+# only the open sea's materials (mt_za_water and its _off twin) use.
+BIC = "Common/BicScene/common.carc"
+ENV_LIGHTS = (BIC, "Env/WS2_bic_F0/WS2_bic_F0_Light.plight")
+ENV_FOGS = (BIC, "Env/WS2_bic_F0/WS2_bic_F0_fog.pfog")
+ENV_PENV = (BIC, "Env/WS2_bic_F0/WS2_bic_F0_Env.penv")
+SEA_FOG = ("Stage/Static/StageArc.carc", "Binary/WS2_common_binary/ws2_common_day.pfobj")
+SEA_FOG_INDEX = 1
+# EGG's type-0 lights are positions in the world: the sun's (Map_Light, Obj_Light) are 82,000-103,000
+# units out. The ones within a few hundred units of the origin (Flag_Light at (-10, 0, 50),
+# PlayerObj_Light, Sea_Light) light props thousands of units away: they are directions written as
+# positions (env.md section 4), staged as directional lights from there toward the origin.
+POINT_LIGHT_MIN_DISTANCE = 10000.0
+
+# The sun (CmnObj class 1, 太陽: Sun/G3D/WS2_common_sun_model, a glow disc and a fan of rays, both
+# STD billboards). Its update (main.dol fn_802A8D80) puts it at the scene's .penv position with x and
+# z taken relative to the camera -- it stays in one direction in the sky as the eye moves, like the
+# sky dome -- and scales it each frame by size * |view z| / (0.5 * 2.39 * 10000 * 456): a constant
+# size on the screen (the .penv's size 200: 10,000 model units cover 200 of 456 lines at the
+# reference lens), i.e. a constant angle. So it is staged as a part of the sky model, in the .penv's
+# direction (Bic F0: (-34,200, 25,000, 93,964), 14 degrees up, 20 degrees west of +z: the visible sun
+# is lower than Map_Light, which lights from 35.6 degrees up; WSR draws it at the .penv position, so
+# that is where it goes), at SUN_DISTANCE (inside the dome, 62,000-70,000 out, and the camera's far
+# plane), turned to face the eye and scaled for that distance. WS2_common_sunshine (a glare over the
+# screen) and WS2_common_sun_lensfx (flares along it) are left out: their alpha and place come from
+# where the sun is on the screen and a read of the depth buffer (fn_802A89C4, GXPeekZ).
+SUN_DISTANCE = 60000.0
+SUN_SCREEN = 0.5 * 2.39 * 10000.0 * 456.0
+
+# Wedge Island (Island_16) far away: WSR's ground-level modes show its light model, Island_16b (3,999
+# triangles against 9,976, research env.md: the two can't be told apart from the main island, even
+# through a 6x zoom), with its own sea rim (Water16b: the waves, no shore foam). Here the full model
+# with Water16 is an instance whose model chain goes to 16b + Water16b from LOD_WEDGE units off its
+# centre: anywhere on Wedge Island and its islets (all within 5,000) it is the full one, from the main
+# island (25,000 and more) the light one; the switch is over open sea.
+WEDGE_NODES = ("Island_16_Model", "Water16")
+WEDGE_FAR_NODES = ("Island_16b_Model", "Water16b")
+LOD_WEDGE = 12000.0
+
+# The exploration menu's places (docs/wuhu_design.md section 8): markers of kind MK_WARP in the order
+# the menu lists them -- the town, the beaches and the coasts, the mountain, the castle and the
+# ruins, then the islands. The spots are the research's (reach/warps.json: its walk graph over the
+# island's collision at 50-degree slopes and 8-unit steps): each on walkable ground with 10 units of
+# it all round, facing its landmark when that is more than 40 units off, else the volcano or the
+# main island. The 27 places you can't walk to (islets, Wedge Island, the villa cove, the summit
+# rim, the fenced courts, ships' decks, sea caves, cliff-ringed plateaus), and 13 of the landmarks
+# you can, a handful a region. Entries: (LandMarkData index, whose name the menu shows, or None and
+# a name of our own; "+..." appends to the landmark's name), feet (x, y, z), yaw (degrees: x += sin,
+# z += cos). Each is checked on the collision when staged (warp_check). Two are moved from the
+# research's spots to the nearest that pass: the lone cedar's, which stood in its trunk, 17.5 units
+# south (-z is north), and the summit rim's, 5 units from its edge, 52.5 units along the rim.
+WARPS = [
+    # the town
+    (28, None, (-2127.5, 69.0, 1972.5), 45.4),        # the coin-toss fountain, the plaza
+    (3, None, (-1237.5, 161.3, 3857.5), 207.4),       # the liner's deck, no gangway
+    (25, None, (-4297.5, 200.0, 2202.5), 134.9),      # the Swordplay stage, over water
+    (25, "+の観客席", (-4617.5, 192.0, 2177.5), 131.3),  # its stands
+    (18, None, (-4382.5, 504.0, 2.5), 122.2),
+    # the beaches and the coasts
+    (17, None, (6002.5, 64.3, 757.5), 221.8),
+    (1, None, (4657.5, 181.4, -742.5), 221.8),        # the hotel
+    (54, None, (4877.5, 179.2, -1892.5), 236.5),      # the tennis court, fenced
+    (53, None, (8202.5, 54.5, 5022.5), 236.8),
+    (52, None, (7082.5, 31.5, 9562.5), 217.4),
+    (51, None, (6862.5, 725.0, 8077.5), 220.9),       # the sandy hill, ringed by cliffs
+    (6, None, (-6942.5, 989.0, -117.5), 296.7),       # the lighthouse's cape
+    (40, None, (-7417.5, 68.6, 232.5), 114.1),        # the sea cave under it
+    (2, None, (-3392.5, 15.8, -5427.5), 73.8),        # the villa cove, under the sea cliffs
+    (43, None, (882.5, 40.6, -6947.5), 312.1),        # a sea cave's ledge
+    # the mountain
+    (0, None, (737.5, 333.0, 1627.5), 168.8),
+    (9, None, (-1332.5, 336.7, -1452.5), 127.8),      # the suspension bridge
+    (8, None, (-4897.5, 800.3, -1737.5), 107.9),
+    (49, None, (2772.5, 2195.0, -4980.0), 319.1),     # by the lone cedar (the highest ground you walk to)
+    (65, None, (1852.5, 2123.7, -3957.5), 334.7),     # the rock in the lava
+    (38, "+の山頂", (1641.2, 4579.1, -3715.0), 328.5),  # the summit rim
+    # the castle and the ruins
+    (5, None, (-242.5, 1369.0, -3237.5), 108.0),
+    (7, None, (952.5, 829.1, -7502.5), 13.7),
+    (58, None, (1137.5, 1633.8, -8452.5), 8.7),       # the ruins' heights, above 58-degree rock
+    # the islands
+    (56, None, (4247.5, 117.9, -5907.5), 113.4),
+    (56, "+の北の小島", (3972.5, 245.0, -6482.5), 317.8),
+    (60, None, (-7412.5, 373.8, -4747.5), 59.7),
+    (61, None, (-10382.5, 524.3, -7667.5), 54.6),
+    (62, None, (-6227.5, 424.1, -10747.5), 28.2),
+    (16, None, (6502.5, 423.9, -14442.5), 330.8),
+    (None, "北東の小島", (8337.5, 280.7, -13447.5), 323.1),
+    (None, "北東の小島（南）", (8792.5, 292.6, -11837.5), 317.9),
+    (50, None, (-4827.5, 418.5, 12217.5), 163.9),
+    (4, None, (-29787.5, 228.8, 16697.5), 224.8),     # Wedge Island
+    (71, None, (-27162.5, 12.6, 17327.5), 333.6),
+    (32, None, (-28762.5, 169.2, 13807.5), 336.8),
+    (11, None, (-31312.5, 160.0, 16332.5), 119.8),
+    (None, "ゴルフ島の北の小島", (-27327.5, 117.1, 12397.5), 117.0),
+    (33, None, (-29812.5, 212.6, 20262.5), 126.4),
+    (34, None, (-33107.5, 17.0, 14777.5), 116.2),
+]
+# the body a warp spot must have room for (engine/wuhu/player.cpp PlayerParams::make's fractions of
+# the Mii's height at k; reach.md: 20 units of headroom, ground no steeper than 50 degrees)
+WARP_HEADROOM = 20.0
+WARP_WALKABLE_NY = math.cos(math.radians(50.0))
+
+# the reference views (eye, target, vertical fov): research render_island.py's cameras, and
+# env_choice's quay_wedge, from the plaza's sea front at the height of a walking eye toward Hotel
+# Nineteen on Wedge Island, 27,000 units off (where Wedge Island's far model shows)
 VIEWS = OrderedDict([
     ("town", ((-2350.0, 115.0, 2350.0), (-1500.0, 170.0, 1250.0), 55.0)),
     ("coast", ((8300.0, 105.0, 3000.0), (6000.0, 150.0, -1500.0), 55.0)),
@@ -93,6 +224,7 @@ VIEWS = OrderedDict([
     ("interior", ((1450.0, 2260.0, -3500.0), (2350.0, 2140.0, -4350.0), 65.0)),
     ("distant", ((-7700.0, 1100.0, -300.0), (-29600.0, 300.0, 16100.0), 40.0)),
     ("overview", ((-9000.0, 3500.0, 12000.0), (0.0, 400.0, -2000.0), 50.0)),
+    ("wedge", ((-2800.0, 114.0, 3300.0), (-29858.0, 350.0, 16626.0), 50.0)),
 ])
 
 # CmnObjManager classes (main.dol 0x80669518) by PMP (group 1) type (0x80669858), and how each
@@ -232,6 +364,131 @@ def kcl_ground(tris, attrs, normals, x, z, y_from):
     return float(y[i]), int(attrs[i]), normals[i]
 
 
+def kcl_surfaces(tris, attrs, normals, x, z):
+    """Every triangle over or under (x, z): (y there, attribute, normal y), highest first. A point
+    a hundredth of a unit outside a triangle's footprint counts as under it (two prisms rebuild a
+    shared edge apart: engine/collision/kcl.cpp ground() does the same)."""
+    a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        n = np.cross(b - a, c - a)
+
+        def edge(p, q):   # signed distance on x/z from the edge's line
+            e = (q[:, 0] - p[:, 0]) * (z - p[:, 2]) - (q[:, 2] - p[:, 2]) * (x - p[:, 0])
+            return e / np.maximum(np.hypot(q[:, 0] - p[:, 0], q[:, 2] - p[:, 2]), 1e-9)
+        e0, e1, e2 = edge(a, b), edge(b, c), edge(c, a)
+        tol = 0.01
+        inside = ((e0 >= -tol) & (e1 >= -tol) & (e2 >= -tol)) | ((e0 <= tol) & (e1 <= tol) & (e2 <= tol))
+        y = a[:, 1] - (n[:, 0] * (x - a[:, 0]) + n[:, 2] * (z - a[:, 2])) / n[:, 1]
+    ok = inside & np.isfinite(y) & (np.abs(n[:, 1]) > 1e-9)
+    i = np.nonzero(ok)[0]
+    i = i[np.argsort(-y[i])]
+    return y[i], attrs[i], normals[i, 1]
+
+
+def triangle_distances(p, tris):
+    """Distances from point p to each triangle ((n, 3, 3)): to the plane where p's foot falls inside
+    the triangle, else to the nearest edge."""
+    a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        n = np.cross(b - a, c - a)
+        n /= np.linalg.norm(n, axis=1, keepdims=True)
+        h = ((p - a) * n).sum(1)
+        f = p - h[:, None] * n
+        inside = np.ones(len(tris), bool)
+        for u, v in ((a, b), (b, c), (c, a)):
+            inside &= (np.cross(v - u, f - u) * n).sum(1) >= 0
+
+        def seg(u, v):
+            d = v - u
+            t = np.clip(((p - u) * d).sum(1) / np.maximum((d * d).sum(1), 1e-12), 0, 1)
+            return np.linalg.norm(p - (u + t[:, None] * d), axis=1)
+        out = np.where(inside, np.abs(h), np.minimum(np.minimum(seg(a, b), seg(b, c)), seg(c, a)))
+    return np.where(np.isfinite(out), out, np.inf)
+
+
+def warp_body(k):
+    """The Mii a warp spot must have room for, in island units at k: engine/wuhu/player.cpp
+    PlayerParams::make's measures (radius 0.2 of the height, a step 0.25, the knee sphere a radius
+    above the step, the chest one at 0.75)."""
+    h = NOMA_MII_HEIGHT / k
+    return dict(height=round(h, 3), radius=round(0.2 * h, 3), step=round(0.25 * h, 3),
+                knee=round(0.25 * h + 0.2 * h, 3), chest=round(0.75 * h, 3))
+
+
+def warp_check(kcl, cylinders, pos, body, wall_ny=0.3, ring=5.0):
+    """Does the Mii fit at `pos` (feet)? The ground under it (the highest dry surface at most 2 units
+    above the feet) within 2 units of them, walkable (no steeper than 50 degrees; not lava, water or
+    a fence), and the same within a step all round at `ring` units; no water over it, nothing solid
+    between a step and WARP_HEADROOM above it; its two spheres (body: knee, chest, radius) clear of
+    walls (fences, and faces steeper than wall_ny: the player's own rule) and of tree trunks.
+    -> dict(ok, why, ground, attribute, normal_y, clearance)."""
+    tris, attrs, normals = kcl
+    x, y, z = pos
+    R = max(body["radius"], ring) + 10.0
+    lo, hi = tris.min(1), tris.max(1)
+    near = ((lo[:, 0] <= x + R) & (hi[:, 0] >= x - R) & (lo[:, 2] <= z + R) & (hi[:, 2] >= z - R) &
+            (lo[:, 1] <= y + WARP_HEADROOM + R) & (hi[:, 1] >= y - R - 40))
+    T, A, N = tris[near], attrs[near], normals[near]
+
+    def ground_at(px, pz, top):
+        ys, a_, ny = kcl_surfaces(T, A, N, px, pz)
+        for k in range(len(ys)):
+            if ys[k] <= top and a_[k] != 0x1106:
+                return float(ys[k]), int(a_[k]), float(ny[k]), ys, a_, ny
+        return None
+
+    def walkable(a, ny):
+        return ny >= WARP_WALKABLE_NY and a != 0x110B and (a >> 8) not in (0x00, 0x08)
+
+    out = dict(ok=False, why="", ground=None, attribute=None, normal_y=None, clearance=None)
+    g = ground_at(x, z, y + 2.0)
+    if g is None or abs(g[0] - y) > 2.0:
+        out["why"] = "no ground within 2 units of the feet (%s)" % (None if g is None else round(g[0], 2))
+        return out
+    gy, ga, gny, ys, a_, ny = g
+    out.update(ground=round(gy, 2), attribute="%04x" % ga, normal_y=round(gny, 4))
+    if not walkable(ga, gny):
+        out["why"] = "ground %04x, normal y %.3f: not walkable" % (ga, gny)
+        return out
+    above = ys > gy + 1e-3
+    wet = above & (a_ == 0x1106) & (ys <= gy + body["height"])
+    if wet.any():
+        out["why"] = "water %.1f above the feet" % float(ys[wet].min() - gy)
+        return out
+    roof = above & (a_ != 0x1106) & (ys > gy + body["step"]) & (ys < gy + WARP_HEADROOM)
+    if roof.any():
+        out["why"] = "a ceiling %.1f above the feet" % float(ys[roof].min() - gy)
+        return out
+    solid = (((A >> 8) == 0x00) | ((A >> 8) == 0x08) | (N[:, 1] < wall_ny)) & (A != 0x1106)
+    clear = np.inf
+    for hgt in (body["knee"], body["chest"]):
+        d = triangle_distances(np.array([x, gy + hgt, z]), T[solid])
+        clear = min(clear, float(d.min()) if len(d) else np.inf)
+    out["clearance"] = round(clear, 2) if np.isfinite(clear) else None
+    if clear < body["radius"]:
+        out["why"] = "in a wall (%.2f from one, the body's radius %.2f)" % (clear, body["radius"])
+        return out
+    for cx, cz, y0, y1, cr in cylinders:
+        if y0 < gy + body["height"] and y1 > gy and math.hypot(x - cx, z - cz) < cr + body["radius"]:
+            out["why"] = "in a tree trunk at (%.0f, %.0f)" % (cx, cz)
+            return out
+    for k in range(8):
+        th = math.pi * k / 4
+        r = ground_at(x + ring * math.sin(th), z + ring * math.cos(th), gy + body["step"])
+        if r is None or abs(r[0] - gy) > body["step"] or not walkable(r[1], r[2]):
+            out["why"] = "the ground %g units off at %d degrees is %s" % (
+                ring, 45 * k, "missing" if r is None else "%.1f off, %04x, normal y %.2f" % (r[0] - gy, r[1], r[2]))
+            return out
+    out.update(ok=True, why="room (%s)" % ("%.2f from the nearest wall" % clear if np.isfinite(clear) else
+                                         "no wall within %.0f" % R))
+    return out
+
+
+def landmark_name(l):
+    """A LandMarkData name without its number ("28_コイン・トスの噴水" -> "コイン・トスの噴水")."""
+    return l["name"].split("_", 1)[1] if "_" in l["name"] else l["name"]
+
+
 # ----------------------------------------------------------------------------------- env files
 
 
@@ -241,8 +498,10 @@ def rgba(b):
 
 def read_plight(d):
     """LGHT v2 (EGG::LightManager): 16 LightObjects of 0x50 at 0x28, then 16 ambient colours (8
-    bytes apart). Per light: type 0x12 (0 world point, 1 world directional, ...), flags 0x16 (bit 0
-    on), position 0x18, aim 0x24, intensity 0x30 (multiplied into the RGB), colour 0x34."""
+    bytes apart). Per light: type 0x12 (0 world point, 1 world directional, ...), flags 0x16,
+    position 0x18, aim 0x24, intensity 0x30 (multiplied into the RGB), colour 0x34. A light is on in
+    g3d only with flag bits 0 and 0x40 both set (EGG's LightObject, fn_801BC6E0): Abatar_Light
+    (0x7A1) is off although bit 0 is set."""
     n, na = struct.unpack_from(">HH", d, 0x10)
     lights = []
     for i in range(n):
@@ -254,7 +513,8 @@ def read_plight(d):
         inten = struct.unpack_from(">f", d, o + 0x30)[0]
         col = d[o + 0x34:o + 0x38]
         eff = [min(255, int(c * inten)) for c in col[:3]] + [col[3]]
-        lights.append(dict(index=idx, type=typ, on=bool(flags & 1), pos=pos, aim=aim, color=eff))
+        lights.append(dict(index=idx, type=typ, flags=flags, on=bool(flags & 1 and flags & 0x40), pos=pos,
+                           aim=aim, color=eff))
     ab = 0x28 + 0x50 * n
     amb = [rgba(d[ab + 8 * i:ab + 8 * i + 4]) for i in range(na)]
     return lights, amb
@@ -264,6 +524,12 @@ def read_fogd(d, o=0):
     """FOGD (EGG::Fog): start 0x10, end 0x14, RGBA 0x20, GX fog type 0x24, flags 0x25 (bit 0 on)."""
     st, en = struct.unpack_from(">2f", d, o + 0x10)
     return dict(start=st, end=en, color=rgba(d[o + 0x20:o + 0x24]), type=d[o + 0x24], on=bool(d[o + 0x25] & 1))
+
+
+def read_penv(d):
+    """PENV: the sun object's position (x, y, z at 0x14) and size (0x20), which the scene hands the
+    sun (CmnObj class 1) when it makes it."""
+    return dict(pos=struct.unpack_from(">3f", d, 0x14), size=struct.unpack_from(">f", d, 0x20)[0])
 
 
 def read_landmarks(d):
@@ -402,26 +668,66 @@ class Stager:
         self.island = isl = w.brres(SA, "Island/G3D/WS2_common_island.brres")
         self.seatex = sea = w.brres(SA, "Island/G3D/WS2_common_seatex.brres")
         self.sea_override = {"sea2_dummy": (sea, "sea2_day")}
-        n = self.bake_model(isl, isl.models["WS2_common_island"], None, TAG_ALL, HIDDEN_MODE13,
-                            by_centroid=True, group_name="island")
+        # (Wedge Island and its sea rim are an instance of their own: stage_wedge)
+        n = self.bake_model(isl, isl.models["WS2_common_island"], None, TAG_ALL,
+                            HIDDEN_MODE13 | {WEDGE_NODES[0]}, by_centroid=True, group_name="island")
         nv = self.bake_model(isl, isl.models["WS2_common_island_V"], None, TAG_ALL, HIDDEN_MODE13,
                              by_centroid=True, group_name="island_V")
-        self.say("island: %d triangles (mode 13), island_V %d" % (n, nv))
-        self.inv["island"] = dict(source="%s Island/G3D/WS2_common_island.brres" % SA, triangles=n,
+        self.say("island: %d triangles in the cells (mode 13, Wedge Island aside), island_V %d" % (n, nv))
+        self.inv["island"] = dict(source="%s Island/G3D/WS2_common_island.brres" % SA, cell_triangles=n,
                                   island_V_triangles=nv, hidden_nodes=sorted(HIDDEN_MODE13))
-        # the sea and the sky: models of their own
-        self.sea_model, _ = self.cv.model(isl, isl.models["WS2_common_sea"], hidden=HIDDEN_MODE13,
-                                          tex_override=self.sea_override)
-        for m in isl.models["WS2_common_sea"].materials:
-            k = (id(isl), "WS2_common_sea", m.index, tuple(sorted(
-                (a, id(b[0]), b[1]) for a, b in self.sea_override.items())))
+        # the sea and the sky: models of their own; the sun a part of the sky
+        self.sea_model, _ = self.cv.model(isl, isl.models["WS2_common_sea"],
+                                          hidden=HIDDEN_MODE13 | {WEDGE_NODES[1]}, tex_override=self.sea_override)
+        self.register_materials(isl, isl.models["WS2_common_sea"], self.sea_override)
+        self.sun = sunr = w.brres(SA, "Sun/G3D/WS2_common_sun_model.brres")
+        penv = read_penv(w.get(*ENV_PENV))
+        M, info = sun_matrix(penv)
+        self.sky_model, nm = self.cv.model(isl, isl.models["WS2_common_vr"], parts=[
+            convert.Part("sun", sunr, sunr.models["WS2_common_sun_model"], M)])
+        self.register_materials(isl, isl.models["WS2_common_vr"])
+        self.register_materials(sunr, sunr.models["WS2_common_sun_model"])
+        sky = self.pkg.models[self.sky_model]
+        self.say("sky: WS2_common_vr with the sun %s (.penv %s, size %g), %d batches in its draw order: %s" % (
+            info, [round(x, 1) for x in penv["pos"]], penv["size"], sky.n_batches, ", ".join(
+                self.pkg.string(self.pkg.materials[self.pkg.batches[b].material].name)
+                for b in range(sky.first_batch, sky.first_batch + sky.n_batches))))
+        self.inv["sky"] = dict(model="WS2_common_vr", sun=dict(source="%s Sun/G3D/WS2_common_sun_model.brres" % SA,
+                                                               penv="%s %s" % ENV_PENV, penv_position=penv["pos"],
+                                                               penv_size=penv["size"], **info))
+
+    def register_materials(self, r, mdl, override=None):
+        """The package materials a model's conversion made, by (model, material) name (for its
+        animations)."""
+        ov = tuple(sorted((a, id(b[0]), b[1]) for a, b in (override or {}).items()))
+        for m in mdl.materials:
+            k = (id(r), mdl.name, m.index, ov)
             if k in self.cv.mat:
-                self.mat_by_name[("WS2_common_sea", m.name)] = self.cv.mat[k]
-        self.sky_model, _ = self.cv.model(isl, isl.models["WS2_common_vr"])
-        for m in isl.models["WS2_common_vr"].materials:
-            k = (id(isl), "WS2_common_vr", m.index, ())
-            if k in self.cv.mat:
-                self.mat_by_name[("WS2_common_vr", m.name)] = self.cv.mat[k]
+                self.mat_by_name[(mdl.name, m.name)] = self.cv.mat[k]
+
+    def stage_wedge(self):
+        """Wedge Island (Island_16 with its sea rim Water16) as a still instance whose model chain
+        goes to the light model (Island_16b, Water16b) from LOD_WEDGE units off (WEDGE_NODES)."""
+        isl, pkg = self.island, self.pkg
+        island, sea = isl.models["WS2_common_island"], isl.models["WS2_common_sea"]
+        models = []
+        for land, water in (WEDGE_NODES, WEDGE_FAR_NODES):
+            others = {n.name for n in island.nodes if n.name != land}
+            mi, _ = self.cv.model(isl, island, name=land, hidden=others, parts=[
+                convert.Part(water, isl, sea, None, {n.name for n in sea.nodes if n.name != water},
+                             self.sea_override)])
+            models.append(mi)
+        self.register_materials(isl, island)
+        near, far = (pkg.models[m] for m in models)
+        near.lod_next, near.lod_distance = models[1], LOD_WEDGE
+        pkg.add("instances", model=models[0], flags=ng3d.INST_STATIC, anim=NONE16, class_id=0,
+                mtx=[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]])
+        tris = [sum(pkg.batches[b].n_indices // 3 for b in range(m.first_batch, m.first_batch + m.n_batches))
+                for m in (near, far)]
+        self.say("Wedge Island: %s %d triangles, %s %d from %.0f units off its centre (radius %.0f)" % (
+            "+".join(WEDGE_NODES), tris[0], "+".join(WEDGE_FAR_NODES), tris[1], LOD_WEDGE, near.radius))
+        self.inv["wedge_island"] = dict(near=list(WEDGE_NODES), far=list(WEDGE_FAR_NODES), triangles=tris,
+                                        lod_distance=LOD_WEDGE, radius=near.radius)
 
     # ------------------------------------------------------------------------------- props
     def stage_props(self):
@@ -700,19 +1006,26 @@ class Stager:
         n = convert.add_clr0(ab, isl.anims["CLR0"]["WS2_common_sea_nami"], self.material_of("WS2_common_sea"))
         self.sea_clr = ab.end()
         out["sea_clr"] = dict(frames=1000, tracks=n, sources=["CLR0 WS2_common_sea_nami"])
+        # the sky: the clouds' scroll (9,999 frames) and the sun's rays turning (4,000): four of the
+        # one, ten of the other, stretched by 0.01 % to fit
         a = isl.anims["SRT0"]["WS2_common_vr"]
-        ab = convert.AnimBuilder(pkg, "sky_srt", a.frames)
-        n = convert.add_srt0(ab, a, self.texmtx_of("WS2_common_vr"))
+        sun = self.sun.anims["SRT0"]["WS2_common_sun_model"]
+        frames = 4 * a.frames
+        laps = round(frames / sun.frames)
+        ab = convert.AnimBuilder(pkg, "sky_srt", frames)
+        n = convert.add_srt0(ab, a, self.texmtx_of("WS2_common_vr"), period=a.frames)
+        n += convert.add_srt0(ab, sun, self.texmtx_of("WS2_common_sun_model"), period=frames / laps,
+                              time_scale=frames / (laps * sun.frames))
         self.sky_srt = ab.end()
-        out["sky_srt"] = dict(frames=a.frames, tracks=n, sources=["SRT0 WS2_common_vr"])
+        out["sky_srt"] = dict(frames=frames, tracks=n, sources=["SRT0 WS2_common_vr (x4)",
+                                                                "SRT0 WS2_common_sun_model (x%d)" % laps])
         self.inv["anims"] = out
         self.say("animations: %d, %d tracks, %d keys" % (len(pkg.anims), len(pkg.tracks), len(pkg.keys)))
 
     # ------------------------------------------------------------------------------- environment
     def stage_env(self):
         w, pkg = self.wsr, self.pkg
-        plight = w.get("Stage/PlnScene/PlnEnv0.carc", "WS2_pln_F0/WS2_pln_F0_Light.plight")
-        lights, ambient = read_plight(plight)
+        lights, ambient = read_plight(w.get(*ENV_LIGHTS))
         scn = w.brres("Common/Static/common.carc", "G3D/WS2_Scene.brres")
         scene = next(iter(scn.scenes.values()))
         by_id = {l["index"]: l for l in lights}
@@ -724,16 +1037,20 @@ class Stager:
                 l = by_id.get(lid)
                 if l is None or not l["on"] or lid in light_index:
                     continue
-                # EGG type 0: a light at a position in the world (the sun 48,000-100,000 units off,
-                # unattenuated); type 1: directional, from position toward the aim point. Both
-                # carry the aim direction (what a directional-only renderer uses)
-                d = np.array(l["aim"], np.float64) - np.array(l["pos"], np.float64)
+                # EGG type 0: a light at a position in the world (the sun's 48,000-100,000 units
+                # off, unattenuated; or a direction written as a position: POINT_LIGHT_MIN_DISTANCE);
+                # type 1: directional, from the position toward the aim point. Every light carries
+                # that direction (what a directional-only renderer uses)
+                pos = np.array(l["pos"], np.float64)
+                d = np.array(l["aim"], np.float64) - pos
                 d /= max(np.linalg.norm(d), 1e-9)
-                light_index[lid] = pkg.add("lights", name=pkg.str(nm),
-                                           kind=ng3d.LK_POINT if l["type"] == 0 else ng3d.LK_DIRECTIONAL,
-                                           rgba=l["color"], position=list(map(float, l["pos"])),
+                point = l["type"] == 0 and np.linalg.norm(pos) >= POINT_LIGHT_MIN_DISTANCE
+                light_index[lid] = pkg.add("lights", name=pkg.str(nm), kind=ng3d.LK_POINT if point else ng3d.LK_DIRECTIONAL,
+                                           rgba=l["color"], position=list(map(float, pos)),
                                            direction=[float(x) for x in d])
-                env_lights.append(dict(name=nm, id=lid, type=l["type"], pos=l["pos"], color=l["color"]))
+                env_lights.append(dict(name=nm, id=lid, egg_type=l["type"], flags="%04x" % l["flags"],
+                                       kind="point" if point else "directional", pos=l["pos"],
+                                       direction=[round(float(x), 4) for x in d], color=l["color"]))
         sets = []
         for ls in sorted(scene.light_sets, key=lambda s: s["id"]):
             while len(pkg.light_sets) < ls["id"]:
@@ -741,37 +1058,53 @@ class Stager:
             idx = [light_index[scene.lights[nm]] for nm in ls["lights"] if scene.lights[nm] in light_index]
             amb = ambient[scene.ambients[ls["ambient"]]] if ls["ambient"] in scene.ambients else [0, 0, 0, 255]
             pkg.add("light_sets", name=pkg.str(ls["name"]), lights=(idx + [NONE16] * 8)[:8], ambient=amb)
-            sets.append(dict(id=ls["id"], name=ls["name"], lights=ls["lights"], ambient=amb))
-        fog0 = read_fogd(w.get(SA, "Binary/WS2_common_binary/ws2_common_day.pfobj"))
-        fogm = w.get("Stage/PlnScene/PlnEnv0.carc", "WS2_pln_F0/WS2_pln_F0_fog.pfog")
-        fog1 = read_fogd(fogm, 0x14 + 0x30 * 1)
-        for f in (fog0, fog1):
+            sets.append(dict(id=ls["id"], name=ls["name"], lights=[pkg.string(pkg.lights[i].name) for i in idx],
+                             ambient="#%02x%02x%02x" % tuple(amb[:3])))
+        # the fogs: Bic F0's table (fog 0 off), the island's .pfobj in fog 1, switched on
+        table = w.get(*ENV_FOGS)
+        fogs = [read_fogd(table, 0x14 + 0x30 * i) for i in range(SEA_FOG_INDEX + 1)]
+        fogs[SEA_FOG_INDEX] = dict(read_fogd(w.get(*SEA_FOG)), on=True)
+        for f in fogs:
             pkg.add("fogs", type=ng3d.FOG_LINEAR if f["on"] and f["type"] == 2 else ng3d.FOG_NONE, rgba=f["color"],
                     start=f["start"], end=f["end"])
-        # materials asking for a fog the day set doesn't have (an index past 1) get none
-        for m in pkg.materials:
-            if m.flags & ng3d.MAT_FOG and m.fog >= len(pkg.fogs):
+        # materials asking for a fog the table doesn't have get none; the sky (the dome and the sun)
+        # none whatever its index says: WSR's sky is fog 0, off by day, and a fog 0 turned on (a
+        # night's) must not wash it out at 62,000-70,000 units
+        users = {}
+        sky = pkg.models[self.sky_model]
+        sky_mats = {pkg.batches[b].material for b in range(sky.first_batch, sky.first_batch + sky.n_batches)}
+        for i, m in enumerate(pkg.materials):
+            if m.flags & ng3d.MAT_FOG and (m.fog >= len(pkg.fogs) or i in sky_mats):
                 m.flags &= ~ng3d.MAT_FOG
-                self.cv.stats["materials with a fog index past the table (fog off)"] += 1
-        # k from the spectators (see NOMA_MII_HEAD_Y)
-        ava = w.brres(SA, "Audience/G3D/WS2_common_avaC0.brres").models["WS2_common_avaC0"]
-        head = [n for n in ava.nodes if n.name == "head_set"][0]
-        ava_scale = float(np.median([o["scale"][1] for o in self.all_tag0 if o["group"] == 1 and o["type"] == 5]))
-        neck = float(head.mtx[1, 3]) * ava_scale
-        k = NOMA_MII_HEAD_Y / neck
-        self.k = k
+                self.cv.stats["materials unfogged (the sky, or a fog index past the table)"] += 1
+            if m.flags & ng3d.MAT_FOG:
+                users.setdefault(m.fog, []).append(pkg.string(m.name))
+        fog_users = {i: (len(u) if i != SEA_FOG_INDEX else u) for i, u in sorted(users.items())}
+        # k (MII_UNITS_PER_ISLAND_UNIT), and the WSR Mii it rests on, measured: the player body's
+        # head_set over its feet, and the RFL head on it
+        body = w.brres("Common/Kokeshi/common.carc", "G3D/WS2_avaA1.brres").models["WS2_avaA1"]
+        head_set = float([n for n in body.nodes if n.name == "head_set"][0].mtx[1, 3])
+        wsr_mii = head_set + WSR_HEAD_SCALE * RFL_HAIR_TOP
+        noma_mii = NOMA_HEAD_Y + NOMA_HEAD_SCALE * RFL_HAIR_TOP
+        k = self.k = MII_UNITS_PER_ISLAND_UNIT
         pkg.env = ng3d.Rec("Env", sky_model=self.sky_model, sky_anim=self.sky_srt, sea_model=self.sea_model,
                            sea_anim_srt=self.sea_srt, sea_anim_clr=self.sea_clr, world_anim_srt=self.world_srt,
                            world_anim_clr=self.world_clr, world_bbox=self.world_bbox, mii_units_per_unit=k,
                            cell_size=CELL, n_cells_x=self.grid[2], n_cells_z=self.grid[3],
                            grid_origin=[self.grid[0], self.grid[1]])
-        self.say("env: %d lights, %d light sets, fogs %s; k = %.3f (Wii no Ma head node %.1f / WSR spectator "
-                 "head_set %.2f x scale %.2f = %.2f; a %.0f-tall Mii is %.1f island units)" % (
-                     len(pkg.lights), len(pkg.light_sets), [(f["start"], f["end"]) for f in (fog0, fog1)], k,
-                     NOMA_MII_HEAD_Y, head.mtx[1, 3], ava_scale, neck, NOMA_MII_HEIGHT, NOMA_MII_HEIGHT / k))
-        self.inv["env"] = dict(lights=env_lights, light_sets=sets, fogs=[fog0, fog1],
-                               k=dict(value=k, noma_head_y=NOMA_MII_HEAD_Y, noma_height=NOMA_MII_HEIGHT,
-                                      wsr_head_set_y=float(head.mtx[1, 3]), wsr_spectator_scale=ava_scale,
+        self.say("env: %d lights (%s), %d light sets, fogs %s, fogged materials by fog %s; k = %.1f (WSR's Mii: "
+                 "head_set %.2f + %.2f x %.1f = %.2f island units; Wii no Ma's %.1f units: %.2f; a %.0f-tall Mii "
+                 "is %.1f island units)" % (
+                     len(pkg.lights), ", ".join("%s %s" % (l["name"], l["kind"]) for l in env_lights),
+                     len(pkg.light_sets), [(f["start"], f["end"], f["on"]) for f in fogs], fog_users, k, head_set,
+                     WSR_HEAD_SCALE, RFL_HAIR_TOP, wsr_mii, noma_mii, noma_mii / wsr_mii, NOMA_MII_HEIGHT,
+                     NOMA_MII_HEIGHT / k))
+        self.inv["env"] = dict(source=dict(lights="%s %s" % ENV_LIGHTS, fogs="%s %s" % ENV_FOGS,
+                                           sea_fog="%s %s" % SEA_FOG),
+                               lights=env_lights, light_sets=sets, fogs=fogs, fogged_materials=fog_users,
+                               clear_colour="#%02x%02x%02x" % tuple(fogs[SEA_FOG_INDEX]["color"][:3]),
+                               k=dict(value=k, wsr_head_set_y=head_set, wsr_mii_height=wsr_mii,
+                                      noma_mii_height=noma_mii, ratio=noma_mii / wsr_mii,
                                       mii_height_island_units=NOMA_MII_HEIGHT / k),
                                world_bbox=self.world_bbox)
 
@@ -798,8 +1131,7 @@ class Stager:
         used = [l for l in lms if l["kind"] != 6]
         fixed = [l for l in used if l["kind"] == 0]
         for l in fixed:
-            name = l["name"].split("_", 1)[1] if "_" in l["name"] else l["name"]
-            pkg.add("markers", name=pkg.str(name or "landmark_%d" % l["index"]), kind=1,
+            pkg.add("markers", name=pkg.str(landmark_name(l) or "landmark_%d" % l["index"]), kind=1,
                     position=list(map(float, l["pos"])))
         for i, (eye, tgt) in enumerate(read_campar(w.get("Stage/Shared/SeqData.carc",
                                                          "Map/WS2_seq1_IslandCamParam.exbin"))):
@@ -807,12 +1139,32 @@ class Stager:
                     dir=list(map(float, tgt)))
         for name, (eye, tgt, fov) in VIEWS.items():
             pkg.add("markers", name=pkg.str("view_" + name), kind=2, position=list(eye), dir=list(tgt))
+        # the exploration menu's places, each checked on the collision (the spawn too, for the record)
+        body = warp_body(self.k)
+        names = {l["index"]: landmark_name(l) for l in lms}
+        spawn_room = warp_check(kcl, self.cylinders, (SPAWN[0], g[0], SPAWN[2]), body)
+        warps, bad = [], []
+        for lm, own, pos, yaw in WARPS:
+            name = own if lm is None else names[lm] + own[1:] if own else names[lm]
+            r = warp_check(kcl, self.cylinders, pos, body)
+            if not r["ok"]:
+                bad.append("%s %s: %s" % (name, pos, r["why"]))
+            d = [math.sin(math.radians(yaw)), 0.0, math.cos(math.radians(yaw))]
+            feet = [float(pos[0]), r["ground"] if r["ok"] else float(pos[1]), float(pos[2])]
+            pkg.add("markers", name=pkg.str(name), kind=ng3d.MK_WARP, position=feet, dir=d)
+            warps.append(dict(name=name, landmark=lm, feet=feet, yaw=yaw, **{k: v for k, v in r.items() if k != "ok"}))
+        if bad:
+            raise SystemExit("warp spots without room for the Mii:\n  " + "\n  ".join(bad))
         self.say("markers: spawn, %d landmarks (of %d used: %d ride vehicles, positions relative to them), "
-                 "15 seqcam, %d view" % (len(fixed), len(used), len(used) - len(fixed), len(VIEWS)))
-        self.inv["markers"] = dict(spawn=dict(position=[SPAWN[0], g[0], SPAWN[2]], dir=SPAWN_DIR, check=spawn_check),
+                 "15 seqcam, %d view, %d warps (each on walkable ground, nothing solid within %.2f of the body's "
+                 "spheres at %.2f and %.2f, %.0f clear above; the spawn: %s)" % (
+                     len(fixed), len(used), len(used) - len(fixed), len(VIEWS), len(warps), body["radius"],
+                     body["knee"], body["chest"], WARP_HEADROOM, spawn_room["why"]))
+        self.inv["markers"] = dict(spawn=dict(position=[SPAWN[0], g[0], SPAWN[2]], dir=SPAWN_DIR, check=spawn_check,
+                                              room=spawn_room),
                                    landmarks=len(fixed),
                                    landmarks_on_vehicles=[l["name"] for l in used if l["kind"] == 3],
-                                   seqcams=15, views=list(VIEWS))
+                                   seqcams=15, views=list(VIEWS), warp_body=body, warps=warps)
 
     # ------------------------------------------------------------------------------- collision
     def stage_collision(self):
@@ -857,7 +1209,28 @@ class Stager:
         self.inv["collision"] = dict(files=files, cylinders=n,
                                      trunks={CLASSES[c][0]: dict(x=v[0], z=v[1], y0=v[2], y1=v[3], radius=v[4])
                                              for c, v in trunks.items()})
+        self.cylinders = [(c.x, c.z, c.y0, c.y1, c.radius) for c in pkg.cylinders]
         return kcl
+
+
+def sun_matrix(penv):
+    """Where the sun goes in the sky model (whose origin is the eye): SUN_DISTANCE along the .penv
+    position's direction, turned as its STD billboard would be when looked at (its +z back toward
+    the eye, x level), at the scale WSR's update gives it at that distance. (The engine leaves the
+    sky's nodes unturned; a renderer that billboards them turns it the same way.) -> (4x4, info)."""
+    d = np.asarray(penv["pos"], np.float64)
+    d /= np.linalg.norm(d)
+    z = -d
+    x = np.cross([0.0, 1.0, 0.0], z)
+    x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    s = penv["size"] * SUN_DISTANCE / SUN_SCREEN
+    M = np.eye(4)
+    M[:3, 0], M[:3, 1], M[:3, 2], M[:3, 3] = x * s, y * s, z * s, d * SUN_DISTANCE
+    info = dict(direction=[round(float(v), 4) for v in d], distance=SUN_DISTANCE, scale=round(s, 4),
+                elevation_deg=round(math.degrees(math.asin(d[1])), 2),
+                azimuth_deg=round(math.degrees(math.atan2(d[0], d[2])), 2))
+    return M, info
 
 
 def sample_path(anim, node, step):
@@ -910,14 +1283,25 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("data", help="the port's data directory (the package goes to DATA/wuhu/island.ng3d)")
     ap.add_argument("--wsr", default=DEFAULT_WSR, help="the Wii Sports Resort extraction's root (holding files/)")
-    ap.add_argument("--bake", help="the renderer's ng3d-bake: run as TOOL RAW OUT after writing")
-    ap.add_argument("--keep-raw", action="store_true", help="with --bake: keep island.raw.ng3d")
+    ap.add_argument("--bake", default=DEFAULT_BAKE,
+                    help="the renderer's ng3d-bake, run as TOOL UNBAKED OUT (default: %s)" % os.path.relpath(
+                        DEFAULT_BAKE, ROOT))
+    ap.add_argument("--no-bake", action="store_true",
+                    help="write the GX texels as they are (the host converts them; the 3DS refuses the package)")
+    ap.add_argument("--keep-raw", action="store_true",
+                    help="keep the unbaked package too, as DATA/wuhu/island.unbaked.ng3d (tools/g3d/preview.py "
+                         "reads GX texels)")
     ap.add_argument("--json", help="where the inventory goes (default DATA/wuhu/island.json)")
     a = ap.parse_args(argv)
+    bake = None if a.no_bake else a.bake
+    if bake and not os.access(bake, os.X_OK):
+        raise SystemExit("no ng3d-bake at %s: build the host target (cmake -S . -B build-host && cmake --build "
+                         "build-host --target ng3d-bake) or give --bake PATH. The 3DS refuses a package whose "
+                         "textures are still GX's (--no-bake writes one for the host anyway)." % bake)
     t0 = time.time()
     st = Stager(Wsr(a.wsr))
-    st.all_tag0 = read_pmp(st.wsr.get("Stage/PlnScene/PlnEnv0.carc", "WS2_pln_island_tag0.pmp"))
     st.stage_island()
+    st.stage_wedge()
     st.stage_props()
     st.build_cells()
     st.stage_instances()
@@ -938,27 +1322,34 @@ def main(argv=None):
     out_dir = os.path.join(a.data, "wuhu")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, "island.ng3d")
-    raw = os.path.join(out_dir, "island.raw.ng3d") if a.bake else out
+    raw = os.path.join(out_dir, "island.unbaked.ng3d") if bake else out
     with open(raw, "wb") as f:
         f.write(data)
-    if a.bake:
+    if bake:
         # (a bake that fails must not leave the last run's package looking like this one's)
         if os.path.exists(out):
             os.remove(out)
-        subprocess.run([a.bake, raw, out], check=True)
+        subprocess.run([bake, raw, out], check=True)
         if not a.keep_raw:
             os.remove(raw)
+        baked = ng3d.Package.read(open(out, "rb").read())
+        left = sum(1 for t in baked.textures if t.flags & ng3d.TEX_GX_RAW)
+        if left:
+            raise SystemExit("%s: %d textures still GX's after the bake" % (out, left))
     # the sections of the file as written (the bake changes TDAT); texture bytes as GX has them
     sections = ng3d.Package.read(open(out, "rb").read()).sections
-    st.inv["package"] = dict(path=out, bytes=os.path.getsize(out), baked=bool(a.bake),
+    st.inv["package"] = dict(path=out, bytes=os.path.getsize(out), baked=bool(bake),
+                             unbaked=dict(path=raw, bytes=len(data)) if bake and a.keep_raw else None,
                              sections=[dict(tag=t, bytes=s.size, count=s.count) for t, s in sections],
                              textures=texture_summary(pkg), stats=dict(st.cv.stats))
     st.inv["log"] = st.log
     with open(a.json or os.path.join(out_dir, "island.json"), "w") as f:
         json.dump(st.inv, f, ensure_ascii=False, indent=1,
                   default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x))
-    st.say("wrote %s: %d bytes in %.1f s (%s)" % (out, os.path.getsize(out), time.time() - t0,
-                                                 ", ".join("%s %d" % (t, s.size) for t, s in sections)))
+    st.say("wrote %s (%s): %d bytes in %.1f s (%s)%s" % (
+        out, "baked" if bake else "GX texels", os.path.getsize(out), time.time() - t0,
+        ", ".join("%s %d" % (t, s.size) for t, s in sections),
+        "; unbaked %d bytes kept as %s" % (len(data), raw) if bake and a.keep_raw else ""))
     for k, v in sorted(st.cv.stats.items()):
         print("  %s: %s" % (k, v))
     return 0

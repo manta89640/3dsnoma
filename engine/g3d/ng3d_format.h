@@ -341,11 +341,18 @@ struct Fog {
 };
 static_assert(sizeof(Fog) == 16, "Fog");
 
+enum MarkerKind : u32 {
+    MK_SPAWN = 0,     // where the player starts (dir: facing)
+    MK_LANDMARK = 1,  // a named place (dir unused)
+    MK_CAMERA = 2,    // a camera preset: position = eye, dir = target point
+    MK_WARP = 3,      // a place a menu offers to go to: the name is what it lists, position = the
+                      // feet on the ground, dir = facing (unit); listed in the package's order
+};
 struct Marker {
     u32 name;            // STRS (e.g. "spawn", or a landmark's name)
-    u32 kind;            // 0 spawn point, 1 landmark, 2 camera preset (position = eye, target in dir)
+    u32 kind;            // MarkerKind
     f32 position[3];
-    f32 dir[3];          // spawn: facing (unit); camera: target point
+    f32 dir[3];          // spawn, warp: facing (unit); camera: target point
 };
 static_assert(sizeof(Marker) == 32, "Marker");
 
