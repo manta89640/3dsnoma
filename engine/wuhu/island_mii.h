@@ -110,6 +110,9 @@ private:
     engine::math::Mtx34 npc_head_view_{}, camera_view_{};
     bool npc_head_ok_ = false, hide_player_ = false;
     std::unique_ptr<MidohaOutfit> outfit_;
+    // his face's own parts (midoha.h), written over RFL's face textures; frames since he was made
+    std::unique_ptr<MidohaFace> face_;
+    u32 npc_frames_ = 0;
 };
 
 }  // namespace engine::wuhu

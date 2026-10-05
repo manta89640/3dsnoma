@@ -20,6 +20,13 @@ colour 4 (green: his body's colour where the outfit's texture isn't drawn), heig
   A  face 0 (a pointed chin), eye 30 at size 4: the winged eyeliner of the concept, the Mii's usual size
   B  face 1 (a rounder chin, as drawn), eye 30 at size 5: the same eye, as large as the concept draws it
   C  face 0, eye 27 at size 5: a rounder eye with a heavy upper lid line
+  D  (recommended) face 4, the closest to the concept's outline seen at the TV's 16:9 (its half widths
+     from the eyes down to the chin, 26-24-22-19-14-8 units, against the concept's 26-25-22-20-16-9;
+     face 1's narrow to 20-18-13 at the jaw), the nose 1 a step lower (nose_y 10: the concept's nose
+     ends 2 units under the eyes' line lower than nose_y 9's); his eyes, brows and mouth painted after
+     the concept (tools/mii/midoha_face.py, written over RFL's face texture in the game) -- the Wii
+     parts here are what shows without that file: the re-pick closest to the concept's (eye 6, the
+     almond with a small wing, at size 4; brow 1, arched and tapering, at size 3; mouth 19)
 
 (The hair fits faces 0, 1, 3, 4 and 5 as it is: RFL puts their hair at the same height; faces 2, 6
 and 7 raise it by 3 units, which the hair would have to follow.)
@@ -43,6 +50,8 @@ CANDIDATES = {
     "B": ("face 1 (rounder chin), eye 30 at size 5 (as large as the concept's)",
           dict(face=1, eye=30, eye_size=5)),
     "C": ("face 0, eye 27 (rounder, heavy upper lid) at size 5", dict(face=0, eye=27, eye_size=5)),
+    "D": ("face 4, nose a step lower; his eyes, brows and mouth painted (the Wii parts under them: eye 6, "
+          "brow 1, mouth 19)", dict(face=4, eye=6, eye_size=4, brow=1, brow_size=3, nose_y=10)),
 }
 MII_ID = 0x8D1D0A00
 SYSTEM_ID = b"MIDO"

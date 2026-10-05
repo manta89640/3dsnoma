@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -36,7 +37,13 @@ using engine::math::store_f32;
 
 namespace {
 
-const u32 FACE_RESOLUTION = 0x80;
+// the faces' texture size (RFLResolution: 0x40, 0x80, 0x100; +0x20 and the smaller sizes' bits with
+// mip levels). The player's 128 x 128, as the room's; the NPC's 256 x 256 (a close-up of his face
+// magnifies 128 into blur; his own face parts are painted at 256: MidohaFace). The actor manager sizes
+// all its actor slots from the resolution it is made with (+0xC: RFLGetModelBufferSize(res, all 7
+// expressions) + 0x11000: 332,608 bytes at 128, 1,020,960 at 256) and reads +0x8 whenever it makes
+// an actor: made with the NPC's, it has +0x8 set to the player's for the player's actor.
+const u32 FACE_RESOLUTION = 0x80, NPC_FACE_RESOLUTION = 0x100;
 // the animation files the actor manager loads (Wait and Head the BodyController's own; Color_Anim the
 // Mii light's)
 const char* const ANIM_FILES[] = {
@@ -67,6 +74,7 @@ IslandMii::~IslandMii() {
     // the reverse of make_step's order (nothing was made if the block couldn't be had: step_ is
     // then STEPS, the addresses 0): the NPC's dress first (his actor goes with the manager's)
     outfit_.reset();
+    face_.reset();
     if (block_) {
         if (step_ >= 5)
             g3d::sound_handles_dtor(handles_);
@@ -178,7 +186,9 @@ bool IslandMii::make_step() {
     }
     case 2: g3d::shadow_res_ctor(shadow_res_); break;
     case 3:
-        g3d::actors_ctor(actors_, guest::load32(root_word_), npc_record_ ? 2 : 1, FACE_RESOLUTION, anim_list_);
+        g3d::actors_ctor(actors_, guest::load32(root_word_), npc_record_ ? 2 : 1,
+                         npc_record_ ? NPC_FACE_RESOLUTION : FACE_RESOLUTION, anim_list_);
+        guest::store32(actors_ + 0x8, FACE_RESOLUTION);  // (the player's face)
         break;
     case 4: {
         g3d::sound_handles_ctor(handles_);
@@ -250,16 +260,23 @@ void IslandMii::make_npc() {
         return;
     }
     const u32 manager = guest::load32(GA_room_ActorManager_sInstance);
+    guest::store32(manager + 0x8, NPC_FACE_RESOLUTION);  // (his face: the slots are sized for it)
     npc_actor_ = g::room_ActorManager_SpawnFromMiddleDB(manager, npc_db_, 0, 20);
+    guest::store32(manager + 0x8, FACE_RESOLUTION);
     if (!npc_actor_) {
         guest::log("wuhu: NPC: no actor: no NPC");
         return;
     }
     npc_behavior_ = g3d::give_special_anim(npc_actor_);
     {
+        // (NOMA_MIDOHA_CLIP=walk|run: that clip instead of Wait, at its own pace in place: his head
+        // pieces checked against his body in motion)
+        Clip c = WAIT;
+        if (const char* e = std::getenv("NOMA_MIDOHA_CLIP"))
+            c = !std::strcmp(e, "walk") ? WALK : !std::strcmp(e, "run") ? RUN : WAIT;
         g3d::ScopedHeap heap(g3d::actor_heap(npc_actor_));
-        g3d::assign_string(g3d::behavior_file(npc_behavior_), clip_file_[WAIT]);
-        g3d::assign_string(g3d::behavior_anim(npc_behavior_), clip_anim_[WAIT]);
+        g3d::assign_string(g3d::behavior_file(npc_behavior_), clip_file_[c]);
+        g3d::assign_string(g3d::behavior_anim(npc_behavior_), clip_anim_[c]);
     }
     g3d::behavior_set_expression(npc_behavior_, expression_);
     const u32 body = g3d::actor_body(npc_actor_), scn = guest::load32(body + 0x1C);
@@ -274,6 +291,9 @@ void IslandMii::make_npc() {
     outfit_ = std::make_unique<MidohaOutfit>();
     if (!outfit_->make(scn))
         outfit_.reset();
+    face_ = std::make_unique<MidohaFace>();
+    if (!face_->load())
+        face_.reset();
 }
 
 bool IslandMii::npc_head(engine::math::Mtx34* world) const {
@@ -346,8 +366,16 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
                 g3d::anim_set_frame(anim_[c], frame_[c]);
             }
     }
-    if (npc_actor_)
+    if (npc_actor_) {
         g3d::actor_place(npc_actor_, npc_at_.x, npc_at_.y, npc_at_.z, npc_yaw_);
+        // his face: RFL's own textures kept for a look (NOMA_MIDOHA_FACE_DUMP=dir, once they are
+        // made), ours over them
+        if (++npc_frames_ == 30)
+            if (const char* dir = std::getenv("NOMA_MIDOHA_FACE_DUMP"))
+                MidohaFace::dump(npc_actor_, dir);
+        if (face_)
+            face_->apply(npc_actor_);
+    }
     write_camera(camera);
     g3d::invalidate_gx_state();
     g3d::root_calc(root);
