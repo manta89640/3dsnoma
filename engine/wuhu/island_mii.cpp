@@ -236,20 +236,21 @@ bool IslandMii::make_step() {
 }
 
 // The NPC, a frame after the player's Mii: his record into a middle database of his own
-// (RFLInitMiddleDB fn_804CE700: type 4, "user set", one entry; fn_804CE890 adds an RFLCharData,
+// (RFLInitMiddleDB: type 4, "user set", one entry; RFLiAddMiddleDBCharData adds an RFLCharData,
 // RFLAddMiddleDBStoreData's work less the store data's CRC: it checks his create ID and his parts'
-// ranges), then the actor manager's spawn from a middle database (fn_801D8FD4, what room_SpawnMii does
-// for a Mii found in one: entry 0, age 20), his Wait clip, his dress.
+// ranges), then the actor manager's spawn from a middle database (room_ActorManager_SpawnFromMiddleDB,
+// what room_SpawnMii does for a Mii found in one: entry 0, age 20), his Wait clip, his dress.
 void IslandMii::make_npc() {
     if (!npc_record_ || !block_)
         return;
-    g::fn_804CE700(npc_db_, 4, npc_db_buffer_, 1);
-    const u32 err = g::fn_804CE890(npc_db_, npc_data_);
+    g::RFLInitMiddleDB(npc_db_, 4, npc_db_buffer_, 1);
+    const u32 err = g::RFLiAddMiddleDBCharData(npc_db_, npc_data_);
     if (err) {
         guest::log("wuhu: NPC: RFL refuses his record (error %u): no NPC", (unsigned)err);
         return;
     }
-    npc_actor_ = g::fn_801D8FD4(guest::load32(GA_room_ActorManager_sInstance), npc_db_, 0, 20);
+    const u32 manager = guest::load32(GA_room_ActorManager_sInstance);
+    npc_actor_ = g::room_ActorManager_SpawnFromMiddleDB(manager, npc_db_, 0, 20);
     if (!npc_actor_) {
         guest::log("wuhu: NPC: no actor: no NPC");
         return;

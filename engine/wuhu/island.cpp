@@ -94,9 +94,9 @@ const Shot SHOTS[] = {
     {"turn_front", false, 0, 4, 2.4f, 0.56f, 30},    {"turn_34", false, 45, 4, 2.4f, 0.56f, 30},
     {"turn_side", false, 90, 4, 2.4f, 0.56f, 30},    {"turn_back34", false, 135, 4, 2.4f, 0.56f, 30},
     {"turn_back", false, 180, 4, 2.4f, 0.56f, 30},   {"turn_side_r", false, 270, 4, 2.4f, 0.56f, 30},
-    {"face_front", false, 0, 2, 0.95f, 0.86f, 30},    {"face_34", false, 35, 6, 0.95f, 0.86f, 30},
-    {"face_side", false, 90, 4, 0.95f, 0.86f, 30},    {"face_back34", false, 145, 10, 0.95f, 0.86f, 30},
-    {"face_top", false, 20, 55, 1.05f, 0.82f, 30},    {"plaza", true, 25, 9, 3.6f, 0.55f, 45},
+    {"face_front", false, 0, 2, 1.15f, 0.88f, 30},    {"face_34", false, 35, 6, 1.15f, 0.88f, 30},
+    {"face_side", false, 90, 4, 1.15f, 0.88f, 30},    {"face_back34", false, 145, 10, 1.15f, 0.88f, 30},
+    {"face_top", false, 20, 55, 1.2f, 0.84f, 30},    {"plaza", true, 25, 9, 3.6f, 0.55f, 45},
     {"plaza_wide", true, -30, 14, 7.5f, 0.5f, 45},
 };
 const u32 N_SHOTS = sizeof(SHOTS) / sizeof(SHOTS[0]);

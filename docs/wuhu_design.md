@@ -287,9 +287,9 @@ approves the design (`NOMA_WUHU_MIDOHA=A|B|C`, a candidate face).
 - **His Mii** (`tools/mii/midoha.py` -> `engine/wuhu/midoha_data.h`, our data): RFLCharData records,
   bald (RFL hair 30: the skin-coloured skull alone, under the sculpted hair). He is in no Mii
   database: `engine/wuhu/island_mii.cpp` gives his record to RFL through a middle database of one
-  entry (RFLInitMiddleDB `fn_804CE700`, type 4 "user set"; `fn_804CE890` adds an RFLCharData, the work
-  of RFLAddMiddleDBStoreData `fn_804CE9A0` less the store data's CRC) and spawns him with the actor
-  manager's middle-database spawn (`fn_801D8FD4`, what room_SpawnMii does for a Mii found in one),
+  entry (`RFLInitMiddleDB`, type 4 "user set"; `RFLiAddMiddleDBCharData` adds an RFLCharData, the work
+  of `RFLAddMiddleDBStoreData` less the store data's CRC) and spawns him with the actor manager's
+  middle-database spawn (`room_ActorManager_SpawnFromMiddleDB`, what room_SpawnMii does for a Mii found in one),
   a frame after the player's Mii (two faces made in one frame share the first one's parts:
   runtime/hw/gx/texture.cpp checks a texture once a frame), in a manager of two actors.
 - **His head** (`tools/mii/midoha_parts.py` -> `DATA/wuhu/midoha.ng3d`): a native g3d package in RFL
@@ -309,7 +309,8 @@ approves the design (`NOMA_WUHU_MIDOHA=A|B|C`, a candidate face).
   matrix: positions are stored in their node's space), which the lists' own indexed loads (0x30)
   fetch from an array of ours; positions and normals from the body's view matrices of the frame.
   The body's own opaque draw is turned off (ScnObj option 6); it still poses. Front triangles take
-  the front texture, the others the back one. Unlit, times the Mii light's tint.
+  the front texture, the others the back one. Unlit, times the Mii light's tint (`mii_ModelRes_sInstance`
+  +0x34, as the body's materials).
 - **Placing**: 25 units before the player's start, facing it (`NOMA_WUHU_MIDOHA_AT=<marker>`: there).
 - **Design renders**: `NOMA_MIDOHA_SHOTS=1` (island.cpp's SHOTS): the camera goes round him (turnaround
   and close-ups on a grey ground, then the plaza), the player's Mii out of sight, each shot logged

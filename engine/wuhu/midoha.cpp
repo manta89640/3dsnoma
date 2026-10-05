@@ -409,7 +409,7 @@ void MidohaOutfit::draw(u32 scn_mdl) const {
     const u32 view_nrm = guest::load32(scn_mdl + 0xF8) ? guest::load32(scn_mdl + 0xF8) + cur * align32(n * 0x24) : 0;
     // the Mii light's tint (the actor manager's Mii model resource +0x34), as the body's materials
     // take it: the texture times it, unlit
-    const u32 model_res = guest::load32(GA_lbl_80882DC0);
+    const u32 model_res = guest::load32(GA_mii_ModelRes_sInstance);
     {
         GFRAME(0x10);
         const u32 c = (u32)&GS(u32, 0x8);
