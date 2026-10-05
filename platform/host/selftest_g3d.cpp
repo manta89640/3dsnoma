@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "runtime.h"
+#include "engine/collision/kcl.h"
 #include "engine/g3d/anim.h"
 #include "engine/g3d/material.h"
 #include "engine/g3d/native_draw.h"
@@ -1684,6 +1685,21 @@ void test_real_package(const std::string& path) {
         "(culled beyond %g), visibility rows %s (%u bytes a cell, up to %g over the ground)",
         prelit, (u32)w.materials().size(), compact, pkg->vertex_buffers().count, detail, (double)env.detail_distance,
         env.pvs_row_bytes ? "present" : "none", env.pvs_row_bytes, (double)env.pvs_max_height);
+    // the ground under an eye, as the island scene finds it (its collision's first surface below, within
+    // the visibility rows' height; none: below that), for the rows
+    engine::collision::World col;
+    for (const fm::Collision& c : pkg->collisions())
+        col.add_kcl(pkg->at(c.data), c.size, pkg->str(c.name));
+    for (const fm::Cylinder& c : pkg->cylinders())
+        col.add_cylinder({c.x, c.z, c.y0, c.y1, c.radius});
+    col.finish();
+    auto ground_under = [&](Vec3 eye) {
+        if (!env.pvs_row_bytes)
+            return (f32)NAN;
+        const f32 reach = env.pvs_max_height + 1.0f;
+        engine::collision::Hit hit;
+        return col.ground(eye.x, eye.z, eye.y, eye.y - reach, &hit) ? hit.point.y : eye.y - reach;
+    };
     // each view: the frame (its stats), then the World's time a frame (update, cull, both packets:
     // the mean of 200, the animations running) with the speed-ups and without; the material changes in
     // the items' order (what the backend sends again)
@@ -1705,9 +1721,10 @@ void test_real_package(const std::string& path) {
             w.set_features(on ? g3::WF_ALL : 0);
             const int frames = 200;
             const auto t2 = std::chrono::steady_clock::now();
+            const f32 ground = ground_under(cam.eye);
             for (int f = 0; f < frames; f++) {
                 w.update(600.0f + f);
-                w.set_camera(cam);
+                w.set_camera(cam, ground);
                 w.build_packet(g3::Pass::OPAQUE, &opa);
                 w.build_packet(g3::Pass::TRANSLUCENT, &xlu);
             }
