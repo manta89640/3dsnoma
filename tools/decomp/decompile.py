@@ -223,7 +223,7 @@ PATCHED_NAMES = {
     "controller_living_SceneTransit_Go", "app_SceneFactories_ctor",
     # the way to Wuhu Island and back in black (runtime/patches/wipes.cpp, engine/wuhu):
     # SceneTransit::Request, layout::parts::Wipe's Out and In
-    "fn_8006FCA8", "fn_80154CE8", "layout_parts_Wipe_In",
+    "controller_living_SceneTransit_Request", "layout_parts_Wipe_Out", "layout_parts_Wipe_In",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",
@@ -233,7 +233,7 @@ PATCHED_NAMES = {
     # the island's music (engine/wuhu/music.cpp): sound::SoundManager's start plays the port's own
     # sequence for its virtual ID (to be named sound_SoundManager_StartSound); the BGM manager's
     # frame step (sound_BGMManager_Update) runs the music test (NOMA_WUHU_MUSIC_TEST)
-    "fn_802A0BD0", "fn_802A23A0",
+    "sound_SoundManager_StartSound", "sound_BGMManager_Update",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes

@@ -19,8 +19,8 @@ using engine::collision::u8;
 using engine::math::Vec3;
 
 // The room's walking and running speeds, in Wii no Ma units a frame at 60 Hz (a Mii is 158 units
-// tall at height scale 1). fn_801ECE98 (the BodyController's Move state, made by
-// room_BodyController_ChangeToMove) takes one pair or the other by the Mii's sex (fn_801F40A8: its
+// tall at height scale 1). room_BodyController_Move_Enter (the BodyController's Move state, made by
+// room_BodyController_ChangeToMove) takes one pair or the other by the Mii's sex (room_BodyController_IsMale: its
 // face's bit 31): A a man's, B a woman's.
 struct Gait {
     f32 walk, run;

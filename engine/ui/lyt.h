@@ -339,24 +339,24 @@ inline void set_sounds(u32 b, u32 focus_slot, u32 push_slot) {
     guest::store32(b + 0x4BC, focus_slot ? sound_label(focus_slot) : 0);
     guest::store32(b + 0x4C0, push_slot ? sound_label(push_slot) : 0);
 }
-// WAV_SE_031_CLICK_GENERAL_NO (lbl_8087D78C, beside the others): a refusal's push, the one the
+// WAV_SE_031_CLICK_GENERAL_NO (layout_sSeClickGeneralNo, beside the others): a refusal's push, the one the
 // channel's dialogs give their いいえ (layout::parts::CommonDialogue's second button)
-const u32 SE_CLICK_GENERAL_NO = GA_lbl_8087D78C;
+const u32 SE_CLICK_GENERAL_NO = GA_layout_sSeClickGeneralNo;
 // a sound by its label (a C string), through the button's sound helper (the channel's windows
-// play WAV_SE_008_WINDOW_OPEN_B, lbl_8079D880, as they open)
+// play WAV_SE_008_WINDOW_OPEN_B, layout_sSeWindowOpenBLabel, as they open)
 inline void play_sound(u32 b, u32 label) { gcall<u32>(guest::load32(guest::load32(b + 0x4AC) + 0x10), b + 0x4AC, label); }
-const u32 SE_LABEL_WINDOW_OPEN_B = GA_lbl_8079D880;
+const u32 SE_LABEL_WINDOW_OPEN_B = GA_layout_sSeWindowOpenBLabel;
 
 // The A and B buttons' marks: a button marked A (or B) is pressed by the remote's A (or B) while
 // the pointer is away from the screen, and then shows the mark (a badge at its Loc_Push_Mark), as
-// the channel's dialogs mark their はい and いいえ (layout::parts::CommonDialogue, fn_80155A14).
+// the channel's dialogs mark their はい and いいえ (layout::parts::CommonDialogue, layout_parts_CommonDialogue_AttachButton).
 // The cursor keeps the marks (the button's +0x9 A, +0xA B: layout::Cursor finds the marked button
-// that is active, fn_8013AEC8 / fn_8013AF98, and shows or hides the marks as the pointer leaves or
-// comes back). fn_801387E0 / fn_80138834 (button, cursor, the mark's kind 0, shown now as the
-// pointer is) mark it, fn_80138888 (button, cursor) takes both marks away.
-inline void mark_a(u32 b, u32 cursor) { g::fn_801387E0(b, cursor, 0, 1); }
-inline void mark_b(u32 b, u32 cursor) { g::fn_80138834(b, cursor, 0, 1); }
-inline void unmark(u32 b, u32 cursor) { g::fn_80138888(b, cursor); }
+// that is active, layout_Cursor_FindMarkedA / layout_Cursor_FindMarkedB, and shows or hides the marks as the pointer leaves or
+// comes back). layout_Button_MarkA / layout_Button_MarkB (button, cursor, the mark's kind 0, shown now as the
+// pointer is) mark it, layout_Button_Unmark (button, cursor) takes both marks away.
+inline void mark_a(u32 b, u32 cursor) { g::layout_Button_MarkA(b, cursor, 0, 1); }
+inline void mark_b(u32 b, u32 cursor) { g::layout_Button_MarkB(b, cursor, 0, 1); }
+inline void unmark(u32 b, u32 cursor) { g::layout_Button_Unmark(b, cursor); }
 
 // ---- the screen's wipe (layout::parts::Wipe, game::wipe(): +0x10C the kind playing; its layouts
 // per kind at +0, +4, ...: layout_parts_Wipe_GetCurrentLayout gives the one playing)

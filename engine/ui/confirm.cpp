@@ -40,7 +40,7 @@ Confirm::Confirm(u32 cursor, u32 group, const std::u16string& text) : cursor_(cu
     yes_ = lyt::button_new(BUTTON_LEX, scene_, "Loc_SmallBtn_02", cursor);
 
     // The question, its lines centred as a block in the middle of the text box (as the channel's
-    // dialogs set it: CommonDialogue's fn_801554B4 makes the box's vertical place the middle).
+    // dialogs set it: CommonDialogue's layout_parts_CommonDialogue_SetTextVPosition makes the box's vertical place the middle).
     u32 box = lyt::find_pane(window_, "Text_Text_01");
     lyt::text_reserve(box, TEXT_CHARS);
     lyt::set_text(box, text);

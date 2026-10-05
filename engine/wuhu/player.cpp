@@ -2,7 +2,7 @@
 //
 // Walking. The stick gives a direction and a tilt; the tilt picks the wanted speed (a slow to full
 // walk up to run_tilt, then a run, or a run at any tilt with the run button) and the Mii turns toward
-// the direction at the room's turn rate (fn_801ED5E4, the behaviours' default: 5 degrees a frame
+// the direction at the room's turn rate (room_BodyController_Behavior_GetTurnRate, the behaviours' default: 5 degrees a frame
 // down to 3.3 by a fraction it is given, here the speed over the run speed) while its speed eases
 // toward the wanted one by a tenth of the difference a frame (the default of
 // room_BodyController_Behavior_GetSpeedBlend). It moves along its facing, not the stick

@@ -164,7 +164,7 @@ void Menu::press_cancel() {
 
 // The A mark on the highlighted choice, the B mark on the cancelling one when that is another:
 // the cursor pushes them with A and B while the pointer is away, and shows their badges then. A
-// button's marks go together (fn_80138888), so only the buttons whose marks change are touched.
+// button's marks go together (layout_Button_Unmark), so only the buttons whose marks change are touched.
 void Menu::mark() {
     int want_a = state_ == State::OPEN ? highlight_ : -1;
     int want_b = state_ == State::OPEN && cancel_ != highlight_ ? cancel_ : -1;

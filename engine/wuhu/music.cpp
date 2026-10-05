@@ -3,7 +3,7 @@
 // The sequence is ours (tools/music/hiroi_sekai.py, compiled by tools/music/rseq.py into
 // hiroi_sekai_seq.h); its instruments are the channel's own bank, BANK_BGM_ALL. nw4r::snd plays a
 // sequence from the caller's own data through SoundStartable::StartInfo: with
-// ENABLE_SEQ_SOUND_INFO set, SoundArchivePlayer's PrepareSeqImpl (fn_8047A9A0) reads the sequence
+// ENABLE_SEQ_SOUND_INFO set, SoundArchivePlayer's PrepareSeqImpl (nw4r_snd_SoundArchivePlayer_PrepareSeqImpl) reads the sequence
 // at seqDataAddress (an RSEQ file, as the archive's own: SeqFileReader checks 'RSEQ'), from its
 // start-location label's offset (none: offset 0), and opens the tracks its leading alloctrack
 // command asks for (MmlParser::ParseAllocTrack). Everything else comes from the sound ID it is
@@ -13,7 +13,7 @@
 // PLAYER_BGM, volume 125, BANK_BGM_ALL), with our sequence in place of its own.
 //
 // The channel asks for its music by sound ID through sound::BGMManager (its fields: soundplayer/
-// music.cpp), which starts a piece with sound::SoundManager's start (fn_802A0BD0: manager, sound
+// music.cpp), which starts a piece with sound::SoundManager's start (sound_SoundManager_StartSound: manager, sound
 // ID, SoundHandle*; true once started). WIDE_WORLD_ID is no sound of the archive: the start,
 // patched here, plays ours for it, so the BGM manager's crossfades, pauses and slots, and the
 // Sound Player's playback and beat, work for it as for the channel's own pieces.
@@ -98,11 +98,11 @@ void make_lasting() {
 
 // HOST_LABEL's sound ID (NONE if the archive has no such sound). The sound manager's +0 is its
 // MemoryArchive, whose +4 is the nw4r::snd::SoundArchive (soundplayer/catalog.cpp);
-// fn_804777B0 is SoundArchive::ConvertLabelStringToSoundId.
+// nw4r_snd_SoundArchive_ConvertLabelStringToSoundId is SoundArchive::ConvertLabelStringToSoundId.
 u32 host_sound(u32 manager) {
     if (s_host == NONE) {
         u32 archive = guest::load32(manager) + 4;
-        s_host = g::fn_804777B0(archive, s_label);
+        s_host = g::nw4r_snd_SoundArchive_ConvertLabelStringToSoundId(archive, s_label);
         if (s_host == NONE)
             guest::log("wuhu: music: no sound %s in the archive: the island's music can't play", HOST_LABEL);
         else
@@ -111,7 +111,7 @@ u32 host_sound(u32 manager) {
     return s_host;
 }
 
-// Our piece into a slot's SoundHandle: SoundStartable::StartSound (fn_8047BF30: handle, sound ID,
+// Our piece into a slot's SoundHandle: SoundStartable::StartSound (nw4r_snd_SoundStartable_StartSound: handle, sound ID,
 // StartInfo; 0 once started, else nw4r::snd's StartResult: 1 a sound of higher priority holds
 // the player, 9 no free tracks...). The SoundStartable is the SoundArchivePlayer's (the sound
 // manager's +4) +0xC.
@@ -124,7 +124,7 @@ bool start(u32 manager, u32 handle) {
     if (host == NONE)
         return false;
     u32 startable = guest::load32(manager + 4) + 0xC;
-    u32 result = g::fn_8047BF30(startable, handle, host, s_start_info, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    u32 result = g::nw4r_snd_SoundStartable_StartSound(startable, handle, host, s_start_info, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     if (result)
         guest::log("wuhu: music: Hiroi Sekai e didn't start (nw4r::snd StartResult %u)", (unsigned)result);
     return result == 0;
@@ -242,11 +242,11 @@ void music_arrive() {
     // and pauses slot 2 again over its crossfade (180 frames). A theme still fading out (the island
     // came up within half a second of departing, or StopNow has only just paused it) has its fade
     // made that long again, scaled by the volume it has left, and would sound under ours for up to
-    // 3 s: it goes on fading at the departure's pace instead (BasicSound::Pause, fn_8046C9A0: the
+    // 3 s: it goes on fading at the departure's pace instead (BasicSound::Pause, nw4r_snd_detail_BasicSound_Pause: the
     // frames asked for, times the volume left; nothing if it has paused already).
     if (u32 theme = sound_in(2))
         if (guest::load32(theme + 0x88) == 1)  // pausing
-            g::fn_8046C9A0(theme, 1, DEPART_FADE_FRAMES);
+            g::nw4r_snd_detail_BasicSound_Pause(theme, 1, DEPART_FADE_FRAMES);
 }
 
 void music_leave() {
@@ -260,7 +260,7 @@ void music_leave() {
     // still waiting in slot 2, and is brought back the same way.)
     if (room_slot == 2 && room != NONE) {
         // The room's theme waits paused in slot 2. The room won't ask for it: its BGM controller
-        // (lbl_80882D14) asks again, as the room is made, only if its own mode has changed, and
+        // (living_RoomBgm_sInstance) asks again, as the room is made, only if its own mode has changed, and
         // the island went past it, so the theme would stay paused and the room silent. Asking for
         // it in slot 2 here makes the BGM manager fade ours out (Stop over its crossfade, +0x34:
         // 180 frames) and resume the theme with the same fade from where it paused; the room then
@@ -279,25 +279,25 @@ void music_leave() {
 
 namespace g {
 
-u32 fn_802A0BD0_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+u32 sound_SoundManager_StartSound_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                      f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
-void fn_802A23A0_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+void sound_BGMManager_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                       f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 
 // sound::SoundManager's start (to be named sound_SoundManager_StartSound): r3 the manager, r4 the
 // sound ID, r5 the SoundHandle to start it in; true once started. WIDE_WORLD_ID is our piece.
-u32 fn_802A0BD0(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3, f64 f4,
+u32 sound_SoundManager_StartSound(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3, f64 f4,
                 f64 f5, f64 f6, f64 f7, f64 f8) {
     if (r4 != engine::wuhu::WIDE_WORLD_ID)
-        return fn_802A0BD0_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
+        return sound_SoundManager_StartSound_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
     return engine::wuhu::start(r3, r5) ? 1 : 0;
 }
 
 // sound::BGMManager's step, once a frame from the application's update (to be named
 // sound_BGMManager_Update: it starts the piece waiting for its slot); then the music test's.
-void fn_802A23A0(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3, f64 f4,
+void sound_BGMManager_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3, f64 f4,
                  f64 f5, f64 f6, f64 f7, f64 f8) {
-    fn_802A23A0_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
+    sound_BGMManager_Update_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
     engine::wuhu::test_frame();
 }
 

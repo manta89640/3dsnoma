@@ -52,12 +52,12 @@ inline void wipe_in(u32 type) {
     g::layout_parts_Wipe_In(wipe(), type);
     g::layout_parts_Wipe_Play(wipe());
 }
-// Wipe::Out(kind) (fn_80154CE8; runtime/patches/wipes.cpp only changes it on the room's way to the
+// Wipe::Out(kind) (layout_parts_Wipe_Out; runtime/patches/wipes.cpp only changes it on the room's way to the
 // island) and Play: the kind's Out from now, which the application draws over the frame, then its
 // last pose (Fade_Black: black) until the next In. A scene's own fade to black and back, within
 // the scene (wipe_out, then wipe_in once the Out has ended).
 inline void wipe_out(u32 type) {
-    g::fn_80154CE8(wipe(), type);
+    g::layout_parts_Wipe_Out(wipe(), type);
     g::layout_parts_Wipe_Play(wipe());
 }
 inline u32 wipe_layout(u32 kind) { return guest::load32(wipe() + 4 * kind); }
@@ -77,10 +77,10 @@ const u32 CURSOR_SIZE = 0x300;
 inline void cursor_ctor(u32 c) { g::layout_Cursor_ctor(c, 0); }
 inline void cursor_dtor_delete(u32 c) { g::layout_Cursor_dtor(c, 1, 0, 0, 0); }
 inline void cursor_update(u32 c) { g::layout_Cursor_Update(c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); }
-// a button the cursor knows pushed as if the pointer had pushed it (fn_8013A2C0: its push
+// a button the cursor knows pushed as if the pointer had pushed it (layout_Cursor_Press: its push
 // animation and sound, then its callbacks); false if the cursor didn't take it (the button isn't
 // one of its own, or the cursor is locked)
-inline bool cursor_press(u32 c, u32 button) { return g::fn_8013A2C0(c, button, 0) != 0; }
+inline bool cursor_press(u32 c, u32 button) { return g::layout_Cursor_Press(c, button, 0) != 0; }
 // the cursor's layouts, drawn last: its shadow, then the hand
 inline void cursor_draw(u32 c) {
     g::layout_LayoutWrapper_Draw(c + 0x130);
@@ -100,7 +100,7 @@ inline void bottom_ctor(u32 b, u32 cursor) { g::layout_parts_Bottom_ctor(b, BOTT
 inline void bottom_set_mode(u32 b, u32 mode, bool at_once) {
     g::layout_parts_Bottom_SetMode(b, mode, at_once, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }
-// the B button: press the way back of the current mode (the cursor presses it, fn_8013A2C0: its
+// the B button: press the way back of the current mode (the cursor presses it, layout_Cursor_Press: its
 // push animation and sound, then its pushed hook); false if the cursor didn't take the press
 inline bool bottom_press_back(u32 b, u32 cursor) { return g::layout_parts_Bottom_PressBack(b, cursor) != 0; }
 // its window virtuals: +0x8 dtor, +0xC Update, +0x10 Draw
