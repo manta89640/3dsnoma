@@ -272,6 +272,13 @@ theme (Sound Player semantics).
 - **Depth:** the native draws share the depth buffer with the GX path (the Mii), so both must use the
   same depth mapping (no w-buffer for the island alone). The coplanar overlays (_blend, Kiwa: 0.03-0.4
   iu above the terrain) need a depth offset toward the camera in the PICA backend (and the soft one).
+- **NG3D version 2 (the speed round, after the user's New 3DS ran the island at 20-30 fps):**
+  positions as s16 steps of 1/12 unit about each buffer's origin (VA_POS16), static lighting baked
+  into the vertex colours (MAT_PRELIT: no normals unless a texgen needs them), the far island from
+  island_R at cell level 1 (5,000) and without trees and boats at level 2 (15,000), small detail
+  (edge strips, shore foam, small props: BATCH_DETAIL) culled beyond Env::detail_distance (3,000),
+  the cells' visibility rows (CVIS, Env::pvs_max_height 80), one batch a (cell, material) in a
+  level's list, Wedge Island in the cells, no material fogged. docs/wuhu.md has the numbers.
 - **Hardware rules for PICA shaders (85):** every .out written whole (xyzw) on every path, outside
   ifu/ifc/for; tools/check_shader_outputs.py must pass (package.sh refuses otherwise); GX_MemoryFill only
   into VRAM; any new syscall must be in the RSF's SystemCallAccess list.

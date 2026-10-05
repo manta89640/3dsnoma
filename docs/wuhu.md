@@ -8,58 +8,74 @@ Numbers are measured on the PAL disc (SP2P01) unless marked est.
 
 ## Staging
 
-    cmake -S . -B build-host -G Ninja && cmake --build build-host --target ng3d-bake
-    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--keep-raw]
+    cmake -S . -B build-host -G Ninja && cmake --build build-host --target ng3d-bake ng3d-pvs
+    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--pvs TOOL | --no-pvs]
+                             [--keep-raw] [--name NAME]
 
 - `ROOT` is the extraction of your Wii Sports Resort disc (its `files/` is the disc's root);
   default `../wii-sports-extract/wii-sports-resort` beside this repository.
 - `DATA` is the port's data directory (`tools/stage_data.py`'s, `sdmc:/3ds/noma` on the 3DS). The
-  package goes to `DATA/wuhu/island.ng3d` (13,266,560 bytes), and `DATA/wuhu/island.json` records
-  what went in: classes, counts, decisions, sizes, the checks below.
-- The package is baked: the stager writes it with GX texels to `DATA/wuhu/island.unbaked.ng3d`
-  (12,339,440 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
+  package goes to `DATA/wuhu/NAME.ng3d` (NAME `island` unless `--name` says otherwise; 12,284,032
+  bytes), and `DATA/wuhu/NAME.json` records what went in: classes, counts, decisions, sizes, the
+  checks below. The package is NG3D version 2 (`engine/g3d/ng3d_format.h`): an engine that reads
+  version 1 refuses it. The speed round staged it as `island_v2` beside the version 1 `island.ng3d`
+  (13,266,560 bytes) the engine read until its version 2 loader came.
+- The package is baked: the stager writes it with GX texels to `DATA/wuhu/NAME.unbaked.ng3d`
+  (11,356,912 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
   `build-host/ng3d-bake` unless `--bake` names another), checks that no texture is left in GX's
   format, and deletes the unbaked file unless `--keep-raw` (keep it for `tools/g3d/preview.py`,
   which reads GX texels). Without the tool it stops and says how to build it: the 3DS refuses an
   unbaked package, because converting GX texels at load time on the CPU thread would race the GX
   path's texture uploads, which share `pica_tex.h`'s tables, on the GPU thread. `--no-bake` writes
   an unbaked package anyway (the host converts as it loads, in about 37 ms).
-- It takes about 4 s on a Mac and reads only the archives it needs (Yaz0 U8 `.carc`, unpacked in
-  memory); two runs give the same bytes. Before writing it checks every reference in the package,
-  that the package reads back to the same bytes, and that every warp spot has room for the Mii
-  (below); it stops if any fails.
+- The cells' visibility rows come from `build-host/ng3d-pvs` (`tools/ng3d_pvs.cpp`, the host build;
+  `--pvs` names another, `--no-pvs` stages without the rows): the stager writes its input (the
+  cells' triangles, their boxes and detail distances, the eye points) to a temporary directory
+  (`DATA/wuhu/NAME.pvs/` with `--keep-raw`) and reads the rows back.
+- `--no-prelit` and `--no-pos16` stage a package with the lighting left live or the positions f32,
+  for comparisons.
+- It takes about 16 s on a Mac (7 of them the visibility rows, on all cores) and reads only the
+  archives it needs (Yaz0 U8 `.carc`, unpacked in memory); two runs give the same bytes. Before
+  writing it checks every reference in the package, that the package reads back to the same bytes,
+  and that every warp spot has room for the Mii (below); it stops if any fails.
 
 The tools: `tools/g3d/brres.py` reads BRRES (models, textures, CHR0/SRT0/CLR0 keyframes, SCN0
 light sets), `tools/g3d/gxtex.py` decodes GX textures, `tools/g3d/convert.py` turns BRRES
 objects into package records (a model can be built from parts of several: the sky with the sun in
-it, Wedge Island with its stretch of sea), `tools/g3d/ng3d.py` writes and reads packages
-(`ng3d.py selftest` compares its structs with `engine/g3d/ng3d_format.h`; `ng3d.py check FILE`
-validates a package and round-trips it), and `tools/g3d/preview.py` renders an unbaked package to
-PNG. `tools/wuhu/check_views.py` renders a package from its `view_*` cameras and compares the
-pictures with references.
+it; static geometry is gathered into the cells' batches; positions are snapped and compacted,
+lighting baked), `tools/g3d/ng3d.py` writes and reads packages (`ng3d.py selftest` compares its
+structs with `engine/g3d/ng3d_format.h`; `ng3d.py check FILE` validates a package and round-trips
+it), `tools/ng3d_pvs.cpp` computes the cells' visibility rows, and `tools/g3d/preview.py` renders
+an unbaked package to PNG (`--per-vertex` lights as GX does, at the vertices).
+`tools/wuhu/check_views.py` renders a package from its `view_*` cameras and compares the pictures
+with references; `tools/g3d/viewstats.py` counts what a frame submits; `tools/wuhu/check_cvis.py`
+checks the visibility rows by pictures.
 
 ## The package
 
-The baked file's sections:
+The baked file's sections (version 1's in brackets):
 
 | section | records | bytes | what |
 |---|---|---|---|
 | TDAT | 92 textures | 5,158,912 | PICA texels with their mip levels (TEXS: the records); 4,229,920 bytes as GX texels unbaked |
-| VDAT | 348 vertex buffers | 4,012,112 | 171,702 vertices, 20-36 bytes each (VTXB: the records) |
+| VDAT | 340 vertex buffers | 2,947,008 (4,012,112) | 172,046 vertices, 12-28 bytes each, 125,715 of them 16 (VTXB: the records) |
 | BLOB | 5 KCL files | 2,961,008 | the island's collision, as shipped (COLL: the records) |
-| IDAT | 431,853 indices | 863,706 | u16 triangle lists |
+| IDAT | 466,851 indices | 933,702 (863,706) | u16 triangle lists (a cell's levels share vertex buffers and repeat some indices) |
 | KEYS | 9,870 keys | 118,440 | animation keys (TRAK: 477 tracks, ANIM: 20 animations) |
-| MATS | 90 materials | 48,600 | GX register images (TMTX: 128 texture matrices) |
-| BTCH | 549 batches | 21,960 | draws: a material, a vertex buffer, an index range |
-| NODE | 150 nodes | 15,000 | the models' node trees (13 models) |
+| MATS | 110 materials | 59,400 | GX register images (TMTX: 148 texture matrices); island_R's 20 added |
+| BTCH | 652 batches | 26,080 | draws: a material, a vertex buffer, an index range, detail flag |
+| NODE | 46 nodes | 4,600 | the models' node trees (11 models) |
 | CYLS | 479 cylinders | 9,580 | tree trunks |
 | MARK | 139 markers | 4,448 | spawn, landmarks, camera presets, warps |
-| the other 15 | | 51,978 | strings, texture/vertex-buffer/collision records, texture matrices, models, cells and their batch lists, instances, animations and tracks, environment, lights, light sets, fogs |
+| CVIS | 120 rows | 1,800 | the cells' visibility rows (15 bytes a cell) |
+| the other 15 | | 44,316 | strings, texture/vertex-buffer/collision records, texture matrices, models, cells and their batch lists, instances, animations and tracks, environment, lights, light sets, fogs |
 
-The header, the section table and alignment take the rest.
+The header, the section table and alignment take the rest: 12,284,032 bytes against version 1's
+13,266,560.
 
 At run time (est., from the package): textures 5.16 MB in their PICA formats (all levels; the
-loader counts 5,013 KB), geometry 4.88 MB, collision 2.96 MB, everything resident.
+loader counts 5,013 KB), geometry 3.88 MB (4.88 in version 1), collision 2.96 MB, everything
+resident.
 
 ## Sources
 
@@ -67,7 +83,7 @@ Paths are inside the extraction's `files/`; an archive's members after the colon
 
 | asset | source | role | staged as |
 |---|---|---|---|
-| `WS2_common_island` (9 models, 72 textures, island and sea animations) | `Stage/Static/StageArc.carc:Island/G3D/WS2_common_island.brres` (7,236,352 B) | the island, sea, sky | cells (island, island_V), models (sea, sky, Wedge Island), animations |
+| `WS2_common_island` (9 models, 72 textures, island and sea animations) | `Stage/Static/StageArc.carc:Island/G3D/WS2_common_island.brres` (7,236,352 B) | the island, its far copy, sea, sky | cells (island, island_V, island_R, the sea by the shores), models (open sea, sky), animations |
 | `sea2_day` | `StageArc.carc:Island/G3D/WS2_common_seatex.brres` | the sea's day colour (WSR swaps it for the placeholder `sea2_dummy` at run time) | a texture |
 | the sun | `StageArc.carc:Sun/G3D/WS2_common_sun_model.brres` (and its SRT0) | the sun in the sky | a part of the sky model |
 | placed objects | `Stage/PlnScene/PlnEnv0.carc:WS2_pln_island_tag0.pmp` (1,228 records) | Island Flyover's day placement: the complete set (research placement.md 0) | baked props, instances |
@@ -96,12 +112,11 @@ detail, so it is the canonical set:
   Kiwa edge strips, Island_16_Model (Wedge Island, the golf island, at full detail), Island_17c
   (the harbour pier), Island_18 (rope barriers), Island_19b (Mt. Wuhu with its cave and lava
   chamber), Island_20b (the underwater cave), Island_21 (the round stage), Island_3b/3c/8b (court,
-  town buildings, hotel). All but Island_16 go into the cells (49,659 triangles); Wedge Island is
-  an instance of its own (below).
+  town buildings, hotel). All go into the cells' level 0.
 - **Hidden:** 17 and 17b (pier variants), 19 and 20 (mountain and coast without caves), 19c and 20c
   (their night versions), Island_22 (a villa, hidden in every mode), Light1-4 (the night lights).
-  Island_16b and Water16b (the golf island's light model and its sea rim) are hidden in mode 13
-  and staged as Wedge Island's far model.
+  Island_16b and Water16b (the golf island's light model and its sea rim) are hidden in mode 13;
+  the far island (island_R, below) has its own light Wedge Island.
 - `WS2_common_island_V` (198 triangles, a translucent blend over the volcano's inside) goes into
   the cells with the island.
 
@@ -109,39 +124,67 @@ detail, so it is the canonical set:
 
 WSR's ground-level modes (1-4, 6-10, 15-16) show the golf island's light model, Island_16b, with
 its own sea rim, Water16b, instead of Island_16 and Water16. From the main island the two can't be
-told apart, even through a 6x zoom (research env_choice/env.md, its quay renders). So Wedge Island
-is a still instance (`INST_STATIC`, class 0) of a model made of `Island_16_Model` and the sea's
-`Water16` (10,794 triangles), whose model chain (`Model.lod_next`) goes to `Island_16b_Model` and
-`Water16b` (4,065 triangles: no shore foam, simpler waves) from 12,000 units off the island's
-centre. Everywhere on Wedge Island and its islets (all within 5,000 units of the centre) the full
-model is drawn, from the main island and its islets (25,000 and more) the light one: the switch
-happens over open sea. Through the `view_distant` camera this takes the frame from 37,814 triangles
-to 31,095 and from 159 draws to 125. Being an instance, Wedge Island is culled whole (one sphere,
-radius 6,640) instead of by cell; its trees and props stay in their cells. Its two models carry the
-whole island model's node list (the sea's too), unused but for two nodes: about 10 KB.
+told apart, even through a 6x zoom (research env_choice/env.md, its quay renders). Wedge Island is
+in the cells like the rest of the island (version 1 staged it as a still instance with a model
+chain, culled whole by one sphere of radius 6,640): Island_16 and Water16 at level 0, and at the
+far levels island_R's light model of it (`Island_16b_model`, 1,658 triangles, below) with
+Water16's pond. Its trees and props are in its cells too. Through a 6x zoom from the west headland
+the far version has no grass edges over its cliffs (island_R has no blend strips); at the views'
+own fields of view it is a few pixels tall.
 
 ## Cells and detail levels
 
 The island and the props that stand still are one static world cut into cells of 4,000 units on
 x/z: a 12 x 10 grid from (-36,000, -16,000), 44 cells with geometry (Cell index = z * 12 + x).
 Terrain triangles go to the cell of their centroid; a placed object goes whole to the cell of its
-position. A cell has a batch per material (per detail level for trees), its vertex buffers
-deduplicated and split before 65,536 vertices. A cell's `group` is the island node with most of
-its triangles.
+position. A cell has a vertex buffer per vertex layout and, in each level's list, one batch per
+material (and detail flag): the pieces of a material in a cell share one encoding and one vertex
+buffer, and two levels drawing the same pieces share a batch. The slivers a centroid cut leaves
+where a material crosses a cell's edge (under 32 triangles) go to the neighbour that draws the
+rest of it when they lie within its box (26 moved): its box, which picks its level and culls it,
+stays as it was. A cell's `group` is the island node with most of its triangles.
 
 Each cell lists its batches for three levels, by the eye's distance to the cell's box (a cell with
-terrain alone has one list for all three):
+water alone has one list for all three):
 
 | level | from | what | whole world |
 |---|---|---|---|
-| 0 | 0 | terrain, trees at full detail, every prop | 435 batches, 110,267 triangles |
-| 1 | 3,000 | terrain, the trees' lighter models, palms, boats, fountain, the two gates | 406, 84,620 |
-| 2 | 20,000 | terrain | 320, 49,857 |
+| 0 | 0 | the island at full detail (Wedge Island too) with its edge-blend strips, island_V, the trees' full models, every prop, the sea by the shores and inland (shore foam, waves, ripples, the lake, the falls, the cave's water) | 472 batches, 124,667 triangles |
+| 1 | 5,000 | the far island (island_R), the lake, the falls, the sea by the shores, the trees' lighter models, the boats at anchor, the venues' gates | 232, 52,550 |
+| 2 | 15,000 | the far island and its waters | 148, 18,139 |
 
-Why these distances: on the 3DS's 240-line top screen with a 45-degree view, a 230-unit tree is
-about 22 pixels tall at 3,000 units, where `WS2_common_tree_H` and `_M` look alike, and a 30-unit
-car or parasol is 3 pixels; at 20,000 units a tree is 3 pixels and only Wedge Island and the far
-islets are that far from anywhere on the main island.
+(Version 1: 0 / 3,000 / 20,000, the island at full detail at every level, trees at 0-1: 435 /
+406 / 320 batches, 110,267 / 84,620 / 49,857 triangles.)
+
+**The far island** is `WS2_common_island_R`, WSR's own low-detail copy of the island, which it
+draws mirrored as the island's reflection in the water: the same nodes and frame, 15,293
+triangles for the whole archipelago (the full island 59,635), one TEV stage a material, the
+island's own textures (no texture memory added), no edge strips, Wedge Island as its light model.
+Three of its nodes are left out and the island's own taken instead at every level: the islets
+Island_12-14, which in R have no grass (22-28 triangles against 31-59). Two of the island's nodes
+that R lacks are added to the far levels: the round stage of Swordplay on the water (Island_21,
+1,568 triangles) and the court by the lighthouse (Island_3b, 554). R folds the town's and the
+hotel's buildings into its Island_3 and Island_8. Its mountain is the cave-less version
+(Island_19, closed), so the cave's water and island_V's glow stay at level 0.
+
+**Why these distances.** On the 3DS's 240-line top screen at 45 degrees a pixel is 1/290 of the
+distance: a 230-unit conifer is 13 pixels tall at 5,000 units and 4 at 15,000, a 160-unit boat 3
+at 15,000. At 5,000 the far island switches in; the step (each of the 8 cells with the most
+level-0 triangles seen from just past 5,000 units of its box, on the ground, the cell alone at
+level 0 and at level 1, 800x450) is 34-64 dB, at most 1.4 % of the pixels more than 16 levels
+off: the grass edges along cliff tops and the cliffs' shading. Trees go with level 2: three levels
+are the format's, and a level goes on to any distance, so trees can't be dropped by size within
+one. The speed round's walking frames had 36 % of their vertices 4,000-12,000 units off.
+
+**Detail** (`BATCH_DETAIL`, culled by the batch's own box beyond `Env::detail_distance`, 3,000
+units): the edge-blend strips (`mt_gake_blend`, `mt_kusa_blend`, `mt_suna_blend`, `mt_tuti_blend`),
+the decals (`mt_stage_logo`, `png_net_b`), the sea's shore foam, waves and ripples
+(`mt_zd_w_kiwa` and its `_off`, `mt_ze_w_nami`, `mt_ze_w_nami2`, `mt_zb_w_hamon`), and the small
+props (parasols, tents, parked cars, kayaks, flags, poles, tees, buoys, the venues' small props):
+156 batches. At 2,000 the shore foam across a bay goes visibly (a walking frame by the volcano,
+28.9 dB against none culled); at 3,000 it stays (54.5 dB) for 2.6 more draws and 850 more
+triangles a walking frame. Strips further off than that are on cells that switch to the far island
+at 5,000, which has none.
 
 ## Placed objects
 
@@ -155,16 +198,16 @@ not objects anyone sees.
 | conifer | 159 | baked, two levels | `WS2_common_tree_H` (level 0), `_M` (level 1) |
 | broadleaf tree | 179 | baked, two levels | `WS2_common_tree2_H`, `_M` |
 | palm | 141 | baked, levels 0-1 | `WS2_common_tree3` (it has one model) |
-| cruiser at anchor | 28 | baked, levels 0-1 | |
+| cruiser at anchor | 28 | baked, levels 0-1 | 160 units long |
 | yacht | 19 | baked, levels 0-1 | |
-| fountain | 1 | baked, levels 0-1 | its water's SRT0 in the world animation |
-| jet-ski start gate, wakeboard goal gate | 1 + 1 | baked, levels 0-1 | 266 and 400 units wide |
-| parked car | 32 | baked, level 0 | |
-| parasol | 17 | baked, level 0 | |
-| kayak | 10 | baked, level 0 | |
-| golf tee | 9 | baked, level 0 | |
-| flag A | 3 | baked, level 0 | at rest: their SHP0 (cloth) is left out |
-| frisbee-dog plate, archery target, table-tennis table, cycling gate | 4 | baked, level 0 | the venues' low-detail props |
+| fountain | 1 | baked, level 0 | its water's SRT0 in the world animation |
+| jet-ski start gate, wakeboard goal gate | 1 + 1 | baked, levels 0-1 | 168 and 400 units wide |
+| parked car | 32 | baked, level 0, detail | 385 triangles each |
+| parasol | 17 | baked, level 0, detail | |
+| kayak | 10 | baked, level 0, detail | |
+| golf tee | 9 | baked, level 0, detail | |
+| flag A | 3 | baked, level 0, detail | at rest: their SHP0 (cloth) is left out |
+| frisbee-dog plate, archery target, table-tennis table, cycling gate | 4 | baked, level 0, detail | the venues' low-detail props |
 | windmill | 8 | instances | CHR0 `WS2_common_windmill` turns the blades (299 frames) on the placed matrix; phases staggered 37 frames |
 | balloon | 3 | instances | CHR0 `WS2_common_balloon_flight` (7,999 frames, a ~2,000-unit loop) on the placed matrix; all three variants use it (the others are the basketball and canoe scenes'), phases spread |
 | airship | 1 | instance | CHR0 `WS2_common_airship_flight_title`: the title sequence's flight, a world path 2,364-2,813 units up over the main island (7,500 frames) |
@@ -188,6 +231,15 @@ clock. An airship placed at the origin with the default `flight` CHR0 would fly 
 circle at sea level through the island: the Flyover must place it by code not traced, so the title
 sequence's flight is used instead. (The fn_ addresses in this file are Wii Sports Resort's
 main.dol, not Wii no Ma's; Wii no Ma's functions go by their names.)
+
+Small instances are culled by distance (`Instance::cull_distance`, from the near side of their
+bounding sphere): gulls and hawks (20 units, 377-385 triangles in 5 batches) beyond 2,000 units,
+where they are 3 pixels across; moving cars (55 units) beyond 3,000; whales (600 units, 10
+batches) and moving cruisers beyond 8,000 (22 and 6 pixels). Version 1 had gulls and hawks at
+6,000, cars at 12,000, cruisers at 20,000, whales never. Through the speed round's 144
+walking frames this takes the whales from 17.3 draws a frame to 1.4 and the birds from 18.8 to
+4.8. The cars' and cruisers' spheres hold their whole routes (below), so a renderer that culls them
+by where they are now gains most there: they are 19 draws and 6,700 triangles of a walking frame.
 
 A moving model's box (`Model.bbox`, `radius`, model space) holds every pose its instances'
 animations give it, not only its rest pose: the cars, cruisers, liner and airship run world routes
@@ -232,10 +284,10 @@ swap-table bits and its konst selections in two writes, so the reader runs the l
 register file instead of taking the first write. (The research renderer took the first write, so
 its pictures have the swap-table bits as konst selections: wrong on the sea and the lava.)
 
-- 90 materials. 6 have indirect stages (the lava `ef_volSurface`, the sea's `mt_za_water` and the
-  river's `mt_zc_w_nagare` with their `_off` twins, the fountain's water), flagged and dropped as
-  the engine drops them: the warp is lost, the scrolls stay. No material reads texture
-  coordinates past tex1, or colour channel 1.
+- 110 materials (island_R's 20 among them). 6 have indirect stages (the lava `ef_volSurface`, the
+  sea's `mt_za_water` and the river's `mt_zc_w_nagare` with their `_off` twins, the fountain's
+  water), flagged and dropped as the engine drops them: the warp is lost, the scrolls stay. No
+  material reads texture coordinates past tex1, or colour channel 1.
 - The blend word's dither, colour-update and alpha-update bits are written by nw4r through a mask
   that leaves them to the global state, where colour update is on: the package has that bit set.
 - Texgen `matrix` is the texgen's own texture matrix when nw4r applies one (its SRT is in use, or
@@ -246,6 +298,45 @@ its pictures have the swap-table bits as konst selections: wrong on the sea and 
   transparent texel, ETC1A4 (14), I8 L8 (15, the sun's two among them), IA8 LA8 (11), IA4 LA4 (2),
   RGB565 RGB565 (4), RGB5A3 and RGBA8 RGBA8 (9). A texture is never shared by name across files
   (56 names have different pictures in different WSR files).
+
+## Vertices and lighting
+
+Version 2 of the format makes a vertex cheaper to fetch and to shade:
+
+- **Compact positions** (`VA_POS16`): every position is snapped to a grid of 1/12 unit (in the
+  space it is stored in: the world for the cells, a node's for a model's meshes) and a vertex
+  buffer whose positions lie within 32,767 steps of a grid point (5,461 units across) is written
+  as s16 x3 and a pad, with that point as `pos_origin` and 1/12 as `pos_scale`: 8 bytes for 12.
+  One step for every buffer, so a vertex two buffers share (neighbouring cells, two layouts of a
+  cell) decodes to the same place in both and no crack opens between them; the snap moves a
+  coordinate by 0.043 units at most (half a step, and float32's rounding at 30,000 units), a
+  position by 0.072 (4 mm at the island's Mii scale). The widest cell's buffer is 5,208 units
+  across, so every cell fits; the open sea and the sky (5 buffers, 308 vertices) stay f32.
+- **Prelit materials** (`MAT_PRELIT`): a material lit by colour channel 0 whose material or
+  ambient colour no animation drives has its lighting baked into its vertex colours: the light
+  set's ambient and lights evaluated per vertex as GX does (and `tools/g3d/preview.py` with
+  `--per-vertex`): colour = material source (the vertex colour, or the material colour) x clamp(
+  ambient + the sum of N.L x light colour), the sun's point lights from their positions (the
+  engine's World lights the package's point lights from the direction toward the origin, up to 6
+  degrees off on the east beach, 23 on Wedge Island: the bake is GX's), alpha the source's times
+  the ambient's. Its channel words then say unlit with the vertex colour (colour and alpha), its
+  light set is dropped. 90 of the 110 materials; lit at run time stay the waves (`mt_ze_w_nami`,
+  `nami2`: their CLR0 drives the material alpha) and the windmills (`mt_Windmill`: a model's
+  lighting is baked once, at its rest orientation, and the eight windmills stand 6-87 degrees apart
+  about y, so six of them would be lit from the wrong side, 19-42 colour levels off on average and
+  up to 122; their blades turn too; 96 vertices). The moving models are lit as they stand at rest,
+  unplaced: their light turns with them (a balloon in the beach view is the one visible
+  difference in the views; a car or cruiser heading the other way from its rest has its lit side
+  away from the sun).
+- **Only what a material reads**: normals only where a material needs them (lit at run time, or a
+  texgen from the normal: the town's walls, the harbour's ship, `mt_DriveHead` on Wedge Island), vertex
+  colours only where a channel reads them (none on the open sea). 125,715 of the 172,046 vertices
+  are 16 bytes (position, colour, one UV), 44,225 20, 547 12, 1,559 28; version 1's were 20-36.
+
+The speed round's measurements (a model of the PICA's vertex units from the shader's instruction
+counts, not hardware) put its vertex work at the larger part of a frame's GPU time (the town view:
+7.6 of 8.6 ms) and baked lighting alone at 7.6 -> 4.5 ms there; the renderer's version 2 shader
+decides what it is on hardware.
 
 ## Environment
 
@@ -279,18 +370,23 @@ ground-level day (research env_choice/env.md, its set (f), decoded from the file
   Fog 1 is `ws2_common_day.pfobj`, linear in view depth from 27,978 to 65,527 to #83d5ff: the
   island object writes its `.pfobj` into the FogManager's second fog (fn_80275B38 points at
   fogs[1]; fn_802757F0 loads it there and sets its enable bit whatever the file's own flag says).
-  Only the open sea's materials, `mt_za_water` and `mt_za_water_off`, use fog 1: the sea fades into
-  the haze at the horizon. (Stage 1 had this the wrong way round, after the research's first
-  reading: the `.pfobj` in fog 0, which washed out the sky 62,000-70,000 units off, and Pln F0's
-  fog 1, 2,000-30,000 #66d1ff, which turned the near sea pale.) WSR rescales fog 1's start and end
-  each frame by the camera's pitch (fn_80274A5C): at walking pitches under 15 degrees that is at
-  most 3 %, left out.
+  Only the open sea's materials, `mt_za_water` and `mt_za_water_off`, use fog 1 in WSR: the sea
+  fades into the haze at the horizon. (Stage 1 had this the wrong way round, after the research's
+  first reading: the `.pfobj` in fog 0, which washed out the sky 62,000-70,000 units off, and Pln
+  F0's fog 1, 2,000-30,000 #66d1ff, which turned the near sea pale.) WSR rescales fog 1's start and
+  end each frame by the camera's pitch (fn_80274A5C): at walking pitches under 15 degrees that is
+  at most 3 %, left out. **Since version 2 no material is fogged** (`MAT_FOG` cleared; the fog
+  table stays, and the format keeps fog): the PICA backend draws a fogged item a second time for
+  its fog, and from the ground fog 1 only touches the sea a few lines under the horizon. From
+  raised views it shows: the overview camera (3,500 units up) sees the sea plane's far edge as a
+  band against the clear colour (27.5 dB against the fogged picture, 7 % of its pixels); the
+  distant camera (1,100 up) 32.4 dB; the walking views 45 dB and more.
 - **The sky** (`WS2_common_vr`) follows the eye (the engine draws it centred on the eye, first,
   without depth). Its materials are unfogged in the package whatever their fog index says (WSR's
   sky is fog 0, off by day; a fog 0 turned on later, a night's, must not reach the dome). The
   clear colour is fog 1's #83d5ff, so that the gap under the dome's lower edge (231 units under
-  the eye) meets the fogged sea in its own colour; the package has no clear colour of its own
-  (the scene sets it; `tools/g3d/preview.py` takes the first fog in use).
+  the eye) meets the sea in the haze's colour; the package has no clear colour of its own (the
+  scene sets it from the first fog in the table that is on; `tools/g3d/preview.py` likewise).
 - **The sun** (CmnObj class 1, 太陽) is a part of the sky model: `WS2_common_sun_model`, a glow disc
   (`P_sun_core1d`, alpha-blended, warm white) and a fan of rays (`P_sun_spreadline5_2` twice,
   added, turning both ways: the sky animation). WSR's sun update (fn_802A8D80) puts it at the
@@ -380,17 +476,52 @@ broadleaf 8.2, -3.0..164.9; palm 3.5, -0.9..38.4 -- then moved by the tree's pla
 (radius times its horizontal scale). Other props have collision files too (cars, tents,
 parasols, windmills, boats in `PlnCol_1.carc`): not staged.
 
+## Cell visibility
+
+The package carries a visibility row per cell (`CVIS`, `Env::pvs_row_bytes` = 15, bit j of row i
+at byte j >> 3, bit j & 7): bit j is set when some triangle of cell j may show from an eye over
+cell i's ground no higher than `Env::pvs_max_height` = 80 units over it (three heights of the
+island's Mii, at k / 1.7: the follow camera on flat ground and a little over; a camera higher over
+the ground under it uses no row). `tools/ng3d_pvs.cpp` renders cube maps (6 x 128 x 128, faces 94
+degrees wide) at eye points: a column every 400 units over each cell, at every floor the collision
+has there (ground or water, not the invisible fences, not a floor under something solid -- the sea
+plane under the island), 2.5, 40 and 80 units over it and under whatever is above; 36,243 eyes,
+7 s on all cores. Occluders are the cells' opaque, depth-writing triangles without alpha test, as
+their materials cull them, but not their detail batches (gone beyond `Env::detail_distance`: the
+kayaks and parasols), and the open sea; a cell occludes a pixel only as far as the farthest of
+the detail levels its distance from anywhere in the eye's cell allows (its square of the grid, the
+gaps between the eye columns and its edges included: a level switch can't uncover what the row
+hides). The occluders' depth is eroded to the farthest of each 3x3 neighbourhood before a
+cell's triangles (every level, translucent and cut-out ones too, a pixel each corner as well as the
+pixels covered) are tested. Neighbouring cells always see each other; cells without geometry are
+set.
+
+What it hides is little, as the speed round's measurements found for cells this size: from a cell with
+ground and geometry, 95.1 % of the cells with geometry may show on average (72.7 % at the least:
+the northern islets, whose sea-level eyes have the main island's ridges between them and the
+south-east). Through the view cameras and the 144 walking frames it removes nothing (the frames
+look along the island, not past the volcano at sea level); it is there for the places it helps
+and for a finer grid later.
+
+Checked by `tools/wuhu/check_cvis.py`: renders (800x450, preview.py) from 20 random walkable
+points, the follow camera at rest behind the Mii at three yaws, with and without the rows: 60 of
+60 identical (the rows hide 1.6 % of the cells there); from 20 points in the cells whose rows hide
+the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
+
 ## Left out (fidelity gaps)
 
 - Indirect texturing: the water's and lava's warp (the engine has no dependent reads).
-- The water reflection (`WS2_common_island_R`, drawn mirrored by WSR),
-  `WS2_common_under` (a navy skirt under the sea drawn with depth test off before the island),
-  the night models (`island_L`, `vr_N`) and the evening sky (`vr_E`): daytime only.
+- The water reflection (`WS2_common_island_R`, drawn mirrored by WSR; its geometry is the far
+  island), `WS2_common_under` (a navy skirt under the sea drawn with depth test off before the
+  island), the night models (`island_L`, `vr_N`) and the evening sky (`vr_E`): daytime only.
+- The far island (5,000 units off) is island_R's: no edge-blend strips (less grass over cliff
+  edges), simpler shading, the mountain without its cave; detail (strips, foam, small props) goes
+  beyond 3,000 units; trees and boats beyond 15,000.
+- Fog (since version 2): the far sea meets the clear colour in an edge from raised views.
 - The sun's glare and lens flares (`WS2_common_sunshine`, `WS2_common_sun_lensfx`): their alpha
   follows the sun's place on the screen and whether the depth buffer hides it. The sun's height
   doesn't follow the eye's (1.2 degrees at the highest walkable ground). Billboards in models drawn
   by the cells are baked as placed.
-- Fog 1's per-frame rescale by the camera's pitch (at most 3 % at walking pitches).
 - Particle effects: the waterfalls' mist, the volcano's smoke, the fountain's spray, whales'
   spouts (`Effect/Static/effect.carc`).
 - Bloom and depth of field (`WS2_bic_F0_Bloom.pblm`, `_dof.pdof`), the caves' darker ambient
@@ -402,52 +533,74 @@ parasols, windmills, boats in `PlnCol_1.carc`): not staged.
 - Whales stay where they are placed (WSR also moves them along routes); gulls and hawks circle
   instead of flocking; the airship takes the title sequence's flight.
 - The ambient sounds (PMP group 5), the time of day.
-- Model nodes whose batches aren't one run in the model's draw order (10: the sea's, and Wedge
-  Island's sea rims, each with opaque and translucent batches split by the island's) have
-  `n_batches` 0: renderers find a node's batches by `Batch.node`.
+- Model nodes whose batches aren't one run in the model's draw order have `n_batches` 0:
+  renderers find a node's batches by `Batch.node`.
 
 ## How it was checked
 
-- `ng3d.py selftest`: 23 structs (fields, types, array sizes), 23 static_asserts, 25 section tags
-  and 13 enums against `engine/g3d/ng3d_format.h` (changing a field's type or a tag in a copy of
+- `ng3d.py selftest`: 23 structs (fields, types, array sizes), 23 static_asserts, 26 section tags
+  and 14 enums against `engine/g3d/ng3d_format.h` (changing a field's type or a tag in a copy of
   the header is caught).
 - `ng3d.py check`: the unbaked package (every reference in range, every payload inside its section
-  and of the size its levels or layout take, key frames in order, marker kinds; read and written
-  again, the same 12,339,440 bytes) and the baked one (the same records, laid out by ng3d-bake).
-  Two staging runs give byte-identical files.
+  and of the size its levels or layout take, VA_POS16 buffers with an origin and a scale, batch
+  flags, the CVIS rows' size, key frames in order, marker kinds; read and written again, the same
+  11,356,912 bytes) and the baked one (the same records, laid out by ng3d-bake). Two staging runs
+  give byte-identical files.
 - The engine's loader and world on the baked package (`NOMA_SELFTEST=g3d` with
-  `NOMA_G3D_PACKAGE`, host): loaded and checked in 0.2 ms with no texture converted (unbaked:
-  37 ms converting 92), k = 10, 140 checks passed. Through the view cameras (a 400:240 frustum,
-  near 1.5, far 80,000; frame 600):
+  `NOMA_G3D_PACKAGE`, host; `engine/g3d/package.cpp` reads version 2's fields): loaded and checked
+  in 0.2 ms with no texture converted, k = 10, 140 checks passed. Through the view cameras (a
+  400:240 frustum, near 1.5, far 80,000; frame 600), with the World of version 1 (no detail
+  distance, no visibility rows, cells culled whole), version 1's package in brackets:
 
   | view | cells | instances | draws (opaque + translucent) | triangles |
   |---|---|---|---|---|
-  | town | 19/120 | 25/95 | 256 + 86 | 81,306 |
-  | coast | 33 | 27 | 258 + 95 | 70,128 |
-  | beach | 16 | 17 | 103 + 28 | 24,854 |
-  | interior | 10 | 26 | 149 + 39 | 36,588 |
-  | distant | 43 | 27 | 109 + 16 | 31,095 (stage 1: 37,814) |
-  | overview | 36 | 34 | 327 + 115 | 84,936 |
-  | wedge | 47 | 25 | 129 + 19 | 44,509 |
+  | town | 19/120 | 22/94 | 176 + 31 (256 + 86) | 66,536 (81,306) |
+  | coast | 33 | 13 | 171 + 29 (258 + 95) | 44,828 (70,128) |
+  | beach | 16 | 13 | 84 + 22 (103 + 28) | 23,685 (24,854) |
+  | interior | 10 | 23 | 122 + 26 (149 + 39) | 34,316 (36,588) |
+  | distant | 43 | 23 | 86 + 9 (109 + 16) | 24,302 (31,095) |
+  | overview | 36 | 21 | 171 + 3 (327 + 115) | 34,372 (84,936) |
+  | wedge | 47 | 21 | 94 + 13 (129 + 19) | 36,371 (44,509) |
 
-- The package rendered by `tools/g3d/preview.py` from those cameras at 1280x720 against stage 1's
-  package (PSNR in dB, mean difference in levels, share of pixels more than 16 levels off): the
-  differences are the environment's, as they should be -- the sky deep blue instead of fogged pale,
-  the near sea deep blue instead of fog 1's #66d1ff, the light from the south-south-west, the sun
-  where it shows -- and, far off, Wedge Island's light model; the volcano's lava chamber, lit by
-  nothing that changed, is the same.
+  Averages, with what a version 2 World does on top (`tools/g3d/viewstats.py`, a Python copy of
+  World's culling that gives the selftest's numbers exactly, with the detail distance, a test of
+  each cell batch's own box and the visibility rows switchable), over the views and the speed
+  round's 144 walking frames (`tools/wuhu/walk_cams.txt`: 18 places on the main island, 8 yaws each, the
+  follow camera at rest):
 
-  | view | PSNR | mean | > 16 levels |
-  |---|---|---|---|
-  | town | 16.33 | 19.6 | 37.0 % |
-  | coast | 17.07 | 19.8 | 44.6 % |
-  | beach | 17.22 | 17.8 | 40.9 % |
-  | interior | 56.42 | 0.0 | 0.0 % |
-  | distant | 13.42 | 42.8 | 90.1 % |
-  | overview | 17.90 | 24.6 | 81.7 % |
-  | wedge | 12.58 | 48.3 | 93.0 % |
+  | | views: draws | triangles | vertices | walking: draws | triangles | vertices (lit at run time) |
+  |---|---|---|---|---|---|---|
+  | version 1 | 247.0 | 53,345 | 68,586 | 242.7 | 54,347 | 70,158 (68,151) |
+  | version 2, World as it is | 148.1 | 37,773 | 48,684 | 180.4 | 52,073 | 67,077 (378) |
+  | + detail distance | 137.7 | 35,113 | 44,729 | 165.5 | 47,646 | 60,560 (287) |
+  | + each cell batch by its box | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
+  | + visibility rows | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
 
-  Stage 1 compared its package's terrain with the research's renders of the BRRES: with the
-  research renderer's conventions they matched to 37-52 dB (the rest CMPR's in-between colours on
-  the sea's sun glint and the mip chain stopping at 8x8). The island's geometry, materials and
-  textures haven't changed since, but for Wedge Island's far model and the sun.
+  (Vertices: the distinct ones each draw indexes, what the vertex shader runs on.) A walking
+  frame's 35,664 triangles and 120.5 draws: the full island near 14,200 (40 draws, its detail
+  strips with it), trees 5,300 (9), props 3,900 (7), the far island 1,500 (16), the sea in the
+  cells 750 (12), the sky and the open sea, the instances 9,800 (34: the route-driven cars and
+  cruisers 6,700 and 19 of them).
+- The package rendered by `tools/g3d/preview.py` from those cameras at 1280x720 against version 1's
+  (PSNR in dB, mean difference in levels, share of pixels more than 16 levels off), version 1 lit
+  per vertex as GX lights it (preview.py lights per fragment by default; against that, the town is
+  at 33.2 dB, all of the difference the lighting's way). Then each change alone:
+
+  | view | v1 -> v2 | lighting baked (vs live, per vertex) | no fog (v1) | far island (vs level 0 everywhere) | detail beyond 3,000 |
+  |---|---|---|---|---|---|
+  | town | 37.23 / 0.99 / 0.53 % | 53.72 | inf | 49.09 | 71.12 |
+  | coast | 43.19 / 0.23 / 0.35 % | 61.49 | 50.88 | 57.02 | 56.85 |
+  | beach | 30.89 / 0.96 / 2.44 % | 39.87 | 46.44 | 33.75 | 40.12 |
+  | interior | 47.95 / 0.23 / 0.03 % | 79.34 | 60.07 | inf | inf |
+  | distant | 30.89 / 0.92 / 2.98 % | 45.92 | 32.40 | 33.48 | inf |
+  | overview | 23.49 / 4.25 / 11.30 % | 45.16 | 27.49 | 26.99 | inf |
+  | wedge | 37.95 / 0.14 / 0.33 % | 50.59 | 44.92 | 36.18 | inf |
+
+  The baked lighting matches live per-vertex lighting but for rounding and the balloons (lit as
+  they stand at rest); the fog's and the far island's are the changes the sections above describe;
+  the rest of version 1 -> 2 is which props and tree models are drawn where (detail levels at
+  5,000 and 15,000 instead of 3,000 and 20,000, the small instances' cull distances).
+- The far island's switch: each of the 8 cells with the most level-0 triangles from just past
+  5,000 units, alone at level 0 and at level 1: 34.3-63.6 dB, at most 1.43 % of the pixels more
+  than 16 levels off (cells and detail levels, above).
+- The visibility rows: 120 of 120 renders identical with and without them (cell visibility, above).

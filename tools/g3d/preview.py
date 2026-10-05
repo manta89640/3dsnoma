@@ -4,12 +4,15 @@ numpy only: pictures of what a package holds, drawn the way GX would draw its so
 pipeline and the engine's renderers against.
 
     preview.py PACKAGE OUT.png --camera NAME [--frame F] [--size 1280x720] [--fov 55]
-                                [--lod N] [--no-instances] [--no-sky] [--no-fog]
+                                [--lod N] [--no-instances] [--no-sky] [--no-fog] [--per-vertex]
     preview.py PACKAGE OUT.png --eye X,Y,Z --target X,Y,Z ...
     preview.py --brres FILE MODEL OUT.png --eye ... --target ...
 
 --camera is a camera marker of the package (kind 2, e.g. view_town). --lod forces a cell detail
-level everywhere (default: by distance, as the engine picks it); --lod 2 is the bare terrain.
+level everywhere (default: by distance, as the engine picks it); --lod 2 is the far island.
+--per-vertex lights colour channels at the vertices and interpolates the colours, as GX (and the
+engine's PICA shader) do, instead of per fragment: what a MAT_PRELIT material's baked vertex colours
+are to be compared with. Positions are read in either form (f32, VA_POS16).
 
 Everything it draws comes from the package's own records: cells, the sea and sky models, instances
 with their node animation, materials as GX register images -- each TEV stage from its colour and
@@ -149,9 +152,10 @@ class Scene:
     """point_as_directional: point lights lit as directional ones from the origin toward them (the
     research renderer's model of the sun); fog_index: one fog for every fogged material."""
 
-    def __init__(self, pkg, point_as_directional=False, fog_index=None):
+    def __init__(self, pkg, point_as_directional=False, fog_index=None, per_vertex=False):
         self.pkg = pkg
         self.point_as_directional, self.fog_index = point_as_directional, fog_index
+        self.per_vertex = per_vertex    # colour channels lit per vertex (GX's way), not per fragment
         self.tex_levels = {}
         self.geo = {}
         self.texmtx = [dict(scale=list(t.scale), rotate=t.rotate, translate=list(t.translate)) for t in pkg.tex_mtx]
@@ -183,9 +187,13 @@ class Scene:
         idx = np.array(pkg.indices[b.first_index:b.first_index + b.n_indices], np.int64)
         rows = raw[idx]
         c = {}
-        o = 0
-        c["pos"] = rows[:, 0:12].copy().view("<f4").reshape(-1, 3).astype(np.float32)
-        o = 12
+        if vb.attrs & ng3d.VA_POS16:      # s16 x3 + pad: s16 * pos_scale + pos_origin
+            q = rows[:, 0:6].copy().view("<i2").reshape(-1, 3).astype(np.float32)
+            c["pos"] = q * np.float32(vb.pos_scale) + np.array(vb.pos_origin, np.float32)
+            o = 8
+        else:
+            c["pos"] = rows[:, 0:12].copy().view("<f4").reshape(-1, 3).astype(np.float32)
+            o = 12
         c["nrm"] = c["clr"] = c["uv0"] = c["uv1"] = None
         if vb.attrs & ng3d.VA_NRM:
             n = rows[:, o:o + 3].copy().view(np.int8).astype(np.float32) / 127.0
@@ -268,19 +276,36 @@ class Scene:
             W.append(M)
         return W
 
-    def gather(self, eye, lod=None, instances=True, sky=True, frame=0.0, cells=True, sky_follows=True):
+    def gather(self, eye, lod=None, instances=True, sky=True, frame=0.0, cells=True, sky_follows=True,
+               cell_filter=None):
         """The items of a frame seen from `eye`: sky (centred on the eye, as the engine draws it, or
-        at the origin), cells at their detail level, sea, instances."""
+        at the origin), cells at their detail level, sea, instances. BATCH_DETAIL batches farther
+        than Env.detail_distance from the eye (to their box) are left out. cell_filter(cell index)
+        -> False leaves a cell out (a visibility table)."""
         pkg = self.pkg
         e = pkg.env
         items = []
         order = 0
+        detail_far = getattr(e, "detail_distance", 0.0) or 0.0
+        eye = np.asarray(eye, np.float64)
+
+        def box_distance(bb):
+            lo, hi = np.asarray(bb[:3], np.float64), np.asarray(bb[3:], np.float64)
+            return float(np.linalg.norm(np.maximum(0, np.maximum(lo - eye, eye - hi))))
 
         def add(bi, M, group):
             nonlocal order
+            b = pkg.batches[bi]
+            if detail_far > 0 and b.flags & ng3d.BATCH_DETAIL:
+                bb = b.bbox
+                if M is not None:     # the box moved by M (the box around the moved box)
+                    lo, hi = np.asarray(bb[:3]), np.asarray(bb[3:])
+                    c0, ext = M[:3, :3] @ ((lo + hi) / 2) + M[:3, 3], np.abs(M[:3, :3]) @ ((hi - lo) / 2)
+                    bb = list(c0 - ext) + list(c0 + ext)
+                if box_distance(bb) > detail_far:
+                    return
             c = self.batch_corners(bi)
             it = Item()
-            b = pkg.batches[bi]
             it.batch, it.mat = bi, b.material
             if M is None:
                 it.P, it.N = c["pos"], c["nrm"]
@@ -292,6 +317,12 @@ class Scene:
                 else:
                     it.N = None
             it.C, it.UV = c["clr"], [c["uv0"], c["uv1"]]
+            it.vertex_lit = False
+            m = pkg.materials[b.material]
+            if self.per_vertex and m.n_chans >= 1 and (m.chan_color | m.chan_alpha) & 2:
+                # the channel's colour at the corners, interpolated across the triangle as GX does
+                it.C = self.channel(m, b.material, dict(n=len(it.P), clr=c["clr"], nrm=it.N, pos=it.P))
+                it.vertex_lit = True
             it.group, it.order = group, order
             order += 1
             items.append(it)
@@ -311,7 +342,9 @@ class Scene:
                 T[:3, 3] = eye
             add_model(e.sky_model, T, group=0)
         if cells:
-            for c in pkg.cells:
+            for ci, c in enumerate(pkg.cells):
+                if cell_filter is not None and not cell_filter(ci):
+                    continue
                 if lod is None:
                     lo, hi = np.array(c.bbox[:3]), np.array(c.bbox[3:])
                     d = float(np.linalg.norm(np.maximum(0, np.maximum(lo - eye, eye - hi))))
@@ -456,7 +489,7 @@ class Scene:
                 tex = np.ones((n, 4), np.float32)
             if st["chan"] == 0:
                 if ras_cache is None:
-                    ras_cache = self.channel(m, mi, frag)
+                    ras_cache = frag["clr"] if it.vertex_lit else self.channel(m, mi, frag)
                 ras = ras_cache[:, list(swaps[st["ae"] & 3])]
             else:
                 ras = np.zeros((n, 4), np.float32)
@@ -778,8 +811,8 @@ def _draw(scene, view, it, color, depth, fog):
 
 def render_package(pkg, eye, target, fov, W, H, frame=0.0, lod=None, instances=True, sky=True, fog=True,
                    progress=False, material_anims=True, sky_follows=True, fog_index=None,
-                   point_as_directional=False):
-    sc = Scene(pkg, point_as_directional, fog_index)
+                   point_as_directional=False, per_vertex=False):
+    sc = Scene(pkg, point_as_directional, fog_index, per_vertex)
     if material_anims:
         sc.apply_material_anims(frame)
     items = sc.gather(np.asarray(eye, np.float32), lod=lod, instances=instances, sky=sky, frame=frame,
@@ -817,6 +850,7 @@ def main(argv=None):
     ap.add_argument("--no-instances", action="store_true")
     ap.add_argument("--no-sky", action="store_true")
     ap.add_argument("--no-fog", action="store_true")
+    ap.add_argument("--per-vertex", action="store_true", help="light per vertex, as GX does")
     a = ap.parse_args(argv)
     from PIL import Image
     W, H = [int(x) for x in a.size.split("x")]
@@ -838,7 +872,7 @@ def main(argv=None):
         eye = [float(x) for x in a.eye.split(",")]
         target = [float(x) for x in a.target.split(",")]
     img, n = render_package(pkg, eye, target, a.fov, W, H, a.frame, a.lod, not a.no_instances, not a.no_sky,
-                            not a.no_fog, progress=True)
+                            not a.no_fog, progress=True, per_vertex=a.per_vertex)
     Image.fromarray(img, "RGB").save(out, optimize=True)
     print("wrote %s (%d items)" % (out, n))
     return 0
