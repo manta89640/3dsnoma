@@ -35,8 +35,9 @@ What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md 
     cylinders).
   - for speed (NG3D version 2): positions as s16 steps of 1/12 unit about each buffer's origin
     (VA_POS16), static lighting baked into the vertex colours of every lit material whose colours no
-    animation drives (MAT_PRELIT, no normals where nothing else needs them), the cells' visibility
-    rows (CVIS, from the host tool ng3d-pvs: TOOL, default build-host/ng3d-pvs).
+    animation drives, but the windmills' (MAT_PRELIT, no normals where nothing else needs them;
+    LIVE_LIT_PLACED), the cells' visibility rows (CVIS, from the host tool ng3d-pvs: TOOL, default
+    build-host/ng3d-pvs).
 The package is baked: after writing it, TOOL UNBAKED OUT runs (the renderer's ng3d-bake, default
 build-host/ng3d-bake, which converts the GX texels to PICA ones offline), with UNBAKED =
 DATA/wuhu/NAME.unbaked.ng3d (kept with --keep-raw: tools/g3d/preview.py reads GX texels) and OUT =
@@ -701,14 +702,25 @@ CLR0_STAGED = (("WS2_common_island", "WS2_common_island"), ("WS2_common_island_V
                ("WS2_common_sea", "WS2_common_sea_nami"))
 
 
-def live_lit_materials(isl):
+# models placed turned that keep their lighting live (PMP class, model): a model's lighting is baked
+# once, at its rest orientation, so every instance would carry that one. The eight windmills stand
+# 6-87 degrees apart about y (and their blades turn): baked, six of them were lit from the wrong
+# side, 19-42 colour levels off on average and up to 122 (the windmill is 96 vertices). The models
+# moving along world routes (cars, cruisers, the liner, the airship, birds, whales) and the
+# balloons (3-4 levels off) are baked: their light turns with them (docs/wuhu.md).
+LIVE_LIT_PLACED = ((18, "WS2_common_windmill"),)
+
+
+def live_lit_materials(isl, wsr=None):
     """(model, material) whose channel colours (material or ambient, CLR0 targets 0-3) a staged
-    CLR0 animates."""
+    CLR0 animates, and (given the extraction) every material of LIVE_LIT_PLACED's models."""
     out = set()
     for model, anim in CLR0_STAGED:
         for mname, targets in isl.anims["CLR0"][anim].materials.items():
             if any(t in (0, 1, 2, 3) for t in targets):
                 out.add((model, mname))
+    for cls, model in LIVE_LIT_PLACED if wsr is not None else ():
+        out |= {(model, m.name) for m in wsr.brres(SA, CLASSES[cls][2]).models[model].materials}
     return out
 
 
@@ -723,7 +735,7 @@ class Stager:
         lighting = convert.Lighting([(l["kind"], l["position"], l["direction"], l["rgba"]) for l in self.lights],
                                     {ls["id"]: (ls["ambient"], ls["lights"]) for ls in self.light_sets}) \
             if prelit else None
-        self.keep_lit = live_lit_materials(self.island)
+        self.keep_lit = live_lit_materials(self.island, wsr)
         self.cv = convert.Converter(self.pkg, lighting, self.keep_lit, pos16)
         self.cells = convert.MeshSet(self.cv)
         self.inv = OrderedDict()           # the inventory written next to the package
@@ -1335,9 +1347,6 @@ class Stager:
         pkg, e = self.pkg, self.pkg.env
         n = len(pkg.cells)
         ncx, ncz, x0, z0 = e.n_cells_x, e.n_cells_z, e.grid_origin[0], e.grid_origin[1]
-        out = [b"PVSI", struct.pack("<4I", 1, n, PVS_FACE, 0)]
-        for c in pkg.cells:
-            out.append(struct.pack("<6f3fI", *c.bbox, *c.lod_distance, c.n_lods))
         sets = []
         for ci, c in enumerate(pkg.cells):
             masks = {}
@@ -1350,7 +1359,8 @@ class Stager:
                 m = pkg.materials[pkg.batches[b].material]
                 T = batch_triangles(pkg, b)
                 sets.append((ci, 1, mask, m.cull, T))
-                if occludes(m):
+                # (a detail batch hides nothing: beyond Env::detail_distance from it it isn't drawn)
+                if occludes(m) and not pkg.batches[b].flags & ng3d.BATCH_DETAIL:
                     sets.append((ci, 0, mask, m.cull, T))
         # the open sea (the sea model, as it stands): an occluder drawn whatever the cells' levels
         sea = pkg.models[e.sea_model]
@@ -1361,10 +1371,6 @@ class Stager:
                 M = np.eye(4)
                 M[:3] = np.array(pkg.nodes[sea.first_node + bt.node].bind)
                 sets.append((0xFFFFFFFF, 0, 7, m.cull, batch_triangles(pkg, b, M)))
-        out.append(struct.pack("<I", len(sets)))
-        for ci, kind, mask, cull, T in sets:
-            out.append(struct.pack("<5I", ci, kind, mask, cull, len(T)))
-            out.append(np.ascontiguousarray(T, "<f4").tobytes())
         # the eyes: over every floor of a column grid, up to PVS_MAX_HEIGHT
         tris, attrs, normals = kcl
         lo, hi = tris.min(1), tris.max(1)
@@ -1397,6 +1403,22 @@ class Stager:
                                 y = min(fy + max(2.5, h * PVS_MAX_HEIGHT), top)
                                 if y > fy:
                                     eyes.append((iz * ncx + ix, x, y, z))
+        # where a cell's eye may be (what its detail levels are picked from): x/z its square of the
+        # grid, the columns' gaps to its edges included; y the eyes' range
+        ey = {}
+        for c, _, y, _ in eyes:
+            lo_y, hi_y = ey.get(c, (y, y))
+            ey[c] = (min(lo_y, y), max(hi_y, y))
+        out = [b"PVSI", struct.pack("<4I", 2, n, PVS_FACE, 0)]
+        for ci, c in enumerate(pkg.cells):
+            cx0, cz0 = x0 + (ci % ncx) * CELL, z0 + (ci // ncx) * CELL
+            lo_y, hi_y = ey.get(ci, (0.0, 0.0))
+            out.append(struct.pack("<6f3fI6f", *c.bbox, *c.lod_distance, c.n_lods, cx0, lo_y, cz0, cx0 + CELL, hi_y,
+                                   cz0 + CELL))
+        out.append(struct.pack("<I", len(sets)))
+        for ci, kind, mask, cull, T in sets:
+            out.append(struct.pack("<5I", ci, kind, mask, cull, len(T)))
+            out.append(np.ascontiguousarray(T, "<f4").tobytes())
         out.append(struct.pack("<I", len(eyes)))
         out.append(b"".join(struct.pack("<I3f", c, x, y, z) for c, x, y, z in eyes))
         os.makedirs(workdir, exist_ok=True)

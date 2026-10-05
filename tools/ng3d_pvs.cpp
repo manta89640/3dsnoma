@@ -7,11 +7,14 @@
 //   ng3d-pvs in.pvsi out.bin
 //
 // Conservative in what it hides, as far as sampling allows:
-//   * occluders are opaque triangles that write depth and have no alpha test (the input says which),
-//     drawn as their material culls them (a back-face-culled triangle seen from behind hides nothing);
-//   * a cell draws one of its detail levels, picked by the eye's distance to its box: from a cell's
-//     eyes, all the levels its distances allow are possible, so a cell occludes a pixel only as far
-//     as the farthest of them (a level that doesn't cover the pixel: not at all);
+//   * occluders are opaque triangles that write depth and have no alpha test, and are drawn at any
+//     distance (not BATCH_DETAIL: the input says which), drawn as their material culls them (a
+//     back-face-culled triangle seen from behind hides nothing);
+//   * a cell draws one of its detail levels, picked by the eye's distance to its box: from anywhere
+//     a cell's eye may be (its eyes' box, and the region the input gives: the cell's square of the
+//     grid, the gaps between the eyes' columns and its edges included), all the levels its
+//     distances allow are possible, so a cell occludes a pixel only as far as the farthest of them
+//     (a level that doesn't cover the pixel: not at all);
 //   * the occluders' depth is eroded (the farthest of each pixel's 3x3 neighbourhood) before targets
 //     are tested, so a gap narrower than a pixel lets them through; faces are a little wider than
 //     90 degrees and overlap;
@@ -20,8 +23,9 @@
 // The eyes must cover where the camera can be: a grid over each cell at heights from the ground up
 // to the table's height (the stager makes them from the collision).
 //
-// Input (little-endian): "PVSI", u32 version 1, u32 n_cells, u32 face_res, u32 threads,
-//   per cell: f32 bbox[6], f32 lod_distance[3], u32 n_lods,
+// Input (little-endian): "PVSI", u32 version (1 or 2), u32 n_cells, u32 face_res, u32 threads,
+//   per cell: f32 bbox[6], f32 lod_distance[3], u32 n_lods, (version 2) f32 eye_region[6] (min xyz,
+//     max xyz: where the cell's eye may be, the levels' distances measured from it),
 //   u32 n_sets, per set: u32 cell (~0: drawn always, not a cell's), u32 kind (0 occluder, 1 target),
 //     u32 level mask (bit l: drawn at level l), u32 cull (GX: 0 none, 1 front, 2 back), u32 n_tris,
 //     f32 xyz[n_tris][3][3],
@@ -59,6 +63,7 @@ struct Tri {
 struct Cell {
     float box[6], lod[3];
     u32 n_lods;
+    float region[6] = {INFINITY, INFINITY, INFINITY, -INFINITY, -INFINITY, -INFINITY};  // where its eye may be
     std::vector<Tri> occ, tgt;  // occluders (with their level masks), targets (all levels)
 };
 
@@ -222,13 +227,18 @@ bool read_input(const char* path, Input* in) {
     };
     try {
         char magic[4];
-        if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "PVSI", 4) || u() != 1)
+        if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "PVSI", 4))
+            throw 1;
+        const u32 version = u();
+        if (version != 1 && version != 2)
             throw 1;
         in->n_cells = u(), in->res = u(), in->threads = u();
         in->cells.resize(in->n_cells);
         for (Cell& c : in->cells) {
             fl(c.box, 6), fl(c.lod, 3);
             c.n_lods = u();
+            if (version >= 2)
+                fl(c.region, 6);
         }
         const u32 n_sets = u();
         for (u32 s = 0; s < n_sets; s++) {
@@ -296,7 +306,8 @@ void row_of(const Input& in, u32 i, std::vector<u8>* row, Stats* st) {
     if (eyes.empty()) {  // (nowhere to stand: the row doesn't hide anything)
         std::fill(vis.begin(), vis.end(), 1);
     } else {
-        float region[6] = {INFINITY, INFINITY, INFINITY, -INFINITY, -INFINITY, -INFINITY};
+        float region[6];
+        memcpy(region, ci.region, sizeof region);
         for (const V3& e : eyes) {
             const float p[3] = {e.x, e.y, e.z};
             for (int a = 0; a < 3; a++)

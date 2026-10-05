@@ -15,13 +15,13 @@ Numbers are measured on the PAL disc (SP2P01) unless marked est.
 - `ROOT` is the extraction of your Wii Sports Resort disc (its `files/` is the disc's root);
   default `../wii-sports-extract/wii-sports-resort` beside this repository.
 - `DATA` is the port's data directory (`tools/stage_data.py`'s, `sdmc:/3ds/noma` on the 3DS). The
-  package goes to `DATA/wuhu/NAME.ng3d` (NAME `island` unless `--name` says otherwise; 12,283,648
+  package goes to `DATA/wuhu/NAME.ng3d` (NAME `island` unless `--name` says otherwise; 12,284,032
   bytes), and `DATA/wuhu/NAME.json` records what went in: classes, counts, decisions, sizes, the
   checks below. The package is NG3D version 2 (`engine/g3d/ng3d_format.h`): an engine that reads
   version 1 refuses it. The speed round staged it as `island_v2` beside the version 1 `island.ng3d`
   (13,266,560 bytes) the engine read until its version 2 loader came.
 - The package is baked: the stager writes it with GX texels to `DATA/wuhu/NAME.unbaked.ng3d`
-  (11,356,528 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
+  (11,356,912 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
   `build-host/ng3d-bake` unless `--bake` names another), checks that no texture is left in GX's
   format, and deletes the unbaked file unless `--keep-raw` (keep it for `tools/g3d/preview.py`,
   which reads GX texels). Without the tool it stops and says how to build it: the 3DS refuses an
@@ -58,7 +58,7 @@ The baked file's sections (version 1's in brackets):
 | section | records | bytes | what |
 |---|---|---|---|
 | TDAT | 92 textures | 5,158,912 | PICA texels with their mip levels (TEXS: the records); 4,229,920 bytes as GX texels unbaked |
-| VDAT | 340 vertex buffers | 2,946,608 (4,012,112) | 172,046 vertices, 12-28 bytes each, 125,811 of them 16 (VTXB: the records) |
+| VDAT | 340 vertex buffers | 2,947,008 (4,012,112) | 172,046 vertices, 12-28 bytes each, 125,715 of them 16 (VTXB: the records) |
 | BLOB | 5 KCL files | 2,961,008 | the island's collision, as shipped (COLL: the records) |
 | IDAT | 466,851 indices | 933,702 (863,706) | u16 triangle lists (a cell's levels share vertex buffers and repeat some indices) |
 | KEYS | 9,870 keys | 118,440 | animation keys (TRAK: 477 tracks, ANIM: 20 animations) |
@@ -70,7 +70,7 @@ The baked file's sections (version 1's in brackets):
 | CVIS | 120 rows | 1,800 | the cells' visibility rows (15 bytes a cell) |
 | the other 15 | | 44,316 | strings, texture/vertex-buffer/collision records, texture matrices, models, cells and their batch lists, instances, animations and tracks, environment, lights, light sets, fogs |
 
-The header, the section table and alignment take the rest: 12,283,648 bytes against version 1's
+The header, the section table and alignment take the rest: 12,284,032 bytes against version 1's
 13,266,560.
 
 At run time (est., from the package): textures 5.16 MB in their PICA formats (all levels; the
@@ -320,14 +320,18 @@ Version 2 of the format makes a vertex cheaper to fetch and to shade:
   engine's World lights the package's point lights from the direction toward the origin, up to 6
   degrees off on the east beach, 23 on Wedge Island: the bake is GX's), alpha the source's times
   the ambient's. Its channel words then say unlit with the vertex colour (colour and alpha), its
-  light set is dropped. 91 of the 110 materials; lit at run time stay the waves (`mt_ze_w_nami`,
-  `nami2`: their CLR0 drives the material alpha). The moving models are lit as they stand at rest,
+  light set is dropped. 90 of the 110 materials; lit at run time stay the waves (`mt_ze_w_nami`,
+  `nami2`: their CLR0 drives the material alpha) and the windmills (`mt_Windmill`: a model's
+  lighting is baked once, at its rest orientation, and the eight windmills stand 6-87 degrees apart
+  about y, so six of them would be lit from the wrong side, 19-42 colour levels off on average and
+  up to 122; their blades turn too; 96 vertices). The moving models are lit as they stand at rest,
   unplaced: their light turns with them (a balloon in the beach view is the one visible
-  difference).
+  difference in the views; a car or cruiser heading the other way from its rest has its lit side
+  away from the sun).
 - **Only what a material reads**: normals only where a material needs them (lit at run time, or a
   texgen from the normal: the town's walls, the harbour's ship, `mt_DriveHead` on Wedge Island), vertex
-  colours only where a channel reads them (none on the open sea). 125,811 of the 172,046 vertices
-  are 16 bytes (position, colour, one UV), 44,129 20, 547 12, 1,559 28; version 1's were 20-36.
+  colours only where a channel reads them (none on the open sea). 125,715 of the 172,046 vertices
+  are 16 bytes (position, colour, one UV), 44,225 20, 547 12, 1,559 28; version 1's were 20-36.
 
 The speed round's measurements (a model of the PICA's vertex units from the shader's instruction
 counts, not hardware) put its vertex work at the larger part of a frame's GPU time (the town view:
@@ -483,9 +487,11 @@ degrees wide) at eye points: a column every 400 units over each cell, at every f
 has there (ground or water, not the invisible fences, not a floor under something solid -- the sea
 plane under the island), 2.5, 40 and 80 units over it and under whatever is above; 36,243 eyes,
 7 s on all cores. Occluders are the cells' opaque, depth-writing triangles without alpha test, as
-their materials cull them, and the open sea; a cell occludes a pixel only as far as the farthest of
-the detail levels its distance from the eye's cell allows (a level switch can't uncover what the
-row hides). The occluders' depth is eroded to the farthest of each 3x3 neighbourhood before a
+their materials cull them, but not their detail batches (gone beyond `Env::detail_distance`: the
+kayaks and parasols), and the open sea; a cell occludes a pixel only as far as the farthest of
+the detail levels its distance from anywhere in the eye's cell allows (its square of the grid, the
+gaps between the eye columns and its edges included: a level switch can't uncover what the row
+hides). The occluders' depth is eroded to the farthest of each 3x3 neighbourhood before a
 cell's triangles (every level, translucent and cut-out ones too, a pixel each corner as well as the
 pixels covered) are tested. Neighbouring cells always see each other; cells without geometry are
 set.
@@ -538,7 +544,7 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 - `ng3d.py check`: the unbaked package (every reference in range, every payload inside its section
   and of the size its levels or layout take, VA_POS16 buffers with an origin and a scale, batch
   flags, the CVIS rows' size, key frames in order, marker kinds; read and written again, the same
-  11,356,528 bytes) and the baked one (the same records, laid out by ng3d-bake). Two staging runs
+  11,356,912 bytes) and the baked one (the same records, laid out by ng3d-bake). Two staging runs
   give byte-identical files.
 - The engine's loader and world on the baked package (`NOMA_SELFTEST=g3d` with
   `NOMA_G3D_PACKAGE`, host; `engine/g3d/package.cpp` reads version 2's fields): loaded and checked
@@ -565,10 +571,10 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
   | | views: draws | triangles | vertices | walking: draws | triangles | vertices (lit at run time) |
   |---|---|---|---|---|---|---|
   | version 1 | 247.0 | 53,345 | 68,586 | 242.7 | 54,347 | 70,158 (68,151) |
-  | version 2, World as it is | 148.1 | 37,773 | 48,684 | 180.4 | 52,073 | 67,077 (194) |
-  | + detail distance | 137.7 | 35,113 | 44,729 | 165.5 | 47,646 | 60,560 (103) |
-  | + each cell batch by its box | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (65) |
-  | + visibility rows | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (65) |
+  | version 2, World as it is | 148.1 | 37,773 | 48,684 | 180.4 | 52,073 | 67,077 (378) |
+  | + detail distance | 137.7 | 35,113 | 44,729 | 165.5 | 47,646 | 60,560 (287) |
+  | + each cell batch by its box | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
+  | + visibility rows | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
 
   (Vertices: the distinct ones each draw indexes, what the vertex shader runs on.) A walking
   frame's 35,664 triangles and 120.5 draws: the full island near 14,200 (40 draws, its detail
