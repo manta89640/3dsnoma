@@ -15,9 +15,10 @@
 // walking Mii comes to a stop and a falling one lands); the camera follows it (the camera stick, L and
 // R, the D-pad and Y: scene.cpp's controls); the World's animations go on and it is seen from that
 // camera; the Mii stands where the player does, times k, its clip from the player's state and its
-// stride from the distance walked. The draw: the camera's projection and the viewport into GX (they
-// place the native draws as they place the Mii's), the World's opaque pass (sky, island, props) then
-// the Mii's, the World's translucent pass then the Mii's.
+// stride from the distance walked. The draw: the clear colour (the sky's haze, for the next frame;
+// the channel's black again when the island goes), the camera's projection and the viewport into GX
+// (they place the native draws as they place the Mii's), the World's opaque pass (sky, island, props)
+// then the Mii's, the World's translucent pass then the Mii's.
 //
 // NOMA_WUHU_START=<marker name>: start at another of the package's markers (a landmark, a warp place,
 // or a camera preset view_*, whose target the Mii then stands at, facing away from its eye: the
@@ -40,6 +41,7 @@
 #include "engine/wuhu/island_load.h"
 #include "engine/wuhu/island_mii.h"
 #include "engine/wuhu/player.h"
+#include "noma_decomp.h"
 
 namespace engine::wuhu {
 
@@ -58,6 +60,25 @@ constexpr f32 DEG = 3.14159265f / 180.0f;
 constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
 
 f32 ms_between(u64 a, u64 b) { return (f32)(b - a) / 1000.0f; }
+
+// The colour the frame's copy clears the EFB to for the next frame (GXSetCopyClear, RGBA; alpha 0
+// and the depth cleared to the far end, as the channel does). The channel's own is black (every
+// GXSetCopyClear of its frame and video paths); the island's is its first fog in use (docs/wuhu.md:
+// the package has no clear colour of its own, the scene sets it), fog 1's #83D5FF, which the gap
+// under the sky dome's lower edge then meets the fogged sea in, as tools/g3d/preview.py draws it.
+const u32 CHANNEL_CLEAR = 0;
+void set_clear(u32 rgba) {
+    GFRAME(0x10);
+    GS(u32, 0x8) = rgba;
+    g::GXSetCopyClear((u32)&GS(u32, 0x8), 0xFFFFFF);
+}
+// (0 if no fog is in use: the channel's black stays)
+u32 clear_of(const Package& p) {
+    for (const fmt::Fog& f : p.fogs())
+        if (f.type != fmt::FOG_NONE)
+            return (u32)f.rgba[0] << 24 | (u32)f.rgba[1] << 16 | (u32)f.rgba[2] << 8;
+    return CHANNEL_CLEAR;
+}
 
 class Island : public IslandContent {
 public:
@@ -85,6 +106,7 @@ private:
     std::unique_ptr<Player> player_;
     std::unique_ptr<FollowCamera> camera_;
     bool ready_ = false, prepared_ = false;
+    u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
     u64 start_us_ = 0;
     u32 frame_ = 0;  // the World's clock (frames since the island came up)
@@ -96,6 +118,8 @@ Island::~Island() {
     // the Mii's guest objects (the content's only ones); then the package's GPU resources, before
     // the package (native_draw.h), and what reads the package and the collision before them
     mii_.reset();
+    if (clear_ != CHANNEL_CLEAR)
+        set_clear(CHANNEL_CLEAR);
     if (prepared_)
         engine::g3d::native_draw_release(*package_);
     world_.reset();
@@ -148,6 +172,7 @@ void Island::finish_loading() {
     package_ = std::move(l.package);
     collision_ = std::move(l.collision);
     k_ = package_->env().mii_units_per_unit;
+    clear_ = clear_of(*package_);
 
     const u64 t0 = guest::host_time_us();
     world_ = std::make_unique<engine::g3d::World>(*package_);
@@ -285,6 +310,9 @@ void Island::log_frame() {
 void Island::draw_opaque() {
     if (!world_)
         return;
+    // (every frame: the channel's texture copies may set a clear colour of their own)
+    if (clear_ != CHANNEL_CLEAR)
+        set_clear(clear_);
     mii_->view();
     world_->emit(engine::g3d::Pass::OPAQUE);
     mii_->draw_opaque();

@@ -64,21 +64,23 @@ struct Strings {
 IslandMii::IslandMii() {}
 
 IslandMii::~IslandMii() {
-    // the reverse of make_step's order
-    if (step_ >= 5)
-        g3d::sound_handles_dtor(handles_);
-    if (step_ >= 4)
-        g3d::actors_dtor(actors_);
-    if (step_ >= 3)
-        g3d::shadow_res_dtor(shadow_res_);
-    if (step_ >= 2) {
-        g3d::root_unregister(guest::load32(root_word_));
-        g3d::g3d_destroy(root_word_);
-    }
-    if (step_ >= 1)
-        g3d::sound3d_dtor(sound3d_);
-    if (block_)
+    // the reverse of make_step's order (nothing was made if the block couldn't be had: step_ is
+    // then STEPS, the addresses 0)
+    if (block_) {
+        if (step_ >= 5)
+            g3d::sound_handles_dtor(handles_);
+        if (step_ >= 4)
+            g3d::actors_dtor(actors_);
+        if (step_ >= 3)
+            g3d::shadow_res_dtor(shadow_res_);
+        if (step_ >= 2) {
+            g3d::root_unregister(guest::load32(root_word_));
+            g3d::g3d_destroy(root_word_);
+        }
+        if (step_ >= 1)
+            g3d::sound3d_dtor(sound3d_);
         g::operator_delete(block_);
+    }
     std::string heap;
     u32 free_after = g3d::heap_free(&heap);
     guest::log("wuhu: Mii: gone; heap %s: %u bytes free (%u before it)", heap.c_str(), (unsigned)free_after,
