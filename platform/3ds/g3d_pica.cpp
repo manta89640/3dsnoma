@@ -192,10 +192,58 @@ u32 s_fog_regs[6];
 const u32 k_unit_border[3] = {GPUREG_TEXUNIT0_BORDER_COLOR, GPUREG_TEXUNIT1_BORDER_COLOR, GPUREG_TEXUNIT2_BORDER_COLOR};
 const u32 k_unit_type[3] = {GPUREG_TEXUNIT0_TYPE, GPUREG_TEXUNIT1_TYPE, GPUREG_TEXUNIT2_TYPE};
 
+// The commands, written in place: libctru's GPUCMD_Add, a call and a copy loop for every register
+// written (26 calls an item; with newlib's byte-wise memcmp in the caches' compares, nearly half of the
+// backend's instructions on the 3DS), as inline writes of the same words -- the first parameter, the
+// header with the count less one, the other parameters, a zero to an even count, more than 256
+// parameters split as GPUCMD_Add splits them -- and the same stop (svcBreak) when the list has no room.
+inline void cmd_check(u32 n) {
+    if (gpuCmdBufOffset + n + 1 > gpuCmdBufSize)
+        svcBreak(USERBREAK_PANIC);
+}
+// one register (mask: its bytes written)
+inline void cmd_one(u32 header, u32 value) {
+    cmd_check(1);
+    u32* b = gpuCmdBuf + gpuCmdBufOffset;
+    b[0] = value, b[1] = header;
+    gpuCmdBufOffset += 2;
+}
+inline void cmd_write(u32 reg, u32 value) { cmd_one(GPUCMD_HEADER(0, 0xF, reg), value); }
+inline void cmd_masked(u32 reg, u32 mask, u32 value) { cmd_one(GPUCMD_HEADER(0, mask, reg), value); }
+// n parameters (n >= 1) to one register, or to it and the ones after it (incremental)
+inline void cmd_add(u32 header, const u32* param, u32 n) {
+    do {
+        const u32 k = n > 256 ? 256 : n;
+        cmd_check(k);
+        u32* b = gpuCmdBuf + gpuCmdBufOffset;
+        b[0] = param[0];
+        b[1] = header | (k - 1) << 20;
+        for (u32 i = 1; i < k; i++)
+            b[1 + i] = param[i];
+        u32 len = k + 1;
+        if (!(k & 1))
+            b[len++] = 0;
+        gpuCmdBufOffset += len;
+        param += k, n -= k;
+        if (header >> 31)
+            header += k;
+    } while (n);
+}
+inline void cmd_writes(u32 reg, const u32* values, u32 n) { cmd_add(GPUCMD_HEADER(0, 0xF, reg), values, n); }
+inline void cmd_incremental(u32 reg, const u32* values, u32 n) { cmd_add(GPUCMD_HEADER(1, 0xF, reg), values, n); }
+// the state caches' compares, a word at a time
+template <u32 N>
+inline bool same_words(const u32 (&a)[N], const u32 (&b)[N]) {
+    u32 d = 0;
+    for (u32 i = 0; i < N; i++)
+        d |= a[i] ^ b[i];
+    return d == 0;
+}
+
 // The command list is gx_pica's, one for the frame (C3D_Init's 2 MB), and a full one stops the
-// program (GPUCMD_Add breaks): an item isn't drawn unless the list keeps room for the most words an
-// item takes (its state, uniforms, draw and fog pass, ~600) and for the GX draws still to come in
-// the frame (the room's whole frame fits in far less). The island's packets take at most 62,000
+// program (cmd_check, as GPUCMD_Add): an item isn't drawn unless the list keeps room for the most
+// words an item takes (its state, uniforms, draw and fog pass, ~600) and for the GX draws still to
+// come in the frame (the room's whole frame fits in far less). The island's packets take at most 62,000
 // words, 24,000 a frame on average (host check, 21 views). NOMA_G3D_STATS counts the items not
 // drawn; the first is logged.
 const u32 ITEM_WORDS = 2048, GX_RESERVE_WORDS = 64u << 10;
@@ -521,7 +569,7 @@ void PicaBackend::release(g3::Package& pkg) {
 void PicaBackend::uni(int reg, const f32* v) {
     u32 w[4];
     memcpy(&w[3], &v[0], 4), memcpy(&w[2], &v[1], 4), memcpy(&w[1], &v[2], 4), memcpy(&w[0], &v[3], 4);
-    if (!memcmp(w, uv_[reg], sizeof(w)))
+    if (same_words(w, uv_[reg]))
         return;
     memcpy(uv_[reg], w, sizeof(w));
     if (reg < 64)
@@ -545,8 +593,8 @@ void PicaBackend::upload_uniforms() {
                 hi &= ~(1u << (j - 64));
             j++;
         }
-        GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
-        GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, &uv_[i][0], 4 * (j - i));
+        cmd_write(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
+        cmd_writes(GPUREG_VSH_FLOATUNIFORM_DATA, &uv_[i][0], 4 * (j - i));
         st_.uniform_vectors += j - i;
     }
     dirty_lo_ = 0, dirty_hi_ = 0;
@@ -556,7 +604,7 @@ void PicaBackend::set_bools(u32 bools) {
     if (bools == bools_)
         return;
     bools_ = bools;
-    GPUCMD_AddWrite(GPUREG_VSH_BOOLUNIFORM, 0x7FFF0000 | bools);
+    cmd_write(GPUREG_VSH_BOOLUNIFORM, 0x7FFF0000 | bools);
 }
 
 // the light set's lights into the uniforms (the loop's count in i0: lights - 1, from 0, a light
@@ -577,7 +625,7 @@ void PicaBackend::set_lights(const g3::Packet& p, int set) {
     const u32 i0 = (n ? n - 1 : 0) | 2u << 16;
     if (i0 != int0_) {
         int0_ = i0;
-        GPUCMD_AddWrite(GPUREG_VSH_INTUNIFORM_I0, i0);
+        cmd_write(GPUREG_VSH_INTUNIFORM_I0, i0);
     }
 }
 
@@ -587,11 +635,11 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     shaderProgramConfigure(&prog_, true, false);
     shaderInstance_s* vsh = prog_.vertexShader;
     for (u32 i = 0; i < vsh->numFloat24Uniforms; i++)
-        GPUCMD_AddIncrementalWrites(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
-    GPUCMD_AddWrite(GPUREG_ATTRIBBUFFERS_LOC, r.base >> 3);
+        cmd_incremental(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
+    cmd_write(GPUREG_ATTRIBBUFFERS_LOC, r.base >> 3);
     static const u32 k_zero[33] = {};  // (buffers 1-11: none)
-    GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
-    GPUCMD_AddWrite(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
+    cmd_incremental(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
+    cmd_write(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
     // The depth, complemented. The GX path's draws output z (clip space) and the depth map makes the
     // buffer's depth -z/w (citro3d's default: scale -1, offset 0). Near 1, as most of the island is
     // (1 - near/distance, near 15 Mii units), that ratio of two nearly equal 24-bit floats is off by
@@ -605,8 +653,8 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     // 0.03-0.4 units over a ground vertex and pulled 1/1024 toward the eye came out behind the
     // ground at 23 % of 366,343 ground vertices with z, at none with z' (as with exact arithmetic);
     // overlays are pulled so, at most 4 units at their furthest corner (native_draw.h overlay_pull).
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
     memset(uv_, 0xFF, sizeof(uv_));  // (a NaN: no value compares equal to it)
     dirty_lo_ = 0, dirty_hi_ = 0;
     bools_ = int0_ = ~0u;
@@ -632,13 +680,13 @@ void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
     if (vb.layout != layout_) {
         layout_ = vb.layout;
         const u32 fmt_words[2] = {L.format_low, L.format_high};
-        GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
-        GPUCMD_AddMaskedWrite(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
-        GPUCMD_AddWrite(GPUREG_VSH_NUM_ATTR, 4);
+        cmd_incremental(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
+        cmd_masked(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
+        cmd_write(GPUREG_VSH_NUM_ATTR, 4);
         const u32 perm[2] = {L.permutation, 0};
-        GPUCMD_AddIncrementalWrites(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
+        cmd_incremental(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
         for (u32 i = 0; i < L.n_fixed; i++) {
-            GPUCMD_AddWrite(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
+            cmd_write(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
             C3D_ImmSendAttrib(L.fixed[i][0], L.fixed[i][1], L.fixed[i][2], L.fixed[i][3]);
         }
         vbuf_ = -1;
@@ -646,7 +694,7 @@ void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
     if (vbuf != vbuf_) {
         vbuf_ = vbuf;
         const u32 buf[3] = {vb.offset, L.buf_config1, L.buf_config2};
-        GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
+        cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
     }
 }
 
@@ -656,15 +704,15 @@ void PicaBackend::set_texenv(const tev::Combiners& comb) {
     for (int i = 0; i < 6; i++) {
         u32 w[5];
         tev::combiner_words(comb.stage[i], w);
-        if (!memcmp(w, texenv_[i], sizeof(w)))
+        if (same_words(w, texenv_[i]))
             continue;
         memcpy(texenv_[i], w, sizeof(w));
-        GPUCMD_AddIncrementalWrites(GPUREG_TEXENV0_SOURCE + (i >= 4 ? i + 2 : i) * 8, w, 5);
+        cmd_incremental(GPUREG_TEXENV0_SOURCE + (i >= 4 ? i + 2 : i) * 8, w, 5);
     }
     const u32 buf = (u32)(comb.buf_rgb & 0xF) << 8 | (u32)(comb.buf_a & 0xF) << 12;
     if (buf != texenv_buf_) {
         texenv_buf_ = buf;
-        GPUCMD_AddMaskedWrite(GPUREG_TEXENV_UPDATE_BUFFER, 0x7, buf);
+        cmd_masked(GPUREG_TEXENV_UPDATE_BUFFER, 0x7, buf);
     }
 }
 
@@ -677,37 +725,37 @@ void PicaBackend::set_units(const UnitRes units[3]) {
         if (!units[u].on)
             continue;
         on |= 1u << u;
-        if (!memcmp(units[u].regs, units_[u], sizeof(units_[u])))
+        if (same_words(units[u].regs, units_[u]))
             continue;
         memcpy(units_[u], units[u].regs, sizeof(units_[u]));
-        GPUCMD_AddIncrementalWrites(k_unit_border[u], units[u].regs, 5);
-        GPUCMD_AddWrite(k_unit_type[u], units[u].regs[5]);
+        cmd_incremental(k_unit_border[u], units[u].regs, 5);
+        cmd_write(k_unit_type[u], units[u].regs[5]);
         changed = true;
     }
     if (!changed && on == unit_config_)
         return;
     unit_config_ = on;
-    GPUCMD_AddMaskedWrite(GPUREG_TEXUNIT_CONFIG, 0xB, 1u << 12 | on);
-    GPUCMD_AddMaskedWrite(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
-    GPUCMD_AddWrite(GPUREG_TEXUNIT0_SHADOW, 1);
+    cmd_masked(GPUREG_TEXUNIT_CONFIG, 0xB, 1u << 12 | on);
+    cmd_masked(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
+    cmd_write(GPUREG_TEXUNIT0_SHADOW, 1);
 }
 
 // the pixel pipeline's registers that differ (as citro3d's effect binding writes them)
 void PicaBackend::set_pixel(const u32 px[6]) {
     if (px[0] != pixel_[0])
-        GPUCMD_AddWrite(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
+        cmd_write(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
     if (px[1] != pixel_[1]) {
-        GPUCMD_AddWrite(GPUREG_DEPTH_COLOR_MASK, px[1]);
-        GPUCMD_AddMaskedWrite(GPUREG_GAS_DELTAZ_DEPTH, 0x8, (u32)GPU_MAKEGASDEPTHFUNC((px[1] >> 4) & 7) << 24);
+        cmd_write(GPUREG_DEPTH_COLOR_MASK, px[1]);
+        cmd_masked(GPUREG_GAS_DELTAZ_DEPTH, 0x8, (u32)GPU_MAKEGASDEPTHFUNC((px[1] >> 4) & 7) << 24);
     }
     if (px[2] != pixel_[2])
-        GPUCMD_AddWrite(GPUREG_BLEND_FUNC, px[2]);
+        cmd_write(GPUREG_BLEND_FUNC, px[2]);
     if (px[3] != pixel_[3])
-        GPUCMD_AddMaskedWrite(GPUREG_COLOR_OPERATION, 0x7, px[3]);
+        cmd_masked(GPUREG_COLOR_OPERATION, 0x7, px[3]);
     if (px[4] != pixel_[4])
-        GPUCMD_AddWrite(GPUREG_LOGIC_OP, px[4]);
+        cmd_write(GPUREG_LOGIC_OP, px[4]);
     if (px[5] != pixel_[5])
-        GPUCMD_AddWrite(GPUREG_FACECULLING_CONFIG, px[5]);
+        cmd_write(GPUREG_FACECULLING_CONFIG, px[5]);
     memcpy(pixel_, px, sizeof(pixel_));
 }
 
@@ -715,21 +763,21 @@ void PicaBackend::set_pixel(const u32 px[6]) {
 void PicaBackend::draw_batch(const PkgRes& r, const fmt::Batch& b) {
     upload_uniforms();
     pica_native_draw_noted();
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
-    GPUCMD_AddWrite(GPUREG_RESTART_PRIMITIVE, 1);
-    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
-    GPUCMD_AddWrite(GPUREG_NUMVERTICES, b.n_indices);
-    GPUCMD_AddWrite(GPUREG_VERTEX_OFFSET, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
-    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 0);
-    GPUCMD_AddWrite(GPUREG_DRAWELEMENTS, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
-    GPUCMD_AddWrite(GPUREG_VTX_FUNC, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
+    cmd_write(GPUREG_RESTART_PRIMITIVE, 1);
+    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
+    cmd_write(GPUREG_NUMVERTICES, b.n_indices);
+    cmd_write(GPUREG_VERTEX_OFFSET, 0);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
+    cmd_masked(GPUREG_START_DRAW_FUNC0, 1, 0);
+    cmd_write(GPUREG_DRAWELEMENTS, 1);
+    cmd_masked(GPUREG_START_DRAW_FUNC0, 1, 1);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
+    cmd_write(GPUREG_VTX_FUNC, 1);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
 }
 
 // ---------------------------------------------------------------- materials
@@ -1174,10 +1222,10 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     // unit 0 left an ordinary 2D texture (a projection one samples by texcoord0w, which the GX
     // shader doesn't write)
     if (units_[0][2] != ~0u && ((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION)
-        GPUCMD_AddWrite(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
+        cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
     // the GX path's depth map (citro3d's default, which it never changes)
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
     u32 cmd_end;
     GPUCMD_GetBuffer(&cmd, &cmd_size, &cmd_end);
     pica_native_end(&prog_);
