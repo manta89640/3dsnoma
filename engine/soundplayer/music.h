@@ -18,6 +18,7 @@ struct Beat {
     bool valid = false;   // a sequence plays (a wave jingle has no sequencer: no beat)
     f32 bpm = 0;          // quarter notes a minute now (the sequence can change it as it plays)
     double beats = 0;     // quarter notes since the piece started, with the fraction
+    u32 bar = 4;          // quarter notes a bar, valid or not (engine::wuhu::music_bar_beats)
 };
 
 // Pieces start and stop cleanly, at once: no crossfades or fades in the player (a new piece cuts

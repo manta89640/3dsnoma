@@ -13,6 +13,11 @@ namespace engine::wuhu {
 // "none". The sound manager's start (music.cpp) plays our sequence for it.
 constexpr u32 WIDE_WORLD_ID = 0x1000;
 
+// Quarter notes a bar of the piece the BGM manager plays as `sound_id`, for what moves to the
+// music (the Sound Player's dances): ours says (3, a waltz); a sequence file holds no metre, so the
+// channel's own pieces are taken as 4.
+u32 music_bar_beats(u32 sound_id);
+
 // At the start, where lasting guest memory is made (engine/system/host_scene.h): the sequence and
 // what starts it are put into guest memory.
 void music_boot();

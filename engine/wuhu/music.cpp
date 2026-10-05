@@ -213,6 +213,8 @@ void test_frame() {
 
 void music_boot() { engine::system::host_scene_boot(&make_lasting); }
 
+u32 music_bar_beats(u32 sound_id) { return sound_id == WIDE_WORLD_ID ? hiroi_sekai::BAR_BEATS : 4; }
+
 void music_depart() {
     s_room = asked();
     s_room_slot = slot();

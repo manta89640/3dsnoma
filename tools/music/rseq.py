@@ -714,9 +714,13 @@ def compile_score(score):
     # Echoes, the channel's own trick (SAIZIKI_E, SHOP_MAIN, CONCIERGE_WAITING): copies of a
     # melody's track `delay`, 2 * `delay`... ticks later, panned hard left and right, quieter. Each
     # copy is the whole track delayed, its loop too (it jumps back `delay` ticks after the others,
-    # to `delay` after the loop point), so every pass of the loop, the first as well, hears the
-    # same echoes, the loop's end's carrying over into its start. The copy keeps its own pan; the
-    # track's volume changes reach it scaled by the copy's volume over the track's.
+    # to `delay` after the loop point), so it is `delay` behind its track everywhere: the first
+    # pass starts with the echo of the intro's end, every later pass with the loop end's (the same,
+    # for a score whose intro ends as its loop does). A copy looping with the others, its last
+    # notes wrapped round to the loop point, would echo the loop's end at the start of the first
+    # pass too, before that end was ever played, and the intro's end at the start of every pass.
+    # The copy keeps its own pan; the track's volume changes reach it scaled by the copy's volume
+    # over the track's.
     tracks = list(tracks)
     for i in range(len(tracks)):
         e = tracks[i].get('echo')
@@ -783,6 +787,9 @@ def header_text(data, score, end, loop, score_path, out_path, namespace):
     rel = lambda p: os.path.relpath(os.path.abspath(p), brsar.ROOT)
     tb = score.get('timebase', 96)
     tempo = score.get('tempo', 120)
+    bar = score.get('bar') or 4
+    if bar != int(bar):   # (the engine counts a bar in whole quarter notes: music_bar_beats)
+        raise MmlError('BAR_BEATS: a bar of %g quarter notes is no whole number of them' % bar)
     lines = [
         '// %s (%s): the port\'s own music, compiled to an RSEQ file' % (score.get('title', '?'),
                                                                         score.get('label', '?')),
@@ -795,9 +802,11 @@ def header_text(data, score, end, loop, score_path, out_path, namespace):
         '',
         'namespace %s {' % namespace,
         '',
-        '// its clock: TIMEBASE ticks a quarter note, TEMPO quarter notes a minute; it loops from LOOP_START',
-        '// to LOOP_END (ticks from its start): %.1f s a pass' % ((end - loop) * 60.0 / (tempo * tb)),
-        'constexpr u32 TIMEBASE = %d, TEMPO = %d, LOOP_START = %d, LOOP_END = %d;' % (tb, tempo, loop, end),
+        '// its clock: TIMEBASE ticks a quarter note, TEMPO quarter notes a minute, BAR_BEATS quarter notes',
+        '// a bar; it loops from LOOP_START to LOOP_END (ticks from its start): %.2f s a pass' % (
+            (end - loop) * 60.0 / (tempo * tb)),
+        'constexpr u32 TIMEBASE = %d, TEMPO = %d, BAR_BEATS = %d;' % (tb, tempo, bar),
+        'constexpr u32 LOOP_START = %d, LOOP_END = %d;' % (loop, end),
         'constexpr u32 SIZE = %d;  // bytes' % len(data),
         'alignas(32) const u8 RSEQ[SIZE] = {',
     ]
