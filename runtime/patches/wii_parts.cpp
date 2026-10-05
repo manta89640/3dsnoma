@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "engine/system/save.h"
 #include "noma_decomp.h"
 #include "runtime.h"
 
@@ -184,8 +185,12 @@ u32 app_Exit_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 
 
 // Leaving for another Wii program (the Wii Menu, the Mii Channel, the Wii Shop, ...: the exit
 // codes of app_Exit_Dispatch) ends the app here, as there are none. The Mii Channel (offered when
-// there's no Mii yet) is the 3DS's Mii Selector instead: the app starts again with the Mii.
+// there's no Mii yet) is the 3DS's Mii Selector instead: the app starts again with the Mii. The
+// options' save-data button ends the app this way too: its save is then erased and the app starts
+// again, at its first start (engine/system/save.h).
 void app_Exit_Dispatch(u32 r3) {
+    if (engine::save::erase_if_marked())
+        guest::platform_restart("the save data was erased: starting afresh");
     if (M2C_FIELD(r3, gp<s32>, 0x0) == 18 && guest::platform_choose_mii())
         guest::platform_quit("starting again with the chosen Mii");
     app_Exit_Dispatch_orig(r3);

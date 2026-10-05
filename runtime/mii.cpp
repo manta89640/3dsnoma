@@ -1,5 +1,6 @@
-// Miis for the Wii's face library (RFL): a 3DS Mii (from the system Mii Selector) converted to
-// the Wii's 74-byte RFLCharData, and a Mii database (/shared2/menu/FaceLib/RFL_DB.dat) holding it.
+// Miis for the Wii's face library (RFL): 3DS Miis (the system's Mii Maker database, or one from
+// the Mii Selector) converted to the Wii's 74-byte RFLCharData, and a Mii database
+// (/shared2/menu/FaceLib/RFL_DB.dat) holding them.
 //
 // RFL_DB.dat, as the channel's RFL code reads and formats it (0x1F1E0 bytes, big-endian):
 //   0x0000 "RNOD"                      0x0004 100 Mii slots, 0x4A bytes each
@@ -158,6 +159,36 @@ std::vector<u8> rfl_add_mii(const std::vector<u8>& db, const u8* mii) {
     if (slot < 0)
         slot = empty >= 0 ? empty : 99;
     memcpy(&out[4 + slot * 0x4A], mii, 0x4A);
+    rfl_seal(out);
+    return out;
+}
+
+// `db` with all of `miis` (count x 0x4A bytes, the 3DS's Mii Maker database converted) in it: a
+// Mii already there (same Mii and console ID) is updated in its own slot, a new one takes the first
+// empty slot, or with none left the first slot of a Mii that isn't in `miis`. Every other Mii stays
+// in its slot (the family may still name one the 3DS no longer has). A database this converter
+// doesn't vouch for (or none) is started afresh.
+std::vector<u8> rfl_sync_miis(const std::vector<u8>& db, const u8* miis, int count) {
+    std::vector<u8> out = rfl_database_valid(db) ? db : rfl_make_database(nullptr, 0);
+    auto slot = [&](int i) { return &out[4 + 0x4A * i]; };
+    auto empty = [&](int i) { return !slot(i)[2] && !slot(i)[3]; };  // (no name)
+    bool taken[100] = {};  // slots holding one of `miis`
+    std::vector<int> place(count, -1);
+    for (int k = 0; k < count; k++)
+        for (int i = 0; i < 100 && place[k] < 0; i++)
+            if (!taken[i] && !empty(i) && memcmp(slot(i) + 0x18, miis + 0x4A * k + 0x18, 8) == 0)
+                place[k] = i, taken[i] = true;
+    for (int k = 0; k < count; k++) {
+        for (int i = 0; i < 100 && place[k] < 0; i++)
+            if (!taken[i] && empty(i))
+                place[k] = i, taken[i] = true;
+        for (int i = 0; i < 100 && place[k] < 0; i++)
+            if (!taken[i])
+                place[k] = i, taken[i] = true;
+    }
+    for (int k = 0; k < count; k++)
+        if (place[k] >= 0)
+            memcpy(slot(place[k]), miis + 0x4A * k, 0x4A);
     rfl_seal(out);
     return out;
 }

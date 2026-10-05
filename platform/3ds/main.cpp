@@ -7,9 +7,11 @@
 // pointer leaves the screen, as a remote put down does. The remote's HOME button has no
 // counterpart: the Wii's HOME Button Menu isn't part of the port (engine/system).
 #include <3ds.h>
+#include <citro3d.h>
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +89,13 @@ static const u64 LOG_FLUSH_TICKS = SYSCLOCK_ARM11 / 2;
 static u64 s_log_flushed;  // (ticks)
 static bool s_log_dirty;
 
+// The bottom screen: a status area of STATUS_ROWS rows at the top, drawn once a second (frames a
+// second and where a frame's time goes, as the Jak 1 port shows them), and the log below it.
+static PrintConsole s_status_con, s_log_con;
+static const int STATUS_ROWS = 2;
+static bool s_status_on;
+static void status_update(u64 now);
+
 static void log_flush_due(u64 now) {  // (with s_log_lock)
     if (s_log && s_log_dirty && now - s_log_flushed >= LOG_FLUSH_TICKS) {
         fflush(s_log);
@@ -97,6 +106,7 @@ static void log_flush_due(u64 now) {  // (with s_log_lock)
 
 void platform_log_idle() {
     pica_watchdog();
+    status_update(svcGetSystemTick());
     if (!s_log_dirty)
         return;
     LightLock_Lock(&s_log_lock);
@@ -202,10 +212,25 @@ void platform_audio_push(const s16* lr, u32 frames) {
     }
 }
 
-// ---- Miis: the channel's face library reads the Wii Mii database; the Mii the player picks in
-// the 3DS Mii Selector (on the first start, when SELECT is held while starting, or when the
-// channel would send the player to the Mii Channel) goes into it, with the Miis already there
+// ---- Miis: the channel's face library reads the Wii Mii database. It holds the 3DS's own Miis:
+// at every start the system's Mii Maker database is read (as games' Mii library reads it) and its
+// Miis go in, so the family's Miis are chosen from all of them, as the Wii's are from the Mii
+// Channel's. Where it can't be read, the Mii the player picks in the 3DS Mii Selector goes in (on
+// the first start, when SELECT is held while starting, or when the channel would send the player
+// to the Mii Channel), with the Miis already there.
 static std::string s_nand;
+
+static bool write_mii_database(const std::string& path, const std::vector<u8>& db) {
+    mkdir((s_nand + "/shared2").c_str(), 0777);
+    mkdir((s_nand + "/shared2/menu").c_str(), 0777);
+    mkdir((s_nand + "/shared2/menu/FaceLib").c_str(), 0777);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    bool ok = fwrite(db.data(), 1, db.size(), f) == db.size();
+    fclose(f);
+    return ok;
+}
 
 // the Mii Selector, and its Mii into the database: true if one was picked
 static bool pick_mii(const std::string& path, bool exists, bool valid, std::vector<u8>& db) {
@@ -222,16 +247,51 @@ static bool pick_mii(const std::string& path, bool exists, bool valid, std::vect
     u8 wii[0x4A];
     mii_3ds_to_wii((const u8*)&ret.mii, wii);
     db = rfl_add_mii(valid ? db : std::vector<u8>(), wii);
-    mkdir((s_nand + "/shared2").c_str(), 0777);
-    mkdir((s_nand + "/shared2/menu").c_str(), 0777);
-    mkdir((s_nand + "/shared2/menu/FaceLib").c_str(), 0777);
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f)
+    if (!write_mii_database(path, db))
         return false;
-    fwrite(db.data(), 1, db.size(), f);
-    fclose(f);
     log("mii: the chosen Mii is in the database");
     return true;
+}
+
+// The 3DS's Miis as RFLCharData (0x4A bytes each): the Mii Maker's database, CFL_DB.dat in the
+// shared extdata 0xF000000B: "CFOG", then 100 entries of 0x5C bytes (libctru's MiiData, as the
+// Mii Selector returns one; Mii ID 0: an empty entry). None if it can't be read (an emulator has
+// no database until its Mii Maker has run).
+static std::vector<u8> read_3ds_miis() {
+    std::vector<u8> out;
+    static const u32 ID[3] = {MEDIATYPE_NAND, 0xF000000B, 0x00048000};
+    const FS_Path where = {PATH_BINARY, sizeof(ID), ID};
+    FS_Archive arch;
+    Result rc = FSUSER_OpenArchive(&arch, ARCHIVE_SHARED_EXTDATA, where);
+    if (R_FAILED(rc)) {
+        log("mii: the 3DS's Mii database can't be opened (%08lX)", (unsigned long)rc);
+        return out;
+    }
+    Handle f;
+    rc = FSUSER_OpenFile(&f, arch, fsMakePath(PATH_ASCII, "/CFL_DB.dat"), FS_OPEN_READ, 0);
+    if (R_SUCCEEDED(rc)) {
+        std::vector<u8> raw(8 + 100 * 0x5C);
+        u32 got = 0;
+        rc = FSFILE_Read(f, &got, 0, raw.data(), (u32)raw.size());
+        FSFILE_Close(f);
+        if (R_FAILED(rc) || got != raw.size() || memcmp(raw.data(), "CFOG", 4) != 0) {
+            log("mii: the 3DS's Mii database isn't one this version reads (%08lX, %lu bytes, \"%.4s\")",
+                (unsigned long)rc, (unsigned long)got, (const char*)raw.data());
+        } else {
+            for (int i = 0; i < 100; i++) {
+                const u8* m = &raw[8 + 0x5C * i];
+                if (!(m[0x0C] | m[0x0D] | m[0x0E] | m[0x0F]))
+                    continue;
+                u8 w[0x4A];
+                mii_3ds_to_wii(m, w);
+                out.insert(out.end(), w, w + 0x4A);
+            }
+        }
+    } else {
+        log("mii: this 3DS has no Mii database (%08lX)", (unsigned long)rc);
+    }
+    FSUSER_CloseArchive(arch);
+    return out;
 }
 
 // the database, if it's one this version writes
@@ -254,11 +314,29 @@ static void mii_setup(const std::string& nand) {
     bool exists;
     std::vector<u8> db;
     bool valid = read_mii_database(path, exists, db);
+    std::vector<u8> miis = read_3ds_miis();
+    if (!miis.empty()) {  // (all the 3DS's Miis: the Mii Selector has nothing to add)
+        const int n = (int)(miis.size() / 0x4A);
+        std::vector<u8> synced = rfl_sync_miis(valid ? db : std::vector<u8>(), miis.data(), n);
+        if (valid && synced == db)
+            log("mii: the database has the 3DS's %d Miis", n);
+        else if (write_mii_database(path, synced))
+            log("mii: the 3DS's %d Miis are in the database", n);
+        else
+            log("mii: %s can't be written", path.c_str());
+        return;
+    }
     if (exists && !valid)
         log("mii: %s is not one this version writes: choose the Mii again", path.c_str());
     if (valid && !(hidKeysHeld() & KEY_SELECT))
         return;
     pick_mii(path, exists, valid, db);
+}
+
+// (the Homebrew Launcher's or the HOME Menu's: the app is launched again as it ends)
+void platform_restart(const char* why) {
+    aptSetChainloaderToSelf();
+    platform_quit(why);
 }
 
 bool platform_choose_mii() {
@@ -484,13 +562,19 @@ static void poll_input() {
         s_in.x = (float)t.px / 160.0f - 1.0f;
         s_in.y = (float)t.py / 120.0f - 1.0f;
     }
-    // the circle pad nudges the pointer too
+    // The circle pad moves the pointer too, from the edge of a dead zone on (speed 0 there, the
+    // same as before at full tilt). A real circle pad doesn't come back to its centre exactly: let
+    // go after a push to the top left, it can rest 20 or so off it, and the old dead zone of 20 let
+    // the pointer creep on (and never leave the screen). The emulator's pad comes back to 0.
+    const float CPAD_MAX = 156.0f, CPAD_DEAD = 40.0f;
     circlePosition c;
     hidCircleRead(&c);
-    bool nudged = c.dx * c.dx + c.dy * c.dy > 20 * 20;
+    const float mag = std::sqrt((float)(c.dx * c.dx + c.dy * c.dy));
+    bool nudged = mag > CPAD_DEAD;
     if (nudged) {
-        s_in.x += (float)c.dx / 156.0f * 0.03f;
-        s_in.y -= (float)c.dy / 156.0f * 0.03f;
+        const float k = (std::min(mag, CPAD_MAX) - CPAD_DEAD) / (CPAD_MAX - CPAD_DEAD) * 0.03f / mag;
+        s_in.x += (float)c.dx * k;
+        s_in.y -= (float)c.dy * k;
         s_in.x = s_in.x < -1 ? -1 : s_in.x > 1 ? 1 : s_in.x;
         s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
     }
@@ -516,6 +600,54 @@ static void poll_input() {
 // (no GPU), the external frame buffer is scaled to the top screen here
 static std::vector<u32> s_rgba;
 static bool s_gpu;
+
+// ---- the status area (see s_status_con), from the I/O thread
+// a row of it, padded to the width and written without a newline, so that the console neither
+// scrolls nor flushes the screen for it (with s_log_lock)
+static void status_row(int y, const char* text) {
+    char line[41];
+    snprintf(line, sizeof(line), "%-40.40s", text);
+    s_status_con.cursorX = 1, s_status_con.cursorY = y;
+    fputs(line, stdout);
+}
+
+// Once a second: the game's frames a second (new pictures shown), then milliseconds a frame: the
+// CPU's (the game's thread: the game and its sound) less its waits, the waits (every guest thread
+// waiting: for the next retrace, the GPU, a read), the GPU's last frame; the heap in use.
+static void status_update(u64 now) {
+    static u64 s_t0;
+    static u32 s_frames0, s_idle0;
+    if (!s_status_on || (s_t0 && now - s_t0 < SYSCLOCK_ARM11))
+        return;
+    const u32 frames = vi_game_frames(), idle = idle_time_us();
+    char row1[64] = "-- fps", row2[64];
+    if (s_t0) {
+        const u32 n = frames - s_frames0;
+        const double ms = (double)(now - s_t0) * 1000.0 / SYSCLOCK_ARM11;
+        const double waited = n ? (double)(u32)(idle - s_idle0) / 1000.0 / n : 0;
+        if (n)
+            snprintf(row1, sizeof(row1), "%4.1f fps  CPU %4.1f  idle %4.1f  GPU %4.1f", n * 1000.0 / ms,
+                     ms / n - waited, waited, s_gpu ? (double)C3D_GetDrawingTime() : 0.0);
+        else
+            snprintf(row1, sizeof(row1), " 0.0 fps");
+    }
+    // (the heap under malloc's lock; not the linear heap's free space: libctru walks its free list
+    // unlocked, and the GPU's thread allocates textures from it meanwhile)
+    snprintf(row2, sizeof(row2), "ms a frame   heap %lu of %lu MB", (unsigned long)(mallinfo().uordblks >> 20),
+             (unsigned long)(__ctru_heap_size >> 20));
+    s_t0 = now, s_frames0 = frames, s_idle0 = idle;
+    LightLock_Lock(&s_log_lock);
+    PrintConsole* prev = consoleSelect(&s_status_con);
+    fputs("\x1b[36m", stdout);  // (cyan)
+    status_row(1, row1);
+    status_row(2, row2);
+    fputs("\x1b[0m", stdout);
+    consoleSelect(prev);
+    LightLock_Unlock(&s_log_lock);
+    u16 w = 0, h = 0;
+    u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    GSPGPU_FlushDataCache(fb, (u32)w * h * 2);  // (the console draws with the CPU: RGB565)
+}
 
 // Closing from the HOME Menu (its close, or the power button's power-off): the game gets the
 // Wii's power button, and ends the way it does there -- its fade, a save in progress finished,
@@ -601,7 +733,13 @@ int main(int argc, char** argv) {
     osSetSpeedupEnable(true);
     gfxInitDefault();
     gfxSetDoubleBuffering(GFX_TOP, true);
-    consoleInit(GFX_BOTTOM, nullptr);
+    // the bottom screen: the status area over the log (40 x 30 characters)
+    consoleInit(GFX_BOTTOM, &guest::s_status_con);
+    consoleInit(GFX_BOTTOM, &guest::s_log_con);
+    consoleSetWindow(&guest::s_status_con, 1, 1, 40, guest::STATUS_ROWS);
+    consoleSetWindow(&guest::s_log_con, 1, guest::STATUS_ROWS + 1, 40, 30 - guest::STATUS_ROWS);
+    consoleSelect(&guest::s_log_con);
+    guest::s_status_on = true;
     guest::s_tick0 = svcGetSystemTick();
     std::string data = guest::DATA_DIR;
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");

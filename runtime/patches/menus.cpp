@@ -13,8 +13,11 @@
 // application's (app_SceneFactories_ctor), and SceneTransit::Go (controller_living_SceneTransit_Go) opens the Sound Player for the
 // button's own To.
 
+#include "engine/math/vecmath.h"
+#include "engine/soundplayer/lyt.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
+#include "engine/system/save.h"
 #include "hw/ios/net.h"
 #include "noma_decomp.h"
 
@@ -22,6 +25,8 @@ namespace g {
 
 void layout_option_Option_ctor_orig(u32 r3, u32 r4, u32 r5);
 u32 layout_option_Option_SetActive_orig(u32 r3, u32 r4);
+u32 scene_OptionScene_StateTop_OnButton_orig(u32 r3, u32 r4);
+u32 app_SystemPrompt_OpenPending_orig(u32 r3);
 u32 controller_theater_LayoutController_ctor_orig(u32 r3, u32 r4, u32 r5, u32 r6);
 void layout_living_MoveBtn_ctor_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7);
 u32 controller_living_SceneTransit_Go_orig(u32 r3, u32 r4);
@@ -69,32 +74,112 @@ const u32 TO_SOUND_PLAYER = 9;
 enum : u32 {
     OPTION_FAMILY = 0x460,   // 0: the family's Miis and profiles (StateFamily)
     OPTION_VIDEO = 0xAFC,    // 1: streaming quality (StateVideo)
-    OPTION_AREA = 0x1198,    // 2: region and address (StateSetting)
+    OPTION_AREA = 0x1198,    // 2: region and address (StateSetting): the save-data button here
     OPTION_AGREE = 0x1834,   // 3: about Wii no Ma, the terms of use
 };
+const u32 TYPE_SAVE_DATA = 2;  // (OPTION_AREA's ButtonType)
+
+// the options' save-data button was pushed: the system prompt asks next
+bool s_ask_erase;
+// the system prompt asking it (app_SystemPrompt_OpenPending's this), for the answers
+u32 s_prompt;
+
+// A guest std::tr1::function<void()> calling `fn` (a native function's guest address): the game's
+// own function_imp for a plain void(*)() (its vtable, the function at +4), which the function
+// holds by pointer (+0; its small buffer, +4, unused). Whoever takes one copies it (the imp cloned
+// onto the game's heap), so both may live on the guest stack.
+void void_function(u32 obj, u32 imp, u32 fn) {
+    guest::store32(imp, GA_std_tr1_function_imp_VoidFn_vtable);
+    guest::store32(imp + 4, fn), guest::store32(imp + 8, 0);
+    guest::store32(obj, imp), guest::store32(obj + 4, 0), guest::store32(obj + 8, 0);
+}
+
+// the prompt's answers (called through those functions: the imp first). Yes: the save erased when
+// the app ends, which it then does as the quit prompt's yes makes it (back to the Wii Menu: the
+// game's last writes, its fade out), and the app starts again (app_Exit_Dispatch, wii_parts.cpp).
+// No: the prompt closes as the game's own prompts close on a no (a prompt closes only when an
+// answer closes it): app_SystemPrompt_Close shuts its window, then app_SystemPrompt_OnClosed gives
+// back the cursor and the music.
+u32 erase_yes(u32) {
+    engine::save::erase_at_exit();
+    app_Exit_Request(guest::load32(GA_app_Application_sInstance) + 0x330, 4);
+    return 0;
+}
+u32 erase_no(u32) {
+    app_SystemPrompt_Close(s_prompt);
+    return 0;
+}
 
 }  // namespace
 
 // The options' top menu: the video quality (high or normal quality for streaming; the first
-// start's setup leaves it out too) and the region/address entry (which ends the channel to open
-// the Wii's own region and address settings) are left out. The family and the terms of use take
-// the middle two places, so the column stays centred where the four were (the locators aren't
-// animated: the menu's animations move Loc_Btn_Top, above them).
+// start's setup leaves it out too) is left out, and the region/address entry (which ended the
+// channel to open the Wii's own region and address settings) becomes the save data's: erasing it,
+// after the usual question. With the family and the terms of use, the three are centred between the
+// four places (the locators aren't animated: the menu's animations move Loc_Btn_Top, above them).
 void layout_option_Option_ctor(u32 r3, u32 r4, u32 r5) {
     layout_option_Option_ctor_orig(r3, r4, r5);
+    static const u32 order[4] = {OPTION_FAMILY, OPTION_VIDEO, OPTION_AREA, OPTION_AGREE};
+    f32 at[4][3];
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < 3; i++)
+            at[k][i] = engine::math::load_f32(locator(r3 + order[k]) + 0x2C + 4 * i);
+    auto place = [&](u32 button, int k) {
+        for (int i = 0; i < 3; i++)
+            engine::math::store_f32(locator(r3 + button) + 0x2C + 4 * i, (at[k][i] + at[k + 1][i]) / 2);
+    };
     hide(r3 + OPTION_VIDEO);
-    hide(r3 + OPTION_AREA);
-    move_to(r3 + OPTION_FAMILY, r3 + OPTION_VIDEO);
-    move_to(r3 + OPTION_AGREE, r3 + OPTION_AREA);
+    place(OPTION_FAMILY, 0), place(OPTION_AREA, 1), place(OPTION_AGREE, 2);
+    // its label (the button's Text_Btn, the region text's box), and no map (Pic_Area): the box,
+    // which kept to the map's right, across the button's picture (Pic_Btn, its parent) less the
+    // ends, so the label fits on one line, centred
+    if (u32 text = find_pane(r3 + OPTION_AREA, "Text_Btn")) {
+        engine::soundplayer::lyt::text_reserve(text, 16);
+        engine::soundplayer::lyt::set_text(text, u"セーブデータの消去");
+        if (u32 btn = find_pane(r3 + OPTION_AREA, "Pic_Btn")) {
+            engine::soundplayer::lyt::move(text, 0, engine::math::load_f32(text + 0x30));
+            engine::soundplayer::lyt::resize(text, engine::math::load_f32(btn + 0x4C) - 40, engine::math::load_f32(text + 0x50));
+        }
+    }
+    if (u32 map = find_pane(r3 + OPTION_AREA, "Pic_Area"))
+        nw4r_lyt_Pane_SetVisible(map, 0);
 }
 
 // The menu's buttons are made active and inactive together (inactive while it opens and once a
-// button is pressed, active when it has opened): the two left out stay inactive.
+// button is pressed, active when it has opened): the one left out stays inactive.
 u32 layout_option_Option_SetActive(u32 r3, u32 r4) {
     u32 r = layout_option_Option_SetActive_orig(r3, r4);
     layout_Button_SetActive(r3 + OPTION_VIDEO, 0);
-    layout_Button_SetActive(r3 + OPTION_AREA, 0);
     return r;
+}
+
+// A button of the menu pushed: the save-data button leaves the menu as it is (no state to go to)
+// and asks through the system prompt (below); the others go on as the game has them.
+u32 scene_OptionScene_StateTop_OnButton(u32 r3, u32 r4) {
+    if (r4 != TYPE_SAVE_DATA)
+        return scene_OptionScene_StateTop_OnButton_orig(r3, r4);
+    s_ask_erase = true;
+    return 0;
+}
+
+// The system prompt (the application's: the question over any screen, the cursor and the music
+// held until it's answered) opens what is pending once a frame; the save-data button's question
+// goes first, with the game's own yes and no (messages 1 and 2).
+u32 app_SystemPrompt_OpenPending(u32 r3) {
+    if (!s_ask_erase)
+        return app_SystemPrompt_OpenPending_orig(r3);
+    s_ask_erase = false;
+    s_prompt = r3;
+    GFRAME(0x60);
+    const u32 yes_fn = (u32)&GS(u8, 0x8), no_fn = yes_fn + 0xC, yes_imp = no_fn + 0xC, no_imp = yes_imp + 0xC;
+    void_function(yes_fn, yes_imp, guest::host_fn(&erase_yes));
+    void_function(no_fn, no_imp, guest::host_fn(&erase_no));
+    GS(u8, 0x50) = 0, GS(u8, 0x54) = 0;
+    const u32 yes = lib_Message_Get((u32)&GS(u8, 0x50), 1), no = lib_Message_Get((u32)&GS(u8, 0x54), 2);
+    app_SystemPrompt_Ask(r3, engine::soundplayer::lyt::Text(u"セーブデータを消して、はじめからにします。\nよろしいですか？"), yes,
+                         yes_fn, no, no_fn);
+    guest::log("options: the save data's question asked");
+    return 1;
 }
 
 // The theater's buttons (controller::theater::LayoutController, Theater_Room_Scene.lex: back to

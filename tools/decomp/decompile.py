@@ -193,6 +193,9 @@ PATCHED_NAMES = {
     "scene_TitleScene_Opening_OnOpeningEnd",  # ... and ends
     "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, the license agreement
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
+    "g3d_living_Poster_ctor",  # the room's poster: hidden with none to show (engine/system/room_accessories.cpp)
+    # the options' save-data button: its push asks through the system prompt (runtime/patches/menus.cpp)
+    "scene_OptionScene_StateTop_OnButton", "app_SystemPrompt_OpenPending",
     "model_Weather_Read",  # the forecast, read through WiiConnect24: none offline
     "comm_message_ReceiveMessageManager_WaitNextRead",  # the WC24 inbox, read again every 5 minutes
     # the EC and WiiConnect24 managers' threads: waiting for requests offline instead of polling

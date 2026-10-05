@@ -62,6 +62,7 @@ void platform_quit(const char* why) {
     exit(0);
 }
 
+void platform_restart(const char* why) { platform_quit(why); }  // (started again by hand)
 bool platform_choose_mii() { return false; }  // (no Mii Selector: Miis come from NOMA_SELFTEST=rfl)
 
 // NOMA_KEYBOARD=text: what is typed whenever the game asks (UTF-8); unset, the keyboard is cancelled
@@ -217,17 +218,20 @@ struct HostRenderer : SoftRenderer {
 };
 static HostRenderer s_renderer;
 
-// NOMA_DUMP_FRAMES=N: every Nth displayed frame goes to frames/NNNNN.png
+// NOMA_DUMP_FRAMES=N: every Nth displayed frame goes to frames/NNNNN.png; NOMA_DUMP_FROM=F: none
+// drawn before displayed frame F (a run that only needs a later screen gets there at the game's
+// own speed; textures the game drew into before then, Mii faces, stay blank)
 void platform_present(u32 xfb) {
     NOMA_PROF_SCOPE("(present)");
     scripted_input();
     static int every = getenv("NOMA_DUMP_FRAMES") ? atoi(getenv("NOMA_DUMP_FRAMES")) : 0;
+    static u32 from = getenv("NOMA_DUMP_FROM") ? (u32)atoi(getenv("NOMA_DUMP_FROM")) : 0;
     // (the GPU's own thread draws a frame later than this thread counts it: then draw them all)
     static bool all = every <= 0 || getenv("NOMA_RENDER_ALL") || getenv("NOMA_GX_THREAD");
     static u32 n;
     n++;
-    s_renderer.drawing = all || s_renderer.texture_copies || (n + 4) % (u32)every < 5;
-    if (every <= 0 || n % (u32)every || !xfb)
+    s_renderer.drawing = n + 4 >= from && (all || s_renderer.texture_copies || (n + 4) % (u32)every < 5);
+    if (every <= 0 || n < from || n % (u32)every || !xfb)
         return;
     const XfbCopy* r = gx_xfb_region(xfb);
     if (!r)

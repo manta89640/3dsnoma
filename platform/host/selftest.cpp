@@ -328,6 +328,29 @@ static void selftest_rfl() {
                   memcmp(slot(two, 1), w2, 0x16) == 0 && memcmp(slot(again, 0), w, 0x4A) == 0 &&
                   memcmp(slot(again, 1), w2, 0x4A) == 0 && slot(again, 2)[2] == 0 && slot(again, 2)[3] == 0;
     log("selftest RFL_DB.dat adding a Mii: %s", add_ok ? "ok" : "MISMATCH");
+    // the 3DS's Mii Maker database synced in: a Mii already there is updated in its slot, new ones
+    // take the empty slots, a Mii the list doesn't have stays; in a full database a new one takes
+    // the slot of the first Mii not in the list
+    u8 maker[3][0x4A];
+    memcpy(maker[0], w2, 0x4A), maker[0][0x16] = 50;                     // slot 1's Mii, changed
+    memcpy(maker[1], w, 0x4A), maker[1][0x1B] ^= 2, maker[1][0x03] = 'A';  // new
+    memcpy(maker[2], w, 0x4A), maker[2][0x1B] ^= 4, maker[2][0x03] = 'B';  // new
+    std::vector<u8> synced = rfl_sync_miis(again, &maker[0][0], 3);
+    bool sync_ok = rfl_database_valid(synced) && memcmp(slot(synced, 0), w, 0x4A) == 0 &&
+                   memcmp(slot(synced, 1), maker[0], 0x4A) == 0 && memcmp(slot(synced, 2), maker[1], 0x4A) == 0 &&
+                   memcmp(slot(synced, 3), maker[2], 0x4A) == 0 && slot(synced, 4)[2] == 0 && slot(synced, 4)[3] == 0 &&
+                   rfl_sync_miis(synced, &maker[0][0], 3) == synced;
+    std::vector<u8> hundred(100 * 0x4A);
+    const u8* ptrs[100];
+    for (int i = 0; i < 100; i++) {
+        u8* m = &hundred[0x4A * i];
+        memcpy(m, w, 0x4A), m[0x1A] = (u8)(i + 1), m[0x03] = (u8)('a' + i % 26);
+        ptrs[i] = m;
+    }
+    std::vector<u8> full = rfl_sync_miis(rfl_make_database(ptrs, 100), &maker[1][0], 1);
+    sync_ok = sync_ok && rfl_database_valid(full) && memcmp(slot(full, 0), maker[1], 0x4A) == 0 &&
+              memcmp(slot(full, 1), ptrs[1], 0x4A) == 0;
+    log("selftest RFL_DB.dat syncing the 3DS's Miis: %s", sync_ok ? "ok" : "MISMATCH");
     // NOMA_WRITE_RFLDB=path: keep it (a test database for runs without the 3DS Mii Selector)
     if (const char* out = getenv("NOMA_WRITE_RFLDB")) {
         if (FILE* f = fopen(out, "wb")) {

@@ -135,6 +135,9 @@ void check_interrupts() {
 void platform_backtrace(const char* why);
 
 static u64 s_last_poll_us;  // see account_thread_time
+static u32 s_idle_us;       // see idle_time_us
+
+u32 idle_time_us() { return s_idle_us; }
 
 void idle_wait() {
     NOMA_PROF_SCOPE("(idle)");
@@ -142,11 +145,13 @@ void idle_wait() {
     bool reported = false;
     account_thread_time();
     s_last_poll_us = 0;  // waiting is no thread's time
-    struct IdleStats {  // NOMA_LOAD_STATS
+    struct IdleStats {  // the status line's idle time; NOMA_LOAD_STATS
         u64 since;
         ~IdleStats() {
+            u64 us = host_time_us() - since;
+            s_idle_us += (u32)us;
             if (g_lstats)
-                lstats_idle(host_time_us() - since);
+                lstats_idle(us);
         }
     } idle_stats{since};
     while (load32(RUN_QUEUE_BITS) == 0) {

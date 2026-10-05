@@ -92,6 +92,8 @@ set(ENGINE_SOURCES
   engine/system/home_button.cpp
   engine/system/host_scene.cpp
   engine/system/keyboard.cpp
+  engine/system/room_accessories.cpp
+  engine/system/save.cpp
   engine/system/thread.cpp
   engine/ut/font.cpp
 )

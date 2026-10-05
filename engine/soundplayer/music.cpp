@@ -9,11 +9,12 @@
 //   slot's last piece to fade out)   +0x34 crossfade length in frames (180)
 //   +0x3A "held paused" (the application's: nothing may resume while it is set)
 // Its calls: sound_BGMManager_PlayById(bgm, id, to_slot_2) (asking for the current or next piece
-// does nothing; with nothing current it starts the piece at once, no fade in, and pauses slot 2),
-// sound_BGMManager_StopNow(bgm) (slots 0 and 1 stopped and slot 2 paused, at once). The player
-// cuts with StopNow before every PlayById, so nothing ever crossfades. A BasicSound's +0x88 is its
-// pause state (0 playing, 1 pausing, 2 paused, 3 resuming), set by nw4r::snd::BasicSound::Pause
-// (fn_8046C9A0: the sound, pause or not, the fade's frames: 0 here). A SeqSound (vtable 0x8085B3B8)
+// does nothing; with nothing current it starts the piece at once in slot 0 or 1, no fade in, and
+// pauses slot 2 with a 180-frame fade), sound_BGMManager_StopNow(bgm) (slots 0 and 1 stopped and
+// slot 2 paused, with no fade). The player cuts with StopNow before every PlayById and pauses
+// slot 2 again after it (cut_room_theme), so nothing ever crossfades. A BasicSound's +0x88 is its
+// pause state (0 playing, 1 pausing, 2 paused, 3 resuming), set by nw4r_snd_detail_BasicSound_Pause
+// (the sound, pause or not, the fade's frames: 0 here). A SeqSound (vtable 0x8085B3B8)
 // has +0x85 u8 started and its SeqPlayer at +0x110, whose fields (engine/snd/seq.cpp) give the
 // position: +0xD4 f32 tempo ratio, +0xD8 f32 the part of a tick still to come, +0xEA u8 timebase
 // (ticks a quarter note), +0xEC u16 tempo, +0x160 u32 ticks.
@@ -45,7 +46,17 @@ void stop_now() { g::sound_BGMManager_StopNow(bgm(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 // the piece current's sound paused or resumed, at once
 void pause_current(bool pause) {
     if (u32 sound = sound_in(slot()))
-        g::fn_8046C9A0(sound, pause ? 1 : 0, 0);
+        g::nw4r_snd_detail_BasicSound_Pause(sound, pause ? 1 : 0, 0);
+}
+
+// The room's theme (slot 2) paused at once after a PlayById. StopNow pauses it with no fade, but
+// a pause only takes hold at the sound thread's next frame: until then the sound is "pausing", and
+// PlayById, with nothing current, pauses slot 2 again with a fade of 180 frames, which replaces
+// StopNow's (3 s of the room's theme under the new piece). Pausing it once more with no fade
+// replaces that in turn. (A theme already paused stays as it is; the new piece is in slot 0 or 1.)
+void cut_room_theme() {
+    if (u32 sound = sound_in(2))
+        g::nw4r_snd_detail_BasicSound_Pause(sound, 1, 0);
 }
 
 }  // namespace
@@ -71,6 +82,7 @@ void Music::play(u32 id) {
     }
     stop_now();  // the last piece cut off (or one that has ended: asked for again, it would do nothing)
     play_by_id(id);
+    cut_room_theme();
 }
 
 void Music::pause() {

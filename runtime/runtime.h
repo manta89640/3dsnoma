@@ -34,6 +34,8 @@ void log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void platform_fatal(const char* msg);
 // the game is done (it reset or powered off the console, e.g. "return to the Wii Menu"): leave
 void platform_quit(const char* why);
+// the app ends and starts again (3DS: launched anew; host: it only ends)
+void platform_restart(const char* why);
 // the player picks a Mii for the Wii Mii database (the 3DS's Mii Selector), which the program can
 // only see when it starts again: true if one was picked and the next quit starts the app again;
 // false where there's no Mii Selector (the host) or none was picked
@@ -55,6 +57,7 @@ bool platform_text_input(const TextInput& in, std::string& out);
 void mii_3ds_to_wii(const u8* mii_3ds, u8* char_data);
 std::vector<u8> rfl_make_database(const u8* const* miis, int count);
 std::vector<u8> rfl_add_mii(const std::vector<u8>& db, const u8* mii);
+std::vector<u8> rfl_sync_miis(const std::vector<u8>& db, const u8* miis, int count);
 bool rfl_database_valid(const std::vector<u8>& db);
 u64 host_time_us();  // monotonic microseconds
 u64 host_timebase();  // the same clock in Wii timebase ticks (TB_HZ)
@@ -132,6 +135,9 @@ void pi_set_mask(u32 m);
 void check_interrupts();
 // the guest has nothing to run: wait for the next device event and deliver it
 void idle_wait();
+// the time every guest thread waited (idle_wait) so far, in microseconds; wraps (differences are
+// what count): the 3DS status line's "idle", read from another thread
+u32 idle_time_us();
 // charge the time since the last call to the guest thread that ran (irq.cpp)
 void account_thread_time();
 // periodic device work (VI retrace, alarms, audio), driven by host time
