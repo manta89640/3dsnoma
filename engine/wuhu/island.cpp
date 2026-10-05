@@ -67,6 +67,14 @@ f32 ms_between(u64 a, u64 b) { return (f32)(b - a) / 1000.0f; }
 // the package has no clear colour of its own, the scene sets it), fog 1's #83D5FF, which the gap
 // under the sky dome's lower edge then meets the fogged sea in, as tools/g3d/preview.py draws it.
 const u32 CHANNEL_CLEAR = 0;
+// The Mii's size and pace on the island (the user, after the first runs): at WSR's own scale (the
+// package's k: a Mii as tall as WSR's own, research k.md) it was dwarfed by the town, the trees and the
+// cars, so it is drawn MII_SCALE times as big against the island (its body, steps, reach and camera
+// all follow k); and it crosses the island PACE times as fast as it did at WSR's scale (its own walk
+// and run, from the room, are per its size: MII_SCALE of that comes with the size, the rest is added).
+constexpr f32 MII_SCALE = 1.7f;
+constexpr f32 PACE = 2.0f;
+
 void set_clear(u32 rgba) {
     GFRAME(0x10);
     GS(u32, 0x8) = rgba;
@@ -171,18 +179,23 @@ void Island::finish_loading() {
     }
     package_ = std::move(l.package);
     collision_ = std::move(l.collision);
-    k_ = package_->env().mii_units_per_unit;
+    // the Mii drawn MII_SCALE times as big against the island as the package's k makes it
+    k_ = package_->env().mii_units_per_unit / MII_SCALE;
     clear_ = clear_of(*package_);
 
     const u64 t0 = guest::host_time_us();
     world_ = std::make_unique<engine::g3d::World>(*package_);
+    world_->set_world_scale(k_);
     const u64 t1 = guest::host_time_us();
     // (the uploads themselves happen on the renderer's thread when it reaches the command)
     engine::g3d::native_draw_prepare(*package_);
     prepared_ = true;
     const u64 t2 = guest::host_time_us();
 
-    const PlayerParams pp = PlayerParams::make(k_, mii_->height_scale(), mii_->gait());
+    PlayerParams pp = PlayerParams::make(k_, mii_->height_scale(), mii_->gait());
+    // its pace (its speeds are the room's, per its own size: MII_SCALE of the way there already)
+    pp.walk_speed *= PACE / MII_SCALE;
+    pp.run_speed *= PACE / MII_SCALE;
     player_ = std::make_unique<Player>(*collision_, pp);
     FollowCameraParams cp = FollowCameraParams::make(pp.height);
     cp.aspect = mii_->aspect();

@@ -63,7 +63,10 @@ public:
     World& operator=(const World&) = delete;
 
     const Package& package() const { return package_; }
-    f32 world_scale() const;  // k (fmt::Env::mii_units_per_unit)
+    f32 world_scale() const;  // k (fmt::Env::mii_units_per_unit, unless set)
+    // k for the guest's camera and the packets: the package's by default; a scene that sizes its
+    // guest characters differently against the world sets its own (the island: its Mii 1.7x)
+    void set_world_scale(f32 k);
     // the runtime materials, one per package material (what packets point at)
     const std::vector<Material>& materials() const;
 

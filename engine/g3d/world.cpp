@@ -580,6 +580,10 @@ World::World(const Package& package) : impl_(new Impl(package)), package_(packag
 World::~World() { delete impl_; }
 
 f32 World::world_scale() const { return impl_->k; }
+void World::set_world_scale(f32 k) {
+    if (k > 0)
+        impl_->k = k;
+}
 const std::vector<Material>& World::materials() const { return impl_->mats; }
 
 void World::set_group_visible(const char* group, bool visible) {

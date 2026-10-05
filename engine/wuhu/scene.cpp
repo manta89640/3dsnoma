@@ -54,9 +54,10 @@ const char16_t* const TITLE = u"ウーフーアイランド";
 const char16_t* const MUSIC_TITLE = u"♪ 広い世界へ";
 const char16_t* const PROMPT = u"行き先をえらんでください";
 
-// the menu's choices, top to bottom; the first only closes it (B's, START's)
-enum Choice { CONTINUE, WARP, ROOM };
-const std::vector<std::u16string> CHOICES = {u"探検をつづける", u"ワープ", u"部屋にもどる"};
+// the menu's choices, top to bottom (部屋にもどる on top, 探検をつづける at the bottom: the user's
+// order); the last only closes it (B's, START's), and the highlight starts on it
+enum Choice { ROOM, WARP, CONTINUE };
+const std::vector<std::u16string> CHOICES = {u"部屋にもどる", u"ワープ", u"探検をつづける"};
 
 // the captions' room: the longest place name the list sets small still fits Top_Message's line
 const u32 CAPTION_CHARS = 32;
