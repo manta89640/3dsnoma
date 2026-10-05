@@ -180,6 +180,10 @@ struct World::Impl {
         u16 posed_model = NONE;  // the model they were posed for (NONE: not yet)
         u32 posed_tick = 0;      // the update they were posed at
         bool animated = false;   // node tracks play on it
+        Vec3 at{0, 0, 0};        // of its nodes' places at the last pose the nearest the eye (where it
+                                 // is: an animation can carry it far from its matrix, along a path
+                                 // its sphere spans)
+        f32 speed = 0;           // the most a node's place moved an update, between its last two poses
     };
     std::vector<Inst> insts;
     // node tracks per animation, by (model, node): track indices; and per (animation, model) each
@@ -195,6 +199,10 @@ struct World::Impl {
     };
     std::vector<NodeMap> node_maps;
     std::vector<u8> model_billboards;  // per model: it has billboard nodes
+    // per model: the radius of its meshes about its origin (its batches' boxes where their nodes rest):
+    // what the screen shows of it, which its bounding sphere (an animated prop's spans its path: a
+    // bird 5 units long flies a circle 500 across) doesn't say
+    std::vector<f32> mesh_radius;
     u32 sea_slot = 0, sky_slot = 0;
     bool sea_posed = false;
 
@@ -345,6 +353,20 @@ void World::Impl::init() {
             const fmt::Node& nd = pkg.nodes()[md.first_node + n];
             if ((nd.flags & fmt::NODE_BILLBOARD) && nd.billboard)
                 model_billboards[m] = 1;
+        }
+    }
+    mesh_radius.assign(pkg.models().count, 0);
+    for (u32 m = 0; m < pkg.models().count; m++) {
+        const fmt::Model& md = pkg.models()[m];
+        for (u32 b = md.first_batch; b < md.first_batch + md.n_batches; b++) {
+            const fmt::Batch& bt = pkg.batches()[b];
+            Vec3 at{0, 0, 0};
+            if (bt.node < md.n_nodes) {
+                const fmt::Node& nd = pkg.nodes()[md.first_node + bt.node];
+                at = {nd.bind[0][3], nd.bind[1][3], nd.bind[2][3]};
+            }
+            const Vec3 c = box_centre(bt.bbox), h = {bt.bbox[3] - c.x, bt.bbox[4] - c.y, bt.bbox[5] - c.z};
+            mesh_radius[m] = std::max(mesh_radius[m], length(at + c) + length(h));
         }
     }
     // the most nodes a model of a chain has (a slot's size)
@@ -510,23 +532,53 @@ void World::Impl::billboard(u16 model, u32 base) {
 }
 
 // An instance drawn this frame as `model`: posed again if its model changed, or if it is animated
-// and due (every update; with WF_ANIM_LOD every second update when its bounding sphere's radius is
-// under a third of the screen's half height, every fourth under a tenth); its billboards turned.
+// and due: every update, or with WF_ANIM_LOD every second one while its meshes are under
+// ANIM_HALF_PX pixels across on the 3DS's screen and its nodes move under ANIM_STEP_PX a frame there,
+// every fourth under ANIM_QUARTER_PX and a third of ANIM_STEP_PX (what it lags behind stays within a
+// pixel and a half); its billboards turned.
+constexpr f32 SCREEN_HALF_PX = 120;  // the 3DS's top screen: 240 lines
+constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
 void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
     Inst& n = insts[i];
     const fmt::Instance& in = pkg.instances()[i];
     u32 rate = 1;
-    if (n.animated && (features & WF_ANIM_LOD)) {
+    if (n.animated && (features & WF_ANIM_LOD) && n.posed_model == model) {
+        // (pixels a unit is at its distance; its size and speed in pixels)
         const f32 tv = std::tan(cam.fovy_deg * 0.5f * 3.14159265f / 180.0f);
-        const f32 size = n.radius / (std::max(distance, 1e-3f) * tv);
-        rate = size >= 1.0f / 3 ? 1 : size >= 0.1f ? 2 : 4;
+        const f32 px = SCREEN_HALF_PX / (std::max(length(n.at - cam.eye), 1e-3f) * tv);
+        const f32 size = 2 * mesh_radius[model] * n.scale * px, step = n.speed * px;
+        rate = size < ANIM_QUARTER_PX && 3 * step <= ANIM_STEP_PX ? 4 : size < ANIM_HALF_PX && step <= ANIM_STEP_PX ? 2 : 1;
     }
+    (void)distance;
     const bool due = n.posed_model != model || (n.animated && tick - n.posed_tick >= rate);
     if (due) {
+        // (its nodes' places before, for how fast they move)
+        const fmt::Model& m = pkg.models()[model];
+        const u32 nn = std::max<u32>(m.n_nodes, 1);
+        Vec3 was[64];
+        const bool track = n.animated && n.posed_model == model && nn <= 64;
+        if (track)
+            for (u32 k = 0; k < nn; k++)
+                was[k] = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
         pose(model, n.mtx, n.animated ? in.anim : NONE, in.anim_offset, n.slot);
-        // (an instance coming into view is posed now, then on its own phase: copies that come into
-        // view together don't all pose on the same updates)
-        n.posed_tick = n.posed_model != model ? tick - i % rate : tick;
+        if (track) {
+            f32 most = 0;
+            for (u32 k = 0; k < nn; k++)
+                most = std::max(most, length(Vec3{finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3],
+                                                  finals[n.slot + k].m[2][3]} - was[k]));
+            n.speed = most / (f32)std::max<u32>(1, tick - n.posed_tick);
+        } else {
+            n.speed = 0;
+        }
+        // (where it is: of its nodes' places, the nearest the eye)
+        f32 nearest = 1e30f;
+        for (u32 k = 0; k < nn; k++) {
+            const Vec3 p = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
+            const f32 d = length(p - cam.eye);
+            if (d < nearest)
+                nearest = d, n.at = p;
+        }
+        n.posed_tick = tick;
         n.posed_model = model;
         stats->poses++;
     }

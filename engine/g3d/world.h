@@ -32,8 +32,9 @@
 // matrices and CLR0 colour registers) drive a per-material dynamic block (MatDynamic) that the
 // packets carry, its combiners translated again only when the registers they fold in change (the
 // last few translations kept: a looping animation comes back to them); instance animations pose node
-// trees, an instance only while it is drawn, a far one every second or fourth update (by the size it
-// has on the screen), a static one once (until its LOD model changes); billboards turn every frame.
+// trees, an instance only while it is drawn, a small one every second or fourth update (by the size its
+// meshes have on the screen and how fast its nodes move there: what it lags behind stays within a
+// pixel and a half), a static one once (until its LOD model changes); billboards turn every frame.
 #pragma once
 
 #include <vector>
