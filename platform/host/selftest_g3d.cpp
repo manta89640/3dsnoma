@@ -352,9 +352,10 @@ struct Scene {
                 cell_lod0.push_back(b0), cell_lod1.push_back(b1);
             }
         // the translucent overlays in the middle cell (one far, one near: back to front; the near one
-        // with a lower priority, so first anyway)
+        // with a lower priority, so first anyway), both ahead of the world test's eye (a cell's batches
+        // are culled by their own boxes)
         xlu_batch = p.add_box_batch({0, 60, -300}, {100, 1, 100}, mat_xlu);
-        xlu_front_batch = p.add_box_batch({0, 60, 300}, {100, 1, 100}, mat_xlu_front);
+        xlu_front_batch = p.add_box_batch({0, 60, -150}, {100, 1, 100}, mat_xlu_front);
         p.cells[4].count[0] = 3;
         p.cbat.erase(p.cbat.begin() + p.cells[4].first[0] + 1);  // (its lod-1 batch moves after the overlays)
         p.cbat.insert(p.cbat.begin() + p.cells[4].first[0] + 1, {xlu_batch, xlu_front_batch});
@@ -973,6 +974,21 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
     expect(st.items_opaque == opa.items.size() && st.items_translucent == xlu.items.size() && st.triangles ==
            (opa.items.size() + xlu.items.size()) * 12, "stats: %u + %u items, %u triangles", st.items_opaque,
            st.items_translucent, st.triangles);
+    // a cell's batches by their own boxes: turned round, the eye's own cell is still drawn, but not
+    // its two overlays, which are behind it now
+    {
+        g3::World w2(pkg);
+        g3::Camera c2 = cam;
+        c2.target = {0, 100, 1000};
+        w2.update(0);
+        w2.set_camera(c2);
+        g3::Packet o2, x2;
+        w2.build_packet(g3::Pass::OPAQUE, &o2);
+        w2.build_packet(g3::Pass::TRANSLUCENT, &x2);
+        const bool middle = std::any_of(o2.items.begin(), o2.items.end(), [&](const g3::DrawItem& it) { return it.batch == sc.cell_lod0[4]; });
+        expect(middle && x2.items.empty(), "batches by their boxes: the eye's cell %s, %zu of its overlays behind the eye drawn",
+               middle ? "drawn" : "not drawn", x2.items.size());
+    }
     // a frozen world (no update, the camera still: not culled again) counts each pass once
     {
         g3::Packet o2, x2;
@@ -1129,7 +1145,7 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
         const Vec3 p = engine::math::transform(v1, {0, 100, -500});
         expect(std::fabs(p.z + 500) < 1e-3f && std::fabs(p.x) < 1e-3f && std::fabs(p.y) < 1e-3f, "look-at: -z forward");
     }
-    log("selftest g3d: world: culling (%u/%u cells, %u/%u instances), levels, sky, opaque front to back, "
+    log("selftest g3d: world: culling (%u/%u cells, %u/%u instances; a cell's batches by their boxes), levels, sky, opaque front to back, "
         "translucent by priority then back to front, draw distance, groups, LOD scale, material and node "
         "animation, billboards checked",
         st.cells_visible, st.cells_total, st.instances_visible, st.instances_total);

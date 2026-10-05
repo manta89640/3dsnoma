@@ -763,6 +763,9 @@ void World::Impl::collect() {
             const Material& mat = mats[bt.material];
             if (mat.pixel.cull_gx == 3)
                 continue;
+            // (the cell's box meets the view; each of its batches is tested by its own, in world space)
+            if (!box_visible(fr, bt.bbox))
+                continue;
             if (detail > 0 && (bt.flags & fmt::BATCH_DETAIL) && box_distance(bt.bbox, cam.eye) > detail) {
                 stats->details_culled++;
                 continue;
