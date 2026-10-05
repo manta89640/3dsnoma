@@ -152,7 +152,7 @@ void dsp_ax_wait() {
                 if (!asked_for_thread())
                     s_ax_threaded = false;
                 log("ax: the audio thread hadn't taken its frame %u ms later: mixed here%s", (u32)((t1 - t0) / 1000),
-                    s_ax_threaded ? "" : ", and so are the next ones");
+                    s_ax_threaded ? "" : ", and so are the next ones for now");
                 mix(s_ax_list, s_ax_words);
                 s_ax_done.store(1, std::memory_order_relaxed);
                 break;
@@ -167,16 +167,32 @@ void dsp_ax_wait() {
 // game waited for it longer than the mixing took: a core that can't run it when a frame comes (the
 // system core's time slices, platform/3ds/main.cpp) costs the game more than mixing inline would.
 // In steady play the thread has finished before the game wants the frame, and the game doesn't wait.
-// Not when the thread was asked for (NOMA_AX_THREAD, NOMA_CORES=multi).
-static const u32 CHECK_FRAMES = 2000;  // (6 s of 3 ms frames)
+// Not when the thread was asked for (NOMA_AX_THREAD, NOMA_CORES=multi). Given up, it is tried again
+// RETRY_FRAMES frames later: the system core is busiest while the game loads (the SD card's reads go
+// through it), which is when it was given up on the user's New 3DS (at boot, 28 s in), and the rest
+// of the session then mixed on the game's core.
+static const u32 CHECK_FRAMES = 2000;   // (6 s of 3 ms frames)
+static const u32 RETRY_FRAMES = 10000;  // (30 s)
+static u32 s_check_frames, s_inline_frames;
+static u64 s_check_mix0, s_check_wait0;
 static bool asked_for_thread() {
     static const bool s_asked = getenv("NOMA_AX_THREAD") ||
                                 (getenv("NOMA_CORES") && !strcmp(getenv("NOMA_CORES"), "multi"));
     return s_asked;
 }
+// the thread again, once RETRY_FRAMES have been mixed inline since it was given up
+static void retry_thread() {
+    if (!s_ax_thread_up || ++s_inline_frames < RETRY_FRAMES)
+        return;
+    s_inline_frames = 0;
+    s_check_frames = 0;
+    s_check_mix0 = s_mix_us.load(std::memory_order_relaxed), s_check_wait0 = s_wait_us.load(std::memory_order_relaxed);
+    s_ax_threaded = true;
+    log("ax: the audio thread tried again (%u frames mixed here since it was given up)", RETRY_FRAMES);
+}
 static void check_thread() {
-    static u32 s_frames;
-    static u64 s_mix0, s_wait0;
+    u32& s_frames = s_check_frames;
+    u64 &s_mix0 = s_check_mix0, &s_wait0 = s_check_wait0;
     if (++s_frames < CHECK_FRAMES)
         return;
     s_frames = 0;
@@ -186,7 +202,7 @@ static void check_thread() {
     if (waited > mixed && waited > 20000 && !asked_for_thread()) {
         s_ax_threaded = false;
         log("ax: the game waited %u ms for the audio thread in the last %u frames, which took %u ms to mix: "
-            "the frames are mixed inline from now on",
+            "the frames are mixed inline for now",
             (u32)(waited / 1000), CHECK_FRAMES, (u32)(mixed / 1000));
     }
 }
@@ -197,6 +213,8 @@ static void ax_mail(u32 mail) {
         s_want_cl_addr = false;
         if (s_ax_threaded)
             check_thread();
+        else
+            retry_thread();
         if (s_ax_threaded) {
             s_ax_list = mail, s_ax_words = s_cl_size;
             s_ax_busy.store(AX_QUEUED, std::memory_order_release);
