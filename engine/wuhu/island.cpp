@@ -313,7 +313,7 @@ void Island::draw_opaque() {
     // (every frame: the channel's texture copies may set a clear colour of their own)
     if (clear_ != CHANNEL_CLEAR)
         set_clear(clear_);
-    mii_->view();
+    mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
     world_->emit(engine::g3d::Pass::OPAQUE);
     mii_->draw_opaque();
 }

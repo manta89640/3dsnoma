@@ -291,8 +291,8 @@ void IslandMii::view() {
     const u32 root = guest::load32(root_word_);
     GFRAME(0x10);
     GS(u32, 0x8) = g3d::camera(root, 1);
-    g3d::camera_load_projection((u32)&GS(u32, 0x8));
     g3d::root_viewport(root);
+    g3d::camera_load_view((u32)&GS(u32, 0x8));
 }
 
 void IslandMii::draw_opaque() {

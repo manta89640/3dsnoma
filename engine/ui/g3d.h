@@ -93,6 +93,17 @@ inline void camera_set_frustum(u32 cam_word, f32 t, f32 b, f32 l, f32 r, f32 n, 
     g::nw4r_g3d_Camera_SetFrustum(cam_word, 0, t, b, l, r, n, f);
 }
 inline void camera_load_projection(u32 cam_word) { g::nw4r_g3d_Camera_GXSetProjection(cam_word); }  // GXSetProjection
+// The camera's whole view into GX, as nw4r::g3d's ScnRoot sets it before it draws (its frame setup
+// before DrawOpa): viewport (Camera::GXSetViewport), projection, scissor and the scissor's offset
+// (Camera::GXSetScissor, GXSetScissorBoxOffset). Native draws (engine/g3d native_draw.h) take the GX
+// viewport and scissor current at their command: emitted before the channel's g3d has drawn
+// anything in the frame, they would get the last 2D draw's (the island was cut away whole).
+inline void camera_load_view(u32 cam_word) {
+    g::nw4r_g3d_Camera_GXSetViewport(cam_word);
+    g::nw4r_g3d_Camera_GXSetProjection(cam_word);
+    g::nw4r_g3d_Camera_GXSetScissor(cam_word);
+    g::nw4r_g3d_Camera_GXSetScissorBoxOffset(cam_word);
+}
 inline void camera_view_matrix(u32 cam_word, u32 mtx) { g::nw4r_g3d_Camera_GetCameraMtx(cam_word, mtx); }
 // Camera::SetPerspective (nw4r_g3d_Camera_SetPerspective): a perspective about the picture's centre (vertical field of
 // view in degrees, width over height, near, far); also what ScnRoot's gather culls by

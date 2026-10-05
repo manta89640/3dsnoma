@@ -44,8 +44,9 @@ public:
     // (this frame's walking: the walking clips' frames go by it); then the actor manager's update and
     // the root's calc.
     void update(const engine::g3d::Camera& camera, engine::math::Vec3 at, f32 yaw, PlayerState state, f32 walked);
-    // The draw. view() first: the camera's projection and the viewport into GX, which a native draw
-    // before the opaque pass needs too; then the opaque pass, the translucent one.
+    // The draw. view() first: the camera's viewport, projection, scissor and scissor offset into GX
+    // (engine/ui/g3d.h camera_load_view), which the native draws before the opaque pass take; then
+    // the opaque pass, the translucent one.
     void view();
     void draw_opaque();
     void draw_translucent();

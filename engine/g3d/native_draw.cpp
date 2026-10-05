@@ -6,6 +6,8 @@
 // packet given up on: see wait_free) and ignored. Packet ids count up from 1, so slot = id % size.
 #include "engine/g3d/native_draw.h"
 
+#include "noma_decomp.h"
+
 #include <algorithm>
 #include <atomic>
 
@@ -145,6 +147,13 @@ Packet* native_draw_begin() {
 void native_draw_submit(Packet* p) {
     Slot& s = slot_of(p->id);
     s_count.submitted++;
+    // The GX library keeps what GXSetProjection, GXSetViewport and the like change as dirty state
+    // and writes it to the FIFO at the next GXBegin (__GXSetDirtyState); a native draw is no GX draw,
+    // so the registers it reads at its command would still be the last draw's (the 2D layouts'
+    // orthographic projection: the island's opaque pass, the frame's first 3D, was skipped whole).
+    // So the state goes out first, as GXBegin would send it (once GX is set up: not in self-tests).
+    if (p->kind == PacketKind::DRAW && guest::load32(GA___GXData))
+        g::__GXSetDirtyState();
     // (QUEUED before the command is written: on a host without a GPU thread the decoder runs
     // inline and may execute it before gx_fifo_write returns)
     s.state.store(QUEUED, std::memory_order_release);

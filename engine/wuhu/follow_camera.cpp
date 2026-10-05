@@ -48,13 +48,13 @@ f32 smooth(f32 cur, f32 target, f32& vel, f32 time, f32 dt) {
 
 FollowCameraParams FollowCameraParams::make(f32 h) {
     FollowCameraParams p;
-    // The framing: the Mii about a sixth of the picture tall, low in its middle (its feet a quarter
-    // of the way up), the island before it: 7 heights from the head (110 units at k = 10), 15 degrees
-    // down, looking at a point 1.6 heights up (at 45 degrees' field of view). Pulled in (the terrain,
-    // the player), the point looked at comes down to the Mii's middle, so that the whole Mii stays in
-    // the picture.
+    // The framing: the Mii about a quarter of the picture tall, low in its middle, the island before
+    // it: 4.5 heights from the head (64 units at k = 10; first 7, a sixth of the picture: the user
+    // asked for it closer), 15 degrees down, looking at a point 1.6 heights up (at 45 degrees' field
+    // of view). Pulled in (the terrain, the player), the point looked at comes down to the Mii's
+    // middle, so that the whole Mii stays in the picture.
     p.head = 0.85f * h;
-    p.distance = 7.0f * h;
+    p.distance = 4.5f * h;
     p.min_distance = 1.2f * h;
     p.max_distance = 12.0f * h;
     p.aim_near = 0.55f * h;
