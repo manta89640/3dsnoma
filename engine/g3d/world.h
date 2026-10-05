@@ -74,7 +74,7 @@ struct WorldStats {
     u32 details_culled = 0;     // detail batches beyond the detail distance
     u32 triangles = 0;          // in what was emitted this frame
     u32 poses = 0;              // instances posed this frame (animated ones due, new LOD models)
-    u32 translations = 0;       // material combiner translations in the last update
+    u32 translations = 0;       // material combiner translations in this frame's packets
     u32 translations_cached = 0;  // ... and register sets found among the last translations
 };
 

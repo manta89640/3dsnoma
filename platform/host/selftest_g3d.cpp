@@ -1353,12 +1353,18 @@ void test_anim_rate() {
     }
     w.update(7.5f);  // (a step track: the same value as at 7)
     w.set_camera(cam);
+    // (as the island's frame line reads them, after the update and before the draws: the last frame's,
+    // 50 found kept)
+    const g3::WorldStats last = w.stats();
     w.build_packet(g3::Pass::OPAQUE, &p);
     const u32 still = w.stats().translations + w.stats().translations_cached;
     const std::vector<u32> want = {0, 255, 128, 50, 0, 255, 128, 50};
     expect(made == 4 && kept == 4 && still == 0 && konst == want,
            "combiners: %u translated, %u kept (want 4, 4), %u for an unchanged value; the constants follow", made,
            kept, still);
+    expect(last.translations == 0 && last.translations_cached == 1,
+           "combiners: the last frame's counts until the next frame's packets (%u, %u; want 0, 1)", last.translations,
+           last.translations_cached);
     log("selftest g3d: combiners: a looping colour animation translated %u times in 8 frames, %u found kept", made,
         kept);
     delete pkg;

@@ -142,11 +142,14 @@ constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
 // an animated prop under a pixel across isn't drawn (WF_DETAIL)
 constexpr f32 SIZE_CULL_PX = 1.0f;
 
-// depth tested and written, neither blended nor a logic op: where it comes among its kind changes
-// nothing but the state the GPU is given (the PICA tests depth after the combiners: no early test
-// that front to back would feed)
+// depth tested (less, less or equal, or their opposites) and written, colour written, neither blended
+// nor a logic op: where it comes among its kind changes nothing but the state the GPU is given (the
+// PICA tests depth after the combiners: no early test that front to back would feed). (ALWAYS, EQUAL
+// or a depth-only material would make the order show.)
 bool is_plain(const Material& m) {
-    return m.pixel.depth_test && m.pixel.depth_write && !m.pixel.blend && !m.pixel.logic;
+    const u8 f = m.pixel.depth_func;  // GPU_TESTFUNC: 4 less, 5 lequal, 6 greater, 7 gequal
+    return m.pixel.depth_test && m.pixel.depth_write && f >= 4 && f <= 7 && m.pixel.color_write && !m.pixel.blend &&
+           !m.pixel.logic;
 }
 
 }  // namespace
@@ -631,9 +634,9 @@ int World::Impl::eye_cell() const {
 void World::Impl::cull() {
     vis_cells.clear();
     vis_insts.clear();
-    const u32 translations = stats->translations, cached = stats->translations_cached;
+    // (the combiners' translations are counted after this, as the packets are built: until the next
+    // cull the stats say what the last frame did, as a scene reading them before its draws sees them)
     *stats = WorldStats();
-    stats->translations = translations, stats->translations_cached = cached;
     pass_tris[0] = pass_tris[1] = 0;
     stats->cells_total = pkg.cells().count;
     stats->instances_total = pkg.instances().count;
@@ -955,7 +958,6 @@ void World::update(f32 frame) {
     w.frame = frame;
     w.tick++;
     w.dirty = true;  // (instance poses)
-    stats_.translations = stats_.translations_cached = 0;
     if (w.dyn.empty())
         return;
     const Package& pkg = package_;
