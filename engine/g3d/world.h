@@ -73,6 +73,9 @@ public:
     // (multiplies the package's LOD distances)
     void set_draw_distance(f32 cells, f32 instances);
     void set_lod_scale(f32 scale);
+    // an instance placed anew (model -> world, package units), from the next cull on: something the
+    // scene moves (an NPC's hair on his head) rather than the package's placement
+    void set_instance_matrix(u32 instance, const Mtx34& mtx);
 
     // animations to `frame` (60 a second, from when the world was made)
     void update(f32 frame);

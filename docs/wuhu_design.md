@@ -275,3 +275,45 @@ theme (Sound Player semantics).
 - **Hardware rules for PICA shaders (85):** every .out written whole (xyzw) on every path, outside
   ifu/ifc/for; tools/check_shader_outputs.py must pass (package.sh refuses otherwise); GX_MemoryFill only
   into VRAM; any new syscall must be in the RSF's SystemCallAccess list.
+
+## 9. ミドハ (Midoha), the first NPC (2026-10-05, session 3dsnoma-8a, branch wuhu/mid)
+
+The user's character, a young man in Mii style with an elf's ears, a high ponytail with a cord of
+jade beads, and a hanbok. Tier 1+2 (the user's decision): his face is Wii Mii parts, his head is
+ours (his whole hair sculpted, the ears, the band, the cord), his dress a swappable texture on the
+standard Mii body (no body mesh of his own yet). He is shown only on request until the user
+approves the design (`NOMA_WUHU_MIDOHA=A|B|C`, a candidate face).
+
+- **His Mii** (`tools/mii/midoha.py` -> `engine/wuhu/midoha_data.h`, our data): RFLCharData records,
+  bald (RFL hair 30: the skin-coloured skull alone, under the sculpted hair). He is in no Mii
+  database: `engine/wuhu/island_mii.cpp` gives his record to RFL through a middle database of one
+  entry (RFLInitMiddleDB `fn_804CE700`, type 4 "user set"; `fn_804CE890` adds an RFLCharData, the work
+  of RFLAddMiddleDBStoreData `fn_804CE9A0` less the store data's CRC) and spawns him with the actor
+  manager's middle-database spawn (`fn_801D8FD4`, what room_SpawnMii does for a Mii found in one),
+  a frame after the player's Mii (two faces made in one frame share the first one's parts:
+  runtime/hw/gx/texture.cpp checks a texture once a frame), in a manager of two actors.
+- **His head** (`tools/mii/midoha_parts.py` -> `DATA/wuhu/midoha.ng3d`): a native g3d package in RFL
+  head units, vertex colours with their shading baked, one material (unlit, no culling), one
+  instance. `MidohaLook` (engine/wuhu/midoha.cpp) draws it with a World of its own whose instance
+  matrix (World::set_instance_matrix, new: instances a scene moves) is, every frame, the matrix RFL
+  draws his face with: his body's Head_Only node's view matrix (`nw4r_g3d_ScnMdlSimple_GetScnMtxPos`
+  type 2: the head's 0.69 scale in it), back from the camera's view, times RFL's axes
+  (RFLSetCoordinate +X up, +Y front). Drawn after the Mii's opaque pass, under the camera's view
+  loaded again (the native-draw rule: the GX state goes out at the command).
+- **His dress** (`tools/mii/midoha_outfit.py`: `tools/mii/midoha_outfit.png` -> `DATA/wuhu/midoha_outfit.bin`):
+  the body has no texture coordinates, so `MidohaOutfit` makes them on the GPU from the position:
+  each shape's display lists are split once (at his spawn) into the triangles that face forward in
+  the bind pose and the others (no vertex changes: the lists' own matrix loads replayed in both),
+  and drawn with a texgen from the position through a texture matrix per draw matrix (a planar
+  projection of the bind pose, u = (x + 72) / 144, v = (128 - y) / 128, times that matrix's bind
+  matrix: positions are stored in their node's space), which the lists' own indexed loads (0x30)
+  fetch from an array of ours; positions and normals from the body's view matrices of the frame.
+  The body's own opaque draw is turned off (ScnObj option 6); it still poses. Front triangles take
+  the front texture, the others the back one. Unlit, times the Mii light's tint.
+- **Placing**: 25 units before the player's start, facing it (`NOMA_WUHU_MIDOHA_AT=<marker>`: there).
+- **Design renders**: `NOMA_MIDOHA_SHOTS=1` (island.cpp's SHOTS): the camera goes round him (turnaround
+  and close-ups on a grey ground, then the plaza), the player's Mii out of sight, each shot logged
+  for the frame dumps.
+- **Cost**: the head pieces about 3,200 triangles in one native batch per piece; the dress replaces
+  the body's draw (864 triangles, the same vertices); guest memory: the outfit block 276 KB (two
+  256x256 RGB565 textures, the split lists), the second actor's slot 333 KB.

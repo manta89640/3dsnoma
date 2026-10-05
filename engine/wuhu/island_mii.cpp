@@ -61,11 +61,12 @@ struct Strings {
 
 }  // namespace
 
-IslandMii::IslandMii() {}
+IslandMii::IslandMii(const u8* npc_record) : npc_record_(npc_record) {}
 
 IslandMii::~IslandMii() {
     // the reverse of make_step's order (nothing was made if the block couldn't be had: step_ is
-    // then STEPS, the addresses 0)
+    // then STEPS, the addresses 0): the NPC's dress first (his actor goes with the manager's)
+    outfit_.reset();
     if (block_) {
         if (step_ >= 5)
             g3d::sound_handles_dtor(handles_);
@@ -118,7 +119,7 @@ bool IslandMii::make_step() {
         std::vector<u32> paths;
         for (const char* p : ANIM_FILES)
             paths.push_back(s.add(p));
-        u32 wait = s.add("Wait"), move = s.add("Move");
+        u32 wait = s.add("Wait"), move = s.add("Move"), head = s.add("Head_Only");
         u32 walk = s.add("Walk"), run = s.add("Run"), f_walk = s.add("Female_Walk"), f_run = s.add("Female_Run");
         // the block's layout
         u32 size = 0;
@@ -131,6 +132,9 @@ bool IslandMii::make_step() {
         u32 o_handles = take(g3d::SOUND_HANDLES_SIZE), o_actors = take(g3d::ACTORS_SIZE), o_root = take(4);
         u32 o_list = take(8 + 4 * N_ANIM_FILES), o_expr = take(4), o_id = take(8);
         u32 o_strings = take((u32)s.bytes.size());
+        // the NPC's middle database, its buffer (an entry is 0x40 bytes), his record
+        const u32 o_db = npc_record_ ? take(0x18) : 0, o_db_buffer = npc_record_ ? take(0x40) : 0;
+        const u32 o_npc = npc_record_ ? take(0x4A) : 0;
         block_ = g::operator_new(size);
         if (!block_) {
             guest::log("wuhu: Mii: out of memory (%u bytes): no Mii", (unsigned)size);
@@ -141,6 +145,10 @@ bool IslandMii::make_step() {
         sound3d_ = block_ + o_sound, shadow_res_ = block_ + o_shadow, handles_ = block_ + o_handles;
         actors_ = block_ + o_actors, root_word_ = block_ + o_root, anim_list_ = block_ + o_list;
         expression_ = block_ + o_expr, create_id_ = block_ + o_id, strings_ = block_ + o_strings;
+        if (npc_record_) {
+            npc_db_ = block_ + o_db, npc_db_buffer_ = block_ + o_db_buffer, npc_data_ = block_ + o_npc;
+            guest::write_g(npc_data_, npc_record_, 0x4A);
+        }
         guest::write_g(strings_, s.bytes.data(), (u32)s.bytes.size());
         guest::write_g(create_id_, id, 8);
         guest::store32(anim_list_, anim_list_ + 8);
@@ -154,6 +162,7 @@ bool IslandMii::make_step() {
         clip_anim_[WALK] = strings_ + walk, clip_anim_[RUN] = strings_ + run;
         longest_file_ = strings_ + move, longest_anim_ = strings_ + f_walk;
         female_walk_ = strings_ + f_walk, female_run_ = strings_ + f_run;
+        head_name_ = strings_ + head;
         // the 3D sound first, as g3d::Stage's ctor makes it before its root
         g3d::sound3d_ctor(sound3d_);
         break;
@@ -168,7 +177,9 @@ bool IslandMii::make_step() {
         break;
     }
     case 2: g3d::shadow_res_ctor(shadow_res_); break;
-    case 3: g3d::actors_ctor(actors_, guest::load32(root_word_), 1, FACE_RESOLUTION, anim_list_); break;
+    case 3:
+        g3d::actors_ctor(actors_, guest::load32(root_word_), npc_record_ ? 2 : 1, FACE_RESOLUTION, anim_list_);
+        break;
     case 4: {
         g3d::sound_handles_ctor(handles_);
         actor_ = have_id_ ? g3d::spawn_mii(create_id_) : 0;
@@ -218,9 +229,63 @@ bool IslandMii::make_step() {
                            guest::read_string(clip_anim_[c]).c_str());
         break;
     }
+    case 5: make_npc(); break;
     }
     step_++;
     return step_ < STEPS;
+}
+
+// The NPC, a frame after the player's Mii: his record into a middle database of his own
+// (RFLInitMiddleDB fn_804CE700: type 4, "user set", one entry; fn_804CE890 adds an RFLCharData,
+// RFLAddMiddleDBStoreData's work less the store data's CRC: it checks his create ID and his parts'
+// ranges), then the actor manager's spawn from a middle database (fn_801D8FD4, what room_SpawnMii does
+// for a Mii found in one: entry 0, age 20), his Wait clip, his dress.
+void IslandMii::make_npc() {
+    if (!npc_record_ || !block_)
+        return;
+    g::fn_804CE700(npc_db_, 4, npc_db_buffer_, 1);
+    const u32 err = g::fn_804CE890(npc_db_, npc_data_);
+    if (err) {
+        guest::log("wuhu: NPC: RFL refuses his record (error %u): no NPC", (unsigned)err);
+        return;
+    }
+    npc_actor_ = g::fn_801D8FD4(guest::load32(GA_room_ActorManager_sInstance), npc_db_, 0, 20);
+    if (!npc_actor_) {
+        guest::log("wuhu: NPC: no actor: no NPC");
+        return;
+    }
+    npc_behavior_ = g3d::give_special_anim(npc_actor_);
+    {
+        g3d::ScopedHeap heap(g3d::actor_heap(npc_actor_));
+        g3d::assign_string(g3d::behavior_file(npc_behavior_), clip_file_[WAIT]);
+        g3d::assign_string(g3d::behavior_anim(npc_behavior_), clip_anim_[WAIT]);
+    }
+    g3d::behavior_set_expression(npc_behavior_, expression_);
+    const u32 body = g3d::actor_body(npc_actor_), scn = guest::load32(body + 0x1C);
+    npc_height_scale_ = g3d::body_height_scale(body);
+    const u32 node = g3d::model_node(scn, head_name_);
+    npc_head_node_ = node ? guest::load32(node + 0x0C) : 0;
+    std::string heap;
+    const u32 free_now = g3d::heap_free(&heap);
+    guest::log("wuhu: NPC: %s, height scale %.2f, head node %u; heap %s: %u bytes free",
+               g3d::actor_female(npc_actor_) ? "female" : "male", npc_height_scale_, (unsigned)npc_head_node_,
+               heap.c_str(), (unsigned)free_now);
+    outfit_ = std::make_unique<MidohaOutfit>();
+    if (!outfit_->make(scn))
+        outfit_.reset();
+}
+
+bool IslandMii::npc_head(engine::math::Mtx34* world) const {
+    if (!npc_head_ok_)
+        return false;
+    engine::math::Mtx34 inv;
+    if (!engine::math::inverse(camera_view_, inv))
+        return false;
+    // RFLSetCoordinate(+X up, +Y front) (the channel's): the node's x is RFL's y, its y RFL's z,
+    // its z RFL's x
+    const engine::math::Mtx34 axes = {{{0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, 0}}};
+    *world = engine::math::concat(inv, engine::math::concat(npc_head_view_, axes));
+    return true;
 }
 
 // the clip the behaviour plays (the BodyController crossfades to it)
@@ -254,6 +319,8 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
     if (step_ < STEPS || !block_)
         return;
     const u32 root = guest::load32(root_word_);
+    if (!actor_ && npc_actor_)
+        g3d::actors_update(actors_);
     if (actor_) {
         frame_count_++;
         switch (state) {
@@ -270,19 +337,34 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
         // the behaviour and the BodyController first; then the body where the player is and the
         // walking clips at their frames, for the root's calc that follows to pose (no frame late)
         g3d::actors_update(actors_);
-        g3d::actor_place(actor_, at.x, at.y, at.z, yaw);
+        // (out of sight: far below the island, its shadow with it)
+        g3d::actor_place(actor_, at.x, hide_player_ ? at.y - 1e6f : at.y, at.z, yaw);
         for (int c = WALK; c <= RUN; c++)
             if (anim_[c]) {
                 g3d::anim_set_rate(anim_[c], 0);  // (the BodyController's PlayAnim never sets it back)
                 g3d::anim_set_frame(anim_[c], frame_[c]);
             }
     }
+    if (npc_actor_)
+        g3d::actor_place(npc_actor_, npc_at_.x, npc_at_.y, npc_at_.z, npc_yaw_);
     write_camera(camera);
     g3d::invalidate_gx_state();
     g3d::root_calc(root);
-    GFRAME(0x10);
+    GFRAME(0x50);
     GS(u32, 0x8) = g3d::camera(root, 1);
     g3d::sound3d_listen(sound3d_, (u32)&GS(u32, 0x8));
+    // the NPC's head as RFL will draw it (the body's calc made this frame's view matrices), and the
+    // camera's view matrix it is under
+    npc_head_ok_ = false;
+    if (npc_actor_) {
+        const u32 scn = guest::load32(g3d::actor_body(npc_actor_) + 0x1C), m = (u32)&GS(u32, 0x10);
+        if (g::nw4r_g3d_ScnMdlSimple_GetScnMtxPos(scn, m, 2, npc_head_node_)) {
+            npc_head_view_ = engine::math::load<engine::math::Mtx34>(m);
+            g3d::camera_view_matrix((u32)&GS(u32, 0x8), m);
+            camera_view_ = engine::math::load<engine::math::Mtx34>(m);
+            npc_head_ok_ = true;
+        }
+    }
 }
 
 void IslandMii::view() {
@@ -296,8 +378,14 @@ void IslandMii::view() {
 }
 
 void IslandMii::draw_opaque() {
-    if (step_ >= STEPS && block_)
-        g3d::root_draw_opaque(guest::load32(root_word_));
+    if (step_ < STEPS || !block_)
+        return;
+    g3d::root_draw_opaque(guest::load32(root_word_));
+    // the NPC's dressed body, under the camera's view again (the root's pass may have loaded another)
+    if (outfit_ && npc_actor_) {
+        view();
+        outfit_->draw(guest::load32(g3d::actor_body(npc_actor_) + 0x1C));
+    }
 }
 
 void IslandMii::draw_translucent() {

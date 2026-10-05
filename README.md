@@ -117,6 +117,9 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d`, baked with
    the host build's `ng3d-bake` (build the host target first); [docs/wuhu.md](docs/wuhu.md) says
    what goes into it.
+   ミドハ's head pieces and dress (ours: nothing of Nintendo's goes in) are made by
+   `tools/mii/midoha_parts.py DATA` (`DATA/wuhu/midoha.ng3d` and `DATA/wuhu/midoha_outfit.bin`; another
+   outfit: paint `tools/mii/midoha_outfit.py template`'s guide, then `tools/mii/midoha_outfit.py DATA --png it.png`).
 
 ## Running on the host
 
@@ -150,6 +153,7 @@ Useful environment variables:
 | `NOMA_SOFT3D_THREADS=N` | host: the threads the software backend draws native draws (the island) with (default: as many as the machine has, at most 8) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
 | `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
+| `NOMA_WUHU_MIDOHA=A`, `NOMA_WUHU_MIDOHA_AT=name`, `NOMA_MIDOHA_SHOTS=1`, `NOMA_MIDOHA_PACKAGE=path` | Wuhu Island: ミドハ, the island's first NPC, while his design is approved (docs/wuhu_design.md §9): shown with candidate face A, B or C, 25 units before the player's start (or at a marker); the design renders (the camera round him, turnaround, close-ups, the plaza; each shot logged for the frame dumps); his head pieces from another package (`tools/mii/midoha_parts.py DATA --band A --out ...`) |
 | `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
