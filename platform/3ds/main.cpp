@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "g3d_pica.h"
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
@@ -669,6 +670,10 @@ int main(int argc, char** argv) {
     if (pica.init()) {
         guest::s_gpu = true;
         guest::gx_set_renderer(&pica);
+        // the native g3d draws into the GPU renderer's frame (not with the software renderer, whose
+        // native draws have no backend: their packets are only retired)
+        if (engine::g3d::Backend* g3d = guest::g3d_pica_backend())
+            engine::g3d::native_draw_set_backend(g3d);
     } else {
         printf("GPU renderer unavailable: software rendering\n");
         guest::gx_set_renderer(&soft);
