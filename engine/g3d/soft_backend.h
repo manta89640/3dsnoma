@@ -19,8 +19,9 @@
 // coordinates' screen-space derivatives, bilinear within a level, trilinear between two when the
 // material's filter asks; projection-mapped units (the water's camera projection) from the pixel's
 // own screen position; linear fog by view depth for the materials that have it; overlays (material.h
-// is_overlay) tested nearer the camera by material.h's overlay depth bias. Vertex depth is computed in
-// double, so a strip lying just above the terrain stays in front of it however far away it is.
+// is_overlay) pulled toward the eye as the PICA backend pulls them (native_draw.h overlay_pull). Vertex
+// depth is computed in double, so a strip lying just above the terrain stays in front of it however far
+// away it is (the pull is there for the 3DS GPU's 24-bit floats: here it makes the frames alike).
 // Perspective projections only (the native g3d's): a packet under an orthographic one draws nothing.
 //
 // The rows of the scissor box are shared out among a few threads, each drawing every triangle in
@@ -59,17 +60,15 @@ public:
         u32 clipped = 0;      // cut by the near or far plane or the guard band
         u64 fragments = 0;    // pixels covered
         u64 written = 0;      // pixels that passed the depth and alpha tests
-        // overlay pixels that passed the depth test only thanks to the bias, by how far (package
-        // units of view distance) they lie behind what was there: under 1, 1-10, 10 and more
-        u64 overlay_by_bias[3] = {0, 0, 0};
     };
     const Stats& stats() const { return stats_; }
     void reset_stats() { stats_ = Stats(); }
 
-    // Test hooks: the depth bias overlays are drawn with (steps, and the most it may be in package
-    // units of view distance; material.h's OVERLAY_DEPTH_BIAS and OVERLAY_DEPTH_BIAS_LIMIT unless
-    // set), and the number of threads (0: as NOMA_SOFT3D_THREADS or the machine says).
-    void set_overlay_depth_bias(f32 steps, f32 limit);
+    // Test hooks: the pull overlays are drawn with (the fraction of their distance, and the most it may
+    // be in package units at their furthest corner; native_draw.h's OVERLAY_DEPTH_PULL and
+    // OVERLAY_PULL_LIMIT unless set), and the number of threads (0: as NOMA_SOFT3D_THREADS or the
+    // machine says).
+    void set_overlay_pull(double pull, double limit);
     void set_threads(u32 n) { threads_ = n; }
 
     struct Impl;

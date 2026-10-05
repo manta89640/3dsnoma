@@ -221,10 +221,10 @@ private:
         int matrix = -1;
         f32 centre[3] = {};
         u16 flags = 0;
-        bool pulled = false;
+        double pull = 0;  // an overlay's (native_draw.h overlay_pull)
         bool operator==(const MatrixKey& o) const {
             return matrix == o.matrix && !memcmp(centre, o.centre, sizeof(centre)) && flags == o.flags &&
-                   pulled == o.pulled;
+                   pull == o.pull;
         }
     } mkey_;
     u32 mat_key_ = ~0u;    // material << 16 | its state
@@ -260,11 +260,12 @@ private:
     void set_pixel(const u32 pixel[6]);
     void draw_batch(const PkgRes& r, const fmt::Batch& b);
     void make_material(PkgRes& r, u32 index, const g3::Material& m);
-    void item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky, bool pulled);
+    void model_view(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, double out[3][4]) const;
+    void item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky, double pull);
     void material_uniforms(const g3::Packet& p, const g3::Material& m, const g3::MatDynamic* dyn);
     void texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb);
     bool fog_rows(const g3::Packet& p, const g3::GxView& view, const g3::Material& m, const fmt::Batch& b,
-                  const VbRes& vb, bool pulled, f32 rows[3][4], u32* color);
+                  const VbRes& vb, double pull, f32 rows[3][4], u32* color);
     void fog_pass(const g3::Material& m, const fmt::Batch& b, const PkgRes& r, const f32 rows[3][4], u32 color);
     void stats_packet(const g3::Packet& p, const PkgRes& r, u64 ticks, u32 words);
 };
@@ -552,8 +553,9 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     // bits of precision of its own, and this depth map makes 1 + z'/w of it: the same -z/w, as
     // accurate as the buffer (and the same clipping: z' within [-w, 0] as z was). Checked on the
     // host with the GPU's 24-bit floats emulated, over the island's 21 camera views: a point
-    // 0.03-0.4 units over a ground vertex and pulled as the translucent pass is came out behind the
-    // ground at 23 % of 366,343 ground vertices with z, at none with z' (as with exact arithmetic).
+    // 0.03-0.4 units over a ground vertex and pulled 1/1024 toward the eye came out behind the
+    // ground at 23 % of 366,343 ground vertices with z, at none with z' (as with exact arithmetic);
+    // overlays are pulled so, at most 4 units at their furthest corner (native_draw.h overlay_pull).
     GPUCMD_AddWrite(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
     GPUCMD_AddWrite(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
     memset(uv_, 0xFF, sizeof(uv_));  // (a NaN: no value compares equal to it)
@@ -831,8 +833,8 @@ void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3
 // model (the buffer's positions, from its origin) -> view: the view (guest units) x S(k) x the
 // item's matrix x T(the origin); then the clip matrix and the GX projection; the normal matrix (the
 // cofactors: the inverse transpose up to a scale the shader normalises away)
-void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky,
-                              bool pulled) {
+void PicaBackend::model_view(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf,
+                             double out[3][4]) const {
     const f32* M = &p.matrices[12 * (size_t)it.matrix];
     const f32* c = r.vbs[(u32)vbuf].centre;
     const double k = p.world_scale;
@@ -843,11 +845,19 @@ void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::Dr
         A[i][3] = k * ((double)M[4 * i + 3] + (double)M[4 * i] * c[0] + (double)M[4 * i + 1] * c[1] +
                        (double)M[4 * i + 2] * c[2]);
     }
-    const double s = pulled ? 1.0 - g3::TRANSLUCENT_DEPTH_PULL : 1.0;
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 4; j++)
-            mv_[i][j] = s * ((double)p.view[i][0] * A[0][j] + (double)p.view[i][1] * A[1][j] +
-                             (double)p.view[i][2] * A[2][j] + (j == 3 ? (double)p.view[i][3] : 0.0));
+            out[i][j] = (double)p.view[i][0] * A[0][j] + (double)p.view[i][1] * A[1][j] +
+                        (double)p.view[i][2] * A[2][j] + (j == 3 ? (double)p.view[i][3] : 0.0);
+}
+
+void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky,
+                              double pull) {
+    model_view(p, r, it, vbuf, mv_);
+    const double s = 1.0 - pull;  // (an overlay pulled toward the eye: native_draw.h overlay_pull)
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            mv_[i][j] *= s;
     double mvp[4][4];
     mul44_34(cp_, mv_, mvp);
     // the depth out as z' = -(z + w) (begin_packet's depth map takes it back to -z/w: see there)
@@ -891,15 +901,15 @@ void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::Dr
 // with equality let through (LESS would refuse every pixel). An item wholly nearer than the fog's
 // start, or that writes no colour, gets none.
 bool PicaBackend::fog_rows(const g3::Packet& p, const g3::GxView& view, const g3::Material& m, const fmt::Batch& b,
-                           const VbRes& vb, bool pulled, f32 rows[3][4], u32* color) {
+                           const VbRes& vb, double pull, f32 rows[3][4], u32* color) {
     if (!m.fog || !m.pixel.color_write || view.orthographic || m.fog_index >= p.fogs.size())
         return false;
     const fmt::Fog& f = p.fogs[m.fog_index];
     if (f.type != fmt::FOG_LINEAR || !(f.end > f.start))
         return false;
     const double k = p.world_scale, start = f.start * k, end = f.end * k;
-    // the view's z row (a translucent item's model-view is pulled toward the eye: not its fog)
-    const double unpull = pulled ? 1.0 / (1.0 - g3::TRANSLUCENT_DEPTH_PULL) : 1.0;
+    // the view's z row (an overlay's model-view is pulled toward the eye: not its fog)
+    const double unpull = 1.0 / (1.0 - pull);
     double zrow[4];
     for (int j = 0; j < 4; j++)
         zrow[j] = mv_[2][j] * unpull;
@@ -1029,16 +1039,22 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             continue;
         const g3::MatDynamic* dyn = it.mat_state < p.mat_states.size() ? &p.mat_states[it.mat_state] : nullptr;
         const bool sky = it.flags & g3::DRAW_SKY;
-        const bool pulled = p.pass == g3::Pass::TRANSLUCENT && !sky;
         const VbRes& vb = r->vbs[b.vbuf];
         set_layout(*r, b.vbuf);
+        // an overlay is pulled toward the eye (native_draw.h overlay_pull): by its box's furthest corner
+        double pull = 0;
+        if (!sky && g3::is_overlay(m)) {
+            double mv[3][4];
+            model_view(p, *r, it, b.vbuf, mv);
+            pull = g3::overlay_pull(mv, b.bbox, vb.centre, p.world_scale);
+        }
         // its matrices
         MatrixKey key;
-        key.matrix = it.matrix, key.flags = it.flags, key.pulled = pulled;
+        key.matrix = it.matrix, key.flags = it.flags, key.pull = pull;
         memcpy(key.centre, vb.centre, sizeof(key.centre));
         const bool moved = !(key == mkey_);
         if (moved) {
-            item_matrix(p, *r, it, b.vbuf, sky, pulled);
+            item_matrix(p, *r, it, b.vbuf, sky, pull);
             mkey_ = key;
             st_.matrices++;
         }
@@ -1066,7 +1082,7 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
         st_.draws++, st_.triangles += b.n_indices / 3, st_.indices += b.n_indices;
         f32 rows[3][4];
         u32 fog_color;
-        if (!sky && fog_rows(p, view, m, b, vb, pulled, rows, &fog_color)) {
+        if (!sky && fog_rows(p, view, m, b, vb, pull, rows, &fog_color)) {
             fog_pass(m, b, *r, rows, fog_color);
             st_.fog_draws++;
         }

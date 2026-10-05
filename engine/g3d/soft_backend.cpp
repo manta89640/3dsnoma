@@ -129,7 +129,6 @@ struct Item {
     // pixel pipeline
     bool depth_test = true, depth_write = true;
     u8 depth_func = 5;
-    bool overlay = false;        // tested nearer the camera (material.h's overlay bias)
     bool alpha_test = false;
     u8 alpha_func = 1, alpha_ref = 0;
     bool blend = false, logic = false, color_write = true, alpha_write = false, const_alpha = false;
@@ -181,9 +180,8 @@ struct SoftBackend::Impl {
     f32 vp[6] = {};       // the viewport: scale x y z, offset x y z
     f32 ox = 0, oy = 0;   // window x = clip x / w * vp[0] + ox (ox: the viewport's offset less the scissor's)
     f32 k = 1;            // package units -> guest units
-    // the overlays' depth bias (material.h): at most bias_steps steps, at most bias_limit package
-    // units of view distance (bias_scale / w^2 steps a unit, w the view depth in guest units)
-    f32 bias_steps = (f32)OVERLAY_DEPTH_BIAS, bias_limit = OVERLAY_DEPTH_BIAS_LIMIT, bias_scale = 0;
+    // the overlays' pull toward the eye (native_draw.h overlay_pull; the test hook's when set)
+    f64 pull = OVERLAY_DEPTH_PULL, pull_limit = OVERLAY_PULL_LIMIT;
 
     void setup(const Packet& p, const GxView& view, Stats& st);
     void make_item(const Packet& p, const DrawItem& di, const Prepared& prep, Item& it);
@@ -524,6 +522,14 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
             mv[r][c] = k * v + (c == 3 ? p.view[r][3] : 0.0);
         }
     }
+    // an overlay pulled toward the eye, as the PICA backend draws it (native_draw.h overlay_pull)
+    if (!(di.flags & DRAW_SKY) && is_overlay(m)) {
+        static const f32 k_origin[3] = {0, 0, 0};
+        const f64 s = 1.0 - overlay_pull(mv, b.bbox, k_origin, k, pull, pull_limit);
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 4; c++)
+                mv[r][c] *= s;
+    }
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++) {
             f64 v = 0;
@@ -611,7 +617,6 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
     it.depth_test = px.depth_test && !sky;
     it.depth_write = px.depth_write && !sky;
     it.depth_func = px.depth_func;
-    it.overlay = !sky && is_overlay(m) && (bias_steps > 0 && bias_limit > 0);
     it.cull_gx = px.cull_gx;
     it.alpha_test = px.alpha_test && px.alpha_func != 1;
     it.alpha_func = px.alpha_func, it.alpha_ref = px.alpha_ref;
@@ -932,9 +937,6 @@ void SoftBackend::Impl::setup(const Packet& p, const GxView& view, Stats& st) {
     memcpy(proj, view.projection, sizeof(proj));
     memcpy(vp, view.viewport, sizeof(vp));
     k = p.world_scale > 0 ? p.world_scale : 1.0f;
-    // depth steps per package unit of view distance = bias_scale / w^2 (w: view depth, guest units):
-    // window z = (-p22 + p23 / w) vp[2] + vp[5]
-    bias_scale = std::fabs(proj[2][3] * vp[2]) * k;
     ox = vp[3] - efb.x_offset, oy = vp[4] - efb.y_offset;
     items.resize(p.items.size());
     for (u32 i = 0; i < p.items.size(); i++) {
@@ -1011,21 +1013,8 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
                         a[k] += t.dadx[k];
                 st.fragments++;
                 const u32 zi = z <= 0 ? 0u : z >= 16777215.0 ? 0xFFFFFFu : (u32)z;
-                if (it.depth_test) {
-                    u32 zt = zi;
-                    if (it.overlay) {
-                        // material.h's overlay_depth_bias: so many steps, at most so far in distance
-                        const u32 b = (u32)std::min(bias_steps, bias_limit * bias_scale * iw * iw);
-                        zt = zi > b ? zi - b : 0;
-                    }
-                    if (!test(it.depth_func, zt, depth[x]))
-                        continue;
-                    if (zt != zi && !test(it.depth_func, zi, depth[x])) {
-                        // in only thanks to the bias: by how far behind what is there
-                        const f64 behind = view_distance(zi) - view_distance(depth[x]);
-                        st.overlay_by_bias[behind < 1 ? 0 : behind < 10 ? 1 : 2]++;
-                    }
-                }
+                if (it.depth_test && !test(it.depth_func, zi, depth[x]))
+                    continue;
                 const f32 w = iw != 0 ? 1.0f / iw : 0.0f;
                 if (it.need_color)
                     for (int c = 0; c < 4; c++)
@@ -1080,9 +1069,7 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
 SoftBackend::SoftBackend() : impl_(new Impl) {}
 SoftBackend::~SoftBackend() { delete impl_; }
 
-void SoftBackend::set_overlay_depth_bias(f32 steps, f32 limit) {
-    impl_->bias_steps = steps, impl_->bias_limit = limit;
-}
+void SoftBackend::set_overlay_pull(f64 pull, f64 limit) { impl_->pull = pull, impl_->pull_limit = limit; }
 
 void SoftBackend::prepare(Package& pkg) {
     if (pkg.backend_data)
@@ -1157,11 +1144,8 @@ void SoftBackend::draw(const Packet& packet, const GxView& view, const guest::Ho
     m.draw_rows(0, n, part[0]);
     for (std::thread& t : pool)
         t.join();
-    for (const Stats& s : part) {
+    for (const Stats& s : part)
         stats_.fragments += s.fragments, stats_.written += s.written;
-        for (int i = 0; i < 3; i++)
-            stats_.overlay_by_bias[i] += s.overlay_by_bias[i];
-    }
 }
 
 }  // namespace engine::g3d

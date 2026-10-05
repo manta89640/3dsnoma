@@ -845,8 +845,8 @@ void test_materials(const g3::Package& pkg, const Scene& sc) {
            "texture unit 0");
     expect(m.light.lit && m.light.mat_from_vertex && m.light.light_mask == 1 && m.light.light_set == -1, "lighting");
     expect(m.pixel.depth_test && m.pixel.depth_func == 5 && m.pixel.depth_write && !m.pixel.blend && !m.pixel.alpha_test &&
-               m.pixel.cull == 2,
-           "pixel state");
+               m.pixel.cull == 1,
+           "pixel state (GX_CULL_BACK: the PICA's GPU_CULL_FRONT_CCW, as gx_pica.cpp maps it)");
     expect(!m.translucent && !m.fog && m.approximated == 0, "pass, fog");
     g3::build_material(pkg, sc.mat_xlu, &m);
     expect(m.translucent && m.pixel.blend && m.pixel.blend_src == 6 && m.pixel.blend_dst == 7, "translucent blending");

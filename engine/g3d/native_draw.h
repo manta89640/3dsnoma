@@ -21,6 +21,7 @@
 // FIFO not running), the packet is taken back when the ring comes round to it again, after a GX sync.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -46,16 +47,38 @@ enum : u16 {
     DRAW_SKY = 1,      // the sky dome: follows the camera, no depth test or write, drawn first
 };
 
-// The translucent pass's depth, pulled toward the eye. Its coplanar overlays (the terrain's _blend
-// layers, the sea's Kiwa and Nami strips) lie 0.03-0.4 package units over what they cover, as
-// meshes of their own whose triangles needn't follow a curved ground's, and that is lost at a
+// Overlays (material.h is_overlay: translucent, depth tested, writing no depth -- the island's Kiwa and
+// _blend edge layers, the sea's Kiwa and Nami strips) lie 0.03-0.4 package units over what they cover,
+// as meshes of their own whose triangles needn't follow a curved ground's, and that is lost at a
 // distance: the 24-bit depth buffer's step is d^2 / (2^24 near) (near 15 Mii units: 0.036 package
-// units 300 away, 3.6 units 3,000 away), and the 3DS GPU's 24-bit floats round a position to
-// 16 bits. Both backends (g3d_pica.cpp, soft_backend.cpp) draw every translucent item but the sky
-// with its view-space position scaled by (1 - this) about the eye: on the screen it stays where
-// it was (x/w, y/w don't change), its depth comes nearer by the same fraction of its distance
-// (0.03 units 30 away, 3 units 3,000 away: less than the pixel it covers).
-constexpr float TRANSLUCENT_DEPTH_PULL = 1.0f / 1024;
+// units 300 away, 3.6 units 3,000 away), and the 3DS GPU's 24-bit floats round a position to 16 bits.
+// Both backends (g3d_pica.cpp, soft_backend.cpp) draw an overlay with its view-space position scaled
+// by (1 - pull) about the eye: on the screen it stays where it was (x/w, y/w don't change), its depth
+// comes nearer by that fraction of its distance. The pull is OVERLAY_DEPTH_PULL (0.03 units 30 away,
+// 3 units 3,000 away: less than the pixel it covers), but never more than OVERLAY_PULL_LIMIT package
+// units at the item's furthest corner: from the overview camera an unlimited pull let the volcano's
+// inner blend show through its outer wall (NOMA_SELFTEST=g3drender's sweep). Nothing else is pulled.
+constexpr float OVERLAY_DEPTH_PULL = 1.0f / 1024;
+constexpr float OVERLAY_PULL_LIMIT = 4.0f;
+// The pull of an overlay whose box (bbox, less `origin`: the space `mv` maps from) is under the
+// model-view `mv` (guest units; k guest units a package unit). (pull and limit: the test hooks'.)
+inline double overlay_pull(const double mv[3][4], const float bbox[6], const float origin[3], double k,
+                           double pull = OVERLAY_DEPTH_PULL, double limit = OVERLAY_PULL_LIMIT) {
+    double far2 = 0;
+    for (int i = 0; i < 8; i++) {
+        const double x = (double)bbox[i & 1 ? 3 : 0] - origin[0], y = (double)bbox[i & 2 ? 4 : 1] - origin[1],
+                     z = (double)bbox[i & 4 ? 5 : 2] - origin[2];
+        double d2 = 0;
+        for (int r = 0; r < 3; r++) {
+            const double v = mv[r][0] * x + mv[r][1] * y + mv[r][2] * z + mv[r][3];
+            d2 += v * v;
+        }
+        far2 = d2 > far2 ? d2 : far2;
+    }
+    const double far = std::sqrt(far2) / (k > 0 ? k : 1.0);
+    const double cap = far > 0 ? limit / far : pull;
+    return cap < pull ? cap : pull;
+}
 
 // the animated parts of a material, sampled for this frame
 struct MatDynamic {

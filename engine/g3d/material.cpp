@@ -77,9 +77,13 @@ void pixel_state(const fmt::Material& m, PixelState& p) {
         p.alpha_func = k_test_func[c1], p.alpha_ref = (u8)r1;
     else
         p.alpha_func = k_test_func[c0], p.alpha_ref = (u8)r0;
-    // culling: GX front faces are counter-clockwise on the screen, like the PICA's (gx_pica.cpp)
+    // culling: GX front faces are counter-clockwise on the screen, like the PICA's (gx_pica.cpp).
+    // The material holds GXSetCullMode's value (GX_CULL_FRONT 1, GX_CULL_BACK 2), which the GX
+    // library writes into GENMODE swapped (front as 2, back as 1); gx_pica.cpp maps GENMODE's 1 to
+    // GPU_CULL_FRONT_CCW and 2 to GPU_CULL_BACK_CCW under the same clip transform the native draws
+    // use, so GX_CULL_BACK is the PICA's FRONT_CCW here too (the soft backend reads cull_gx).
     p.cull_gx = m.cull;
-    static const u8 k_cull[4] = {0, 1, 2, 0};
+    static const u8 k_cull[4] = {0, 2, 1, 0};
     p.cull = k_cull[m.cull & 3];
 }
 

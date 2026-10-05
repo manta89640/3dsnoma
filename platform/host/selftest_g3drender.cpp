@@ -16,10 +16,10 @@
 //    commands through the FIFO, decoded, executed by a renderer like the host's (and retired
 //    undrawn in a frame it doesn't draw).
 // 3. Overlays (material.h is_overlay) against the terrain: each view's translucent pass drawn again
-//    with depth biases from none to 1024 steps, with and without a limit in view distance; the pixels
-//    the overlays change, by the view distance under them, and the fragments a bias lets through,
-//    by how far behind what is there they lie, show where strips would fight the terrain and where
-//    a bias reaches through what is in front of them.
+//    with pulls toward the eye (native_draw.h overlay_pull) from none to 1/256 of the distance, with
+//    and without a limit in units; the pixels the overlays change, by the view distance under them,
+//    show where strips would fight the terrain and where a pull reaches through what is in front of
+//    them (an unlimited one's gain is written as a picture).
 //
 // The camera: NOMA_G3D_FOV (degrees, default 45), near 1.5 and far 80,000 package units, the
 // world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views.
@@ -463,9 +463,9 @@ void test_views() {
             overlay_names += std::string(overlays++ ? ", " : "") + pkg->str(pkg->materials()[m.index].name);
         }
     log("selftest g3drender: %s loaded in %.1f ms, textures decoded for the backend in %.1f ms; k = %g; %u overlay "
-        "materials (%s), their depth bias %u steps, at most %g units",
-        path.c_str(), load_ms, prepare_ms, (double)k, overlays, overlay_names.c_str(), g3::OVERLAY_DEPTH_BIAS,
-        (double)g3::OVERLAY_DEPTH_BIAS_LIMIT);
+        "materials (%s), pulled toward the eye by 1/%g of their distance, at most %g units",
+        path.c_str(), load_ms, prepare_ms, (double)k, overlays, overlay_names.c_str(),
+        1.0 / (double)g3::OVERLAY_DEPTH_PULL, (double)g3::OVERLAY_PULL_LIMIT);
     // the clear colour: the first fog in use's, as preview.py's background (a package that turns
     // fog 0 off, as the restaged island does, clears to the sea's fog 1)
     u32 clear = 0x00E6B380u;  // (0.5, 0.7, 0.9)
@@ -547,7 +547,7 @@ void test_views() {
         expect(st.written > W * H / 2, "%s: the frame is drawn (%llu pixels)", name, (unsigned long long)st.written);
 
         // 3. the overlays: the opaque pass's frame and depth kept; the translucent pass drawn again
-        // without them, then with them at each bias; the pixels they change, by the view distance of
+        // without them, then with them at each pull; the pixels they change, by the view distance of
         // what lies under them
         clear_efb(clear);
         sb.draw(opa, v);
@@ -567,21 +567,20 @@ void test_views() {
         const std::vector<u32> base = efb_frame();
         static const f32 k_bucket[4] = {300, 1000, 3000, 1e30f};
         struct Setting {
-            f32 steps, limit;
+            f64 pull, limit;  // a fraction of the distance, at most so many units (1e30: no limit)
         };
-        // (the shared setting first, then steps alone and limited)
-        static const Setting k_settings[] = {{(f32)g3::OVERLAY_DEPTH_BIAS, g3::OVERLAY_DEPTH_BIAS_LIMIT},
-                                             {0, 0}, {4, 1e30f}, {16, 1e30f}, {64, 1e30f}, {256, 1e30f}, {1024, 1e30f},
-                                             {1024, 1}, {1024, 4}, {1024, 16}};
+        // (the shared setting first, then no pull, pulls alone and limited)
+        static const Setting k_settings[] = {{g3::OVERLAY_DEPTH_PULL, g3::OVERLAY_PULL_LIMIT}, {0, 1e30},
+                                             {1.0 / 4096, 1e30}, {1.0 / 1024, 1e30}, {1.0 / 256, 1e30},
+                                             {1.0 / 256, 1}, {1.0 / 256, 4}, {1.0 / 256, 16}};
         std::string table;
         std::vector<u32> at0, shared;
         for (const Setting& set : k_settings) {
             const bool first = &set == &k_settings[0];
             restore();
-            sb.set_overlay_depth_bias(set.steps, set.limit);
+            sb.set_overlay_pull(set.pull, set.limit);
             sb.reset_stats();
             sb.draw(xlu, v);
-            const g3::SoftBackend::Stats sbs = sb.stats();
             const std::vector<u32> img_b = efb_frame();
             u32 count[4] = {};
             for (u32 i = 0; i < W * H; i++) {
@@ -594,37 +593,35 @@ void test_views() {
                 count[bk]++;
             }
             char buf[200], lim[24] = "";
-            if (set.limit < 1e29f)
-                snprintf(lim, sizeof(lim), ", %g units", (double)set.limit);
-            snprintf(buf, sizeof(buf), "\n    %g steps%s: %u/%u/%u/%u (in by the bias %llu/%llu/%llu)", (double)set.steps,
-                     lim, count[0], count[1], count[2], count[3], (unsigned long long)sbs.overlay_by_bias[0],
-                     (unsigned long long)sbs.overlay_by_bias[1], (unsigned long long)sbs.overlay_by_bias[2]);
+            if (set.limit < 1e29)
+                snprintf(lim, sizeof(lim), ", at most %g units", set.limit);
+            snprintf(buf, sizeof(buf), "\n    pull %s%g%s: %u/%u/%u/%u", set.pull > 0 ? "1/" : "",
+                     set.pull > 0 ? 1.0 / set.pull : 0.0, lim, count[0], count[1], count[2], count[3]);
             table += buf;
             if (first)
                 shared = img_b;
-            if (set.steps == 0)
+            if (set.pull == 0)
                 at0 = img_b;
-            if (set.steps == 1024 && set.limit > 1e29f) {
-                // what an unlimited bias adds against none (red), and what the shared one does (written
+            if (set.pull == 1.0 / 256 && set.limit > 1e29) {
+                // what an unlimited pull adds against none (red), and what the shared one does (written
                 // first: the frame's own overlays)
                 std::vector<u32> gain(img_b);
                 for (u32 i = 0; i < W * H; i++)
                     if (img_b[i] != at0[i])
                         gain[i] = 0xFF0000FFu;
-                write_png(out + "/" + name + "_overlay_bias0.png", at0.data(), W, H);
+                write_png(out + "/" + name + "_overlay_pull0.png", at0.data(), W, H);
                 write_png(out + "/" + name + "_overlay_unlimited_gain.png", gain.data(), W, H);
                 u32 differ = 0;
                 for (u32 i = 0; i < W * H; i++)
                     differ += shared[i] != at0[i];
                 char b2[96];
-                snprintf(b2, sizeof(b2), "\n    (the shared setting changes %u pixels against no bias)", differ);
+                snprintf(b2, sizeof(b2), "\n    (the shared setting changes %u pixels against no pull)", differ);
                 table += b2;
             }
         }
-        sb.set_overlay_depth_bias((f32)g3::OVERLAY_DEPTH_BIAS, g3::OVERLAY_DEPTH_BIAS_LIMIT);
-        log("selftest g3drender: %s: %u overlay items; by depth bias: the pixels they change, by the view distance "
-            "under them (under 300 / 300-1000 / 1000-3000 / beyond 3000 units), and the overlay fragments the bias let "
-            "in, by how far behind what was there they are (under 1 / 1-10 / 10+ units):%s",
+        sb.set_overlay_pull(g3::OVERLAY_DEPTH_PULL, g3::OVERLAY_PULL_LIMIT);
+        log("selftest g3drender: %s: %u overlay items; by pull: the pixels they change, by the view distance under "
+            "them (under 300 / 300-1000 / 1000-3000 / beyond 3000 units):%s",
             name, n_overlay_items, table.c_str());
     }
     if (n_views)
