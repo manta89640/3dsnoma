@@ -1,9 +1,10 @@
-// A stand-in for the island's content (content.h) until the gameplay's is there: it "loads" for a
-// while (NOMA_WUHU_LOAD_MS, 1500 by default: long enough for the loading rings to show) and then
-// shows the island's sky colour over the whole screen (#83D5FF, its day fog: a full-screen white
-// picture, Common/Common_White_Bg.lex, given that colour), so that the scene's shell (the way in
-// and out, the rings, the caption, the window) can be run and checked on its own, over something
-// as light as the island will be. (The gameplay's content replaces this file.)
+// A stand-in for the island's content (content.h), NOMA_WUHU_PLACEHOLDER=1: it "loads" for a while
+// (NOMA_WUHU_LOAD_MS, 1500 by default: long enough for the loading rings to show) and then shows
+// the island's sky colour over the whole screen (#83D5FF, its day fog: a full-screen white picture,
+// Common/Common_White_Bg.lex, given that colour), so that the scene's shell (the way in and out, the
+// rings, the caption, the window) can be run and checked on its own, without the island's package
+// (island.cpp's content needs your Wii Sports Resort's, staged), over something as light as the
+// island.
 #include <algorithm>
 #include <cstdlib>
 
@@ -46,6 +47,6 @@ private:
 
 }  // namespace
 
-IslandContent* make_content() { return new Placeholder(); }
+IslandContent* make_placeholder_content() { return new Placeholder(); }
 
 }  // namespace engine::wuhu

@@ -1,8 +1,10 @@
 // The island's third-person camera: it orbits the Mii's head at a distance and a pitch the player can
 // change, swings slowly round behind the Mii while it walks (unless the player has just turned the
 // camera), keeps clear of the terrain by pulling in along its line of sight, and never goes under
-// the ground or the water. It produces the native g3d's Camera (engine/g3d/world.h) in island units;
-// the scene scales it by k for the Mii's guest camera (engine::g3d::scaled).
+// the ground or the water; it looks a little over the Mii from afar (the Mii low in the picture, the
+// island before it), at its middle from close by. It produces the native g3d's Camera
+// (engine/g3d/world.h) in island units; the scene scales it by k for the Mii's guest camera
+// (engine::g3d::scaled).
 #pragma once
 
 #include "engine/collision/kcl.h"
@@ -14,8 +16,10 @@ using engine::collision::f32;
 using engine::math::Vec3;
 
 struct FollowCameraParams {
-    f32 head;                                 // the point looked at, above the Mii's feet
+    f32 head;                                 // the point orbited, above the Mii's feet
     f32 distance, min_distance, max_distance; // from it (what the player chooses, and the limits)
+    f32 aim_near, aim_far;                    // the point looked at, above the feet: from
+                                              // min_distance, and from `distance` on (between: between)
     f32 pitch, min_pitch, max_pitch;          // degrees, looking down
     f32 orbit_rate, pitch_rate;               // degrees a second at full tilt
     f32 zoom_rate;                            // the distance's change a second at full tilt (x e)
@@ -48,6 +52,7 @@ public:
     void update(const FollowCameraInput& in, Vec3 feet, f32 mii_yaw, f32 speed, f32 dt);
 
     const engine::g3d::Camera& camera() const { return cam_; }
+    Vec3 pivot() const { return target_; }  // the point orbited (the terrain is kept off the line to it)
     f32 yaw() const { return yaw_; }      // the way it looks on x/z (nw4r degrees: 0 = +z)
     f32 pitch() const { return pitch_; }
     f32 distance() const { return dist_; }  // to the target now (pulled in or not)

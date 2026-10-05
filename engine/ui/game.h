@@ -15,13 +15,14 @@ inline u32 wipe() { return guest::load32(GA_layout_parts_Wipe_sInstance); }     
 inline u32 controller() { return guest::load32(GA_input_Controller_sInstance); }  // the input manager
 
 // the controller's KPAD status: +0xB40 the buttons held, +0xB44 those newly pressed this frame
-// (KPAD bits: B 0x400, A 0x800, D-pad LEFT 0x1, RIGHT 0x2, DOWN 0x4, UP 0x8), +0xB60 the pointer's
+// (KPAD bits: B 0x400, A 0x800, 1 0x200, 2 0x100, D-pad LEFT 0x1, RIGHT 0x2, DOWN 0x4, UP 0x8; the
+// 3DS's X and Y are 1 and 2), +0xB60 the pointer's
 // position (two f32), +0xB9E whether the pointer is on the screen
 inline u32 buttons_triggered() { return guest::load32(controller() + 0xB44); }
 inline u32 buttons_held() { return guest::load32(controller() + 0xB40); }
 enum : u32 {
     PAD_LEFT = 0x1, PAD_RIGHT = 0x2, PAD_DOWN = 0x4, PAD_UP = 0x8, PAD_PLUS = 0x10,
-    PAD_B = 0x400, PAD_A = 0x800, PAD_MINUS = 0x1000,
+    PAD_TWO = 0x100, PAD_ONE = 0x200, PAD_B = 0x400, PAD_A = 0x800, PAD_MINUS = 0x1000,
 };
 // the pointer is on the screen (KPADStatus dpd_valid_fg, s8): on the 3DS, while the touch screen or
 // the circle pad was used in the last three seconds

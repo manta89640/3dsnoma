@@ -461,6 +461,51 @@ bool platform_io_thread_start(void (*fn)()) {
     return true;
 }
 
+// ---- workers (platform_worker_start): below the main thread in priority, on the GPU thread's core
+// (the New 3DS's third, else the system core), which is mostly idle while a scene loads under a
+// black screen; on the main thread's core, in its waits, where that can't be had. Each has its own
+// stack for the exception handler, freed with it.
+struct Worker {
+    void (*fn)(void*);
+    void* arg;
+    alignas(8) u8 exception_stack[16 << 10];
+};
+bool platform_worker_start(void (*fn)(void*), void* arg) {
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    bool n3ds = false;
+    APT_CheckNew3DS(&n3ds);
+    Worker* w = new Worker;
+    w->fn = fn, w->arg = arg;
+    auto body = [](void* p) {
+        Worker* w = (Worker*)p;
+        threadOnException(on_arm_exception, w->exception_stack + sizeof(w->exception_stack),
+                          WRITE_DATA_TO_HANDLER_STACK);
+        w->fn(w->arg);
+        delete w;
+    };
+    const int below = prio < 0x3F ? prio + 1 : prio;
+    Thread t = threadCreate(body, w, 64 * 1024, below, n3ds ? 2 : 1, true);
+    if (!t)
+        t = threadCreate(body, w, 64 * 1024, below, -2, true);
+    if (!t) {
+        delete w;
+        return false;
+    }
+    return true;
+}
+
+const std::string& data_dir() {
+    static const std::string s_dir = DATA_DIR;
+    return s_dir;
+}
+
+bool platform_native_memory(u32* heap_free, u32* linear_free) {
+    *heap_free = __ctru_heap_size - (u32)mallinfo().uordblks;
+    *linear_free = (u32)linearSpaceFree();
+    return true;
+}
+
 // ---- input: the 3DS controls as a Wii Remote
 static WiimoteInput s_in;
 

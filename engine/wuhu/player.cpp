@@ -9,13 +9,15 @@
 // (room_BodyController_Move_Steer moves the body the same way), so a turn is an arc; a turn of more
 // than about 80 degrees slows it while it comes round.
 //
-// The ground has three kinds of slope. Walkable (normal y at least walkable_ny, 45.6 degrees): the
+// The ground has three kinds of slope. Walkable (normal y at least walkable_ny, 50 degrees): the
 // Mii walks on it, up and down, following it within a step up and a little more down. Steep: it
 // can't be climbed, and the Mii slides down it rather than walking (a step onto it from above is a
 // fall). Upright (normal y under wall_ny, 72.5 degrees) and overhanging: a wall. On the island this
 // is the rock's split (research placement.md §3.3: a fifth of 0x1103 by area is steep), cliffs and
 // buildings are upright, and every path, beach and lawn is walkable (no dirt or sand triangle is
-// steeper than 45 degrees, under 1 % of the grass).
+// steeper than 45 degrees, under 1 % of the grass); 50 rather than 45 degrees adds the grass hills
+// and rock shelves WSR's cycling routes pass, not the 50-58 degree rock faces that would read as
+// climbing (research reach.md §8: 73 % of the main island is then walkable, every course on it).
 //
 // The body. Two spheres: the lower one rests just above the step height (so curbs and stairs are the
 // ground's business, not the walls'), the upper one reaches the top of the head. Solid for them:
@@ -28,8 +30,10 @@
 //      feet: steep and higher, lava, or water deeper than knee-deep (and deeper than where the Mii
 //      stands now) refuse the step; no ground in reach, or steep ground below, is a drop, taken only
 //      where the fall (and the slide after it) ends on ground fit to stand on (walkable, dry or
-//      shallow water, not lava); a refused step is tried along x and along z alone, so the Mii
-//      slides along a shore or a ledge;
+//      shallow water, not lava) no more than max_drop (about two Mii heights) below: a deeper drop
+//      is refused as a wall would be, so that the Mii never falls into a cove or a pit it can't
+//      climb out of (research reach.md §6: ten such traps on the island, the deepest 700 units); a
+//      refused step is tried along x and along z alone, so the Mii slides along a shore or a ledge;
 //   3. the spheres at the new height must be free, or the step is refused (a low ceiling).
 // Falling and sliding: gravity (9.8 m/s^2: Wii no Ma's units are about centimetres) until walkable
 // ground is reached; on steep ground the Mii slides down the slope at run speed, keeping to it (a face
@@ -80,12 +84,15 @@ PlayerParams PlayerParams::make(f32 k, f32 scale, Gait gait) {
     p.dead_zone = 0.15f;
     p.run_tilt = 0.6f;
     p.radius = 0.2f * h;
-    p.step_up = 0.25f * h;  // a 40 cm step for a 1.58 m Mii
+    // a 50 cm step for a 1.58 m Mii (5 units at k = 10: the town's kerbs, the gangways' lips, the
+    // ruins' rubble; research reach.md §8)
+    p.step_up = 0.32f * h;
     p.knee = p.step_up + p.radius;
     p.chest = 0.75f * h;    // the upper sphere's top at 0.95 h
     p.snap_down = 0.3f * h;
+    p.max_drop = 1.9f * h;  // 30 units at k = 10
     p.wade_depth = 0.3f * h;  // about knee-deep
-    p.walkable_ny = 0.7f;     // 45.6 degrees (research placement.md §3.3)
+    p.walkable_ny = 0.643f;   // 50 degrees (research reach.md §8)
     p.wall_ny = 0.3f;         // 72.5 degrees
     p.gravity = 980.0f / k;
     p.max_fall_speed = 5000.0f / k;
@@ -140,11 +147,12 @@ f32 Player::water_above(f32 x, f32 z, f32 ground_y, f32 top_y) const {
 }
 
 // Can a fall from `from_y` end well here: the ground below (and, where that is steep, where sliding
-// down it leads, in steps of the radius) walkable, not lava, under no more than knee-deep water.
-bool Player::landing_ok(f32 x, f32 z, f32 from_y) const {
+// down it leads, in steps of the radius) walkable, not lava, under no more than knee-deep water, and
+// no lower than `lowest`.
+bool Player::landing_ok(f32 x, f32 z, f32 from_y, f32 lowest) const {
     f32 y = from_y;
     for (int i = 0; i < 64; i++) {
-        Ground g = ground_at(x, z, i ? y + p_.step_up : y, -1e9f);
+        Ground g = ground_at(x, z, i ? y + p_.step_up : y, lowest);
         if (!g.found || g.attr == KCL_LAVA || water_above(x, z, g.y, y) > p_.wade_depth)
             return false;
         if (g.n.y >= p_.walkable_ny)
@@ -208,9 +216,9 @@ void Player::update(const PlayerInput& in, f32 dt) {
 }
 
 void Player::tick(const PlayerInput& in, f32 f) {
-    // (placed on steep ground: it slides)
+    // (placed on steep ground: it slides, however far down that takes it)
     if (!airborne_ && ground_n_.y < p_.walkable_ny)
-        start_fall(true);
+        start_fall(true, -1e30f);
     if (airborne_) {
         fall(f);
         return;
@@ -279,11 +287,12 @@ bool Player::try_step(Vec3 d) {
         // a drop, or a slope to slide down (from its surface, within a step down, unless it is
         // upright enough to be a wall to the body)
         p.y = steep && g.n.y >= p_.wall_ny ? g.y : pos_.y;
-        if (!landing_ok(p.x, p.z, pos_.y) || ((p.y != slid_at || !free) && overlap(p) > tol))
+        const f32 lowest = pos_.y - p_.max_drop;
+        if (!landing_ok(p.x, p.z, pos_.y, lowest) || ((p.y != slid_at || !free) && overlap(p) > tol))
             return false;
         last_ground_ = pos_;
         pos_ = p;
-        start_fall(false);
+        start_fall(false, lowest);
         if (steep)
             ride_slope(g.n);
         return true;
@@ -300,11 +309,12 @@ bool Player::try_step(Vec3 d) {
     return true;
 }
 
-void Player::start_fall(bool slide) {
+void Player::start_fall(bool slide, f32 lowest) {
     airborne_ = true;
     sliding_ = false;
     vy_ = 0;
     air_ticks_ = 0;
+    fall_lowest_ = lowest;
     if (slide)
         ride_slope(ground_n_);
 }
@@ -330,7 +340,7 @@ void Player::fall(f32 f) {
     f32 sp = sliding_ ? p_.slide_speed : speed_;
     if (sp > 0) {
         Vec3 q = slide_off_walls(pos_ + dir * (sp * f), nullptr);
-        if (landing_ok(q.x, q.z, pos_.y))
+        if (landing_ok(q.x, q.z, pos_.y, fall_lowest_))
             p.x = q.x, p.z = q.z;
         else if (!sliding_)
             speed_ = 0;

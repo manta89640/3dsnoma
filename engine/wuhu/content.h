@@ -18,11 +18,15 @@ class Package;
 
 namespace engine::wuhu {
 
-// what the player does, read once a frame by the scene
+// what the player does, read once a frame by the scene (scene.cpp's read_controls says which
+// buttons give what)
 struct Controls {
     u32 held = 0, pressed = 0;       // the remote's buttons held and newly pressed (KPAD bits: engine/ui/game.h)
     f32 move_x = 0, move_y = 0;      // the move stick (the 3DS's circle pad): -1..1, x right, y up
-    f32 camera_x = 0, camera_y = 0;  // the camera stick (C-stick, L/R): -1..1, x right, y up
+    f32 camera_x = 0, camera_y = 0;  // the camera stick (C-stick, L/R, the D-pad): -1..1, x turns the
+                                     // view right, y up looks up
+    f32 zoom = 0;                    // -1..1: + takes the camera further out
+    bool behind = false;             // (pressed) the camera round behind the Mii now
 };
 
 class IslandContent {
@@ -53,8 +57,8 @@ public:
     virtual void warp(u32 marker) { (void)marker; }
 };
 
-// the island's content, made by the scene's constructor (the gameplay's; content_placeholder.cpp
-// until it is there)
+// the island's content, made by the scene's constructor (island.cpp; NOMA_WUHU_PLACEHOLDER=1: the
+// stand-in of content_placeholder.cpp, which shows the shell without the island's package)
 IslandContent* make_content();
 
 }  // namespace engine::wuhu
