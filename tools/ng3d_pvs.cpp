@@ -51,8 +51,6 @@ struct V3 {
     float x, y, z;
 };
 V3 operator-(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-V3 operator+(V3 a, V3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-V3 operator*(V3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
 float dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 
@@ -171,11 +169,6 @@ bool drawn(const Tri& t, V3 eye) {
     return t.cull == 2 ? front : t.cull == 1 ? !front : false;
 }
 
-float box_dist(const float* b, float x, float y, float z) {
-    const float dx = std::max(std::max(b[0] - x, x - b[3]), 0.0f), dy = std::max(std::max(b[1] - y, y - b[4]), 0.0f),
-                dz = std::max(std::max(b[2] - z, z - b[5]), 0.0f);
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
 // the distance range from any point of box a to box b
 void box_range(const float* a, const float* b, float* lo, float* hi) {
     float l = 0, h = 0;
