@@ -466,10 +466,14 @@ void test_views() {
         "materials (%s), their depth bias %u steps, at most %g units",
         path.c_str(), load_ms, prepare_ms, (double)k, overlays, overlay_names.c_str(), g3::OVERLAY_DEPTH_BIAS,
         (double)g3::OVERLAY_DEPTH_BIAS_LIMIT);
-    // the clear colour: fog 0's, as preview.py's background
+    // the clear colour: the first fog in use's, as preview.py's background (a package that turns
+    // fog 0 off, as the restaged island does, clears to the sea's fog 1)
     u32 clear = 0x00E6B380u;  // (0.5, 0.7, 0.9)
-    if (pkg->fogs().count)
-        clear = pkg->fogs()[0].rgba[0] | pkg->fogs()[0].rgba[1] << 8 | pkg->fogs()[0].rgba[2] << 16;
+    for (const fm::Fog& f : pkg->fogs())
+        if (f.type != fm::FOG_NONE) {
+            clear = f.rgba[0] | f.rgba[1] << 8 | f.rgba[2] << 16;
+            break;
+        }
     const std::vector<g3::Material>& mats = w.materials();
     auto overlay_item = [&](const g3::DrawItem& it) { return g3::is_overlay(mats[pkg->batches()[it.batch].material]); };
     const HostEfb e = gx_host_efb();

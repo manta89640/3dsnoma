@@ -260,9 +260,11 @@ inline s32 dot3(const s32* a, const s32* b) {
     return clampi(r, 0, 255);
 }
 
-// the combiners for one pixel: src holds PRIMARY_COLOR and TEXTURE0-2 (by source number)
+// the combiners for one pixel: src holds PRIMARY_COLOR and TEXTURE0-2 (by source number). The buffer
+// stage 0 reads is 0; what goes in it first is GPUREG_TEXENV_BUFFER_COLOR, which both PICA paths
+// (gx_pica.cpp, g3d_pica.cpp) set to white: what stage 1 reads, and later stages until a stage updates it
 inline C4 run_combiners(const Item& it, C4* src) {
-    C4 prev = {{0, 0, 0, 0}}, buffer = {{0, 0, 0, 0}}, next = {{0, 0, 0, 0}};
+    C4 prev = {{0, 0, 0, 0}}, buffer = {{0, 0, 0, 0}}, next = {{255, 255, 255, 255}};
     for (u32 s = 0; s < it.n_stages; s++) {
         const CombinerStage& st = it.stage[s];
         src[engine::gx::SRC_PREVIOUS_BUFFER] = buffer;
