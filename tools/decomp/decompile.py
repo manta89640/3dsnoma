@@ -194,6 +194,9 @@ PATCHED_NAMES = {
     "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, the license agreement
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
     "g3d_living_Poster_ctor",  # the room's poster: hidden with none to show (engine/system/room_accessories.cpp)
+    # nw4r::g3d's model draw, natively (engine/g3d/live_draw.cpp; the game's own stays for the
+    # NOMA_CHECK_G3D_LIVE check, and draws until the backends take live models)
+    "nw4r_g3d_DrawResMdlDirectly",
     # the options' save-data button: its push asks through the system prompt (runtime/patches/menus.cpp)
     "scene_OptionScene_StateTop_OnButton", "app_SystemPrompt_OpenPending",
     "model_Weather_Read",  # the forecast, read through WiiConnect24: none offline

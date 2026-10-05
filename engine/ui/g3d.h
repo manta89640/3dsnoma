@@ -112,7 +112,7 @@ inline void camera_set_perspective(u32 cam_word, f32 fovy, f32 aspect, f32 n, f3
 }
 
 // G3DState::Invalidate: g3d sends all its GX state again before its next draw
-inline void invalidate_gx_state() { g::nw4r_g3d_G3DState_Invalidate(); }
+inline void invalidate_gx_state() { g::nw4r_g3d_G3dReset(); }
 // A root's draw as g3d::Stage::Draw (g3d_Stage_Draw) does it, split around the opaque and the
 // translucent passes so that native drawing can go between them: dither on, the current camera's
 // viewport set to the whole screen by app::Renderer (app_Renderer_SetCameraViewport,

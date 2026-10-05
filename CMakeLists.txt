@@ -63,6 +63,9 @@ set(ENGINE_SOURCES
   engine/cx/uncompress.cpp
   engine/g3d/anim.cpp
   engine/g3d/g3d.cpp
+  engine/g3d/live_draw.cpp
+  engine/g3d/live_material.cpp
+  engine/g3d/live_shape.cpp
   engine/g3d/material.cpp
   engine/g3d/native_draw.cpp
   engine/g3d/package.cpp

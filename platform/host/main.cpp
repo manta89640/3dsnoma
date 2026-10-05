@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 
 #include "runtime/hw/gx/raster.h"
+#include "engine/g3d/live_draw.h"
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/soft_backend.h"
 #include "engine/input/remote.h"
@@ -216,11 +217,15 @@ struct HostRenderer : SoftRenderer {
     bool drawing = true;
     bool texture_copies = false;  // seen one: draw every frame
     void draw(u32 prim, u32 vat, u32 count, const u8* data) override {
+        engine::g3d::live::check_gx_draw(prim, vat, count, data);
         if (drawing)
             SoftRenderer::draw(prim, vat, count, data);
     }
-    // (a native draw in a frame not drawn is only retired)
-    void native(u32 id) override { engine::g3d::native_draw_execute(id, drawing); }
+    // (a native draw in a frame not drawn is only retired; NOMA_CHECK_G3D_LIVE's markers aren't draws)
+    void native(u32 id) override {
+        if (!engine::g3d::live::check_marker(id))
+            engine::g3d::native_draw_execute(id, drawing);
+    }
     void efb_copy(u32 value) override {
         if (!(value & 0x4000) && !texture_copies) {  // (bit 14: a copy to the frame buffer)
             texture_copies = true;
