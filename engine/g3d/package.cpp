@@ -46,7 +46,7 @@ bool finite(const f32* v, int n) {
 // bytes of a vertex of this layout (VtxAttr order: POS or POS16, NRM, CLR, UV0, UV1)
 u32 vertex_bytes(u32 attrs, u32 flags) {
     const u32 uv = (flags & fmt::VB_UV_FLOAT) ? 8 : 4;
-    return (attrs & fmt::VA_POS ? 12 : attrs & fmt::VA_POS16 ? 8 : 0) + (attrs & fmt::VA_NRM ? 4 : 0) +
+    return (attrs & fmt::VA_POS ? 12 : 0) + (attrs & fmt::VA_POS16 ? 8 : 0) + (attrs & fmt::VA_NRM ? 4 : 0) +
            (attrs & fmt::VA_CLR ? 4 : 0) + (attrs & fmt::VA_UV0 ? uv : 0) + (attrs & fmt::VA_UV1 ? uv : 0);
 }
 
@@ -96,6 +96,11 @@ bool Package::check(std::string* error) {
     const fmt::Header& h = *(const fmt::Header*)data_;
     if (h.magic != fmt::MAGIC)
         return fail(error, "not an NG3D package (magic %08X)", h.magic);
+    if (h.version == 1)
+        return fail(error, "NG3D version 1, from before the island's speed work (version %u: compact positions, "
+                           "prelit materials, cell visibility, detail batches): stage the island again "
+                           "(tools/wuhu/stage_wuhu.py)",
+                    fmt::VERSION);
     if (h.version != fmt::VERSION)
         return fail(error, "version %u (this reads %u)", h.version, fmt::VERSION);
     if (h.file_size != size_)
@@ -251,11 +256,12 @@ bool Package::check_geometry(std::string* error) {
     Span<fmt::VertexBuffer> vbs = vertex_buffers();
     for (u32 i = 0; i < vbs.count; i++) {
         const fmt::VertexBuffer& v = vbs[i];
-        if (!(v.attrs & fmt::VA_POS) == !(v.attrs & fmt::VA_POS16) || (v.attrs & ~63u) ||
-            (v.flags & ~(u32)fmt::VB_UV_FLOAT))
+        // positions: f32, or s16 with the buffer's origin and scale (one of the two)
+        const bool p32 = v.attrs & fmt::VA_POS, p16 = v.attrs & fmt::VA_POS16;
+        if (p32 == p16 || (v.attrs & ~63u) || (v.flags & ~(u32)fmt::VB_UV_FLOAT))
             return fail(error, "vertex buffer %u: attributes %02X, flags %02X", i, v.attrs, v.flags);
-        if ((v.attrs & fmt::VA_POS16) && (!(v.pos_scale > 0) || !std::isfinite(v.pos_scale) || !finite(v.pos_origin, 3)))
-            return fail(error, "vertex buffer %u: position origin and scale", i);
+        if (!finite(v.pos_origin, 3) || !std::isfinite(v.pos_scale) || (p16 && !(v.pos_scale > 0)))
+            return fail(error, "vertex buffer %u: position origin and scale (%g)", i, (double)v.pos_scale);
         if (v.stride < vertex_bytes(v.attrs, v.flags) || v.stride % 4)
             return fail(error, "vertex buffer %u: stride %u for a %u-byte layout", i, v.stride, vertex_bytes(v.attrs, v.flags));
         if (v.count > 65536 || v.data % 16)
@@ -442,14 +448,19 @@ bool Package::check_env(std::string* error) {
         !(e.cell_size >= 0) || !finite(e.grid_origin, 2))
         return fail(error, "ENVR: bounds, scale or grid");
     if (!(e.detail_distance >= 0) || !std::isfinite(e.detail_distance))
-        return fail(error, "ENVR: detail distance");
-    // the cells' visibility rows (CVIS): a row of pvs_row_bytes a cell, a bit a cell in it
+        return fail(error, "ENVR: detail distance %g", (double)e.detail_distance);
+    // the visibility rows (CVIS): one a cell, each with a bit for every cell, the section exactly
+    // that size; no section without the rows
     const fmt::Section* cvis = section(fmt::SEC_CVIS);
     if (e.pvs_row_bytes) {
-        const u32 n = cells().count;
-        if (!cvis || (uint64_t)e.pvs_row_bytes * 8 < n || cvis->size != (uint64_t)e.pvs_row_bytes * n ||
-            !(e.pvs_max_height > 0) || !std::isfinite(e.pvs_max_height))
-            return fail(error, "CVIS: %u bytes for %u cells of %u bytes a row", cvis ? cvis->size : 0, n, e.pvs_row_bytes);
+        const u32 n_cells = cells().count;
+        if (e.pvs_row_bytes < (n_cells + 7) / 8)
+            return fail(error, "ENVR: visibility rows of %u bytes for %u cells", e.pvs_row_bytes, n_cells);
+        if (!cvis || (uint64_t)n_cells * e.pvs_row_bytes != cvis->size)
+            return fail(error, "CVIS: %u bytes for %u cells' rows of %u bytes", cvis ? cvis->size : 0, n_cells,
+                        e.pvs_row_bytes);
+        if (!(e.pvs_max_height > 0) || !std::isfinite(e.pvs_max_height))
+            return fail(error, "ENVR: visibility height %g", (double)e.pvs_max_height);
     } else if (cvis && cvis->size) {
         return fail(error, "CVIS without ENVR's pvs_row_bytes");
     }

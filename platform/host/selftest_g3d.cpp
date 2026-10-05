@@ -2,11 +2,14 @@
 // here: loading and every check of a corrupted file, texture conversion (each GX format through
 // pica_tex.h to its PICA format, decoded back and compared with runtime/hw/gx/texture.cpp's GX
 // decode; CMPR as ETC1 by PSNR), the PICA tiling round trip, animation curves against hand-computed
-// values, materials, a world's culling, detail levels and draw order, and the native-draw packet ring
-// (order, wrap-around, a renderer that never runs, release). With NOMA_G3D_PACKAGE=path (default:
-// wuhu/island.ng3d in the working directory, if there) the real package is loaded and drawn from each of
-// its view_* markers, and its WorldStats are logged. NOMA_G3D_WRITE_TEST=path writes the test
-// scene's package (for tools/ng3d_bake).
+// values, materials (prelit ones too), a world's culling, detail levels and draw order (the opaque
+// items grouped by material), its visibility rows (the eye's cell and height), detail batches, the
+// animation rate by size and the combiners' translations kept, and the native-draw packet ring (order,
+// wrap-around, a renderer that never runs, release). With NOMA_G3D_PACKAGE=path (default:
+// wuhu/island_v2.ng3d, else wuhu/island.ng3d in the working directory, if there) the real package is
+// loaded and drawn from each of its view_* markers, and its WorldStats and the World's time are
+// logged (a version 1 package is refused: noted, not failed). NOMA_G3D_WRITE_TEST=path writes the
+// test scene's package (for tools/ng3d_bake).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -18,6 +21,7 @@
 #include <vector>
 
 #include "runtime.h"
+#include "engine/collision/kcl.h"
 #include "engine/g3d/anim.h"
 #include "engine/g3d/material.h"
 #include "engine/g3d/native_draw.h"
@@ -103,6 +107,7 @@ struct TestPackage {
     std::vector<fm::Marker> marks;
     std::vector<fm::Collision> colls;
     std::vector<std::vector<u8>> blobs;
+    std::vector<u8> cvis;  // the visibility rows (env.pvs_row_bytes a cell)
     fm::Env env = {};
     bool has_env = true;
 
@@ -166,6 +171,8 @@ struct TestPackage {
         w.section(fm::SEC_VDAT, vdat.data(), (u32)vdat.size(), 0);
         w.section(fm::SEC_TDAT, tdat.data(), (u32)tdat.size(), 0, 128);
         w.section(fm::SEC_BLOB, blob.data(), (u32)blob.size(), 0);
+        if (!cvis.empty())
+            w.section(fm::SEC_CVIS, cvis.data(), (u32)cvis.size(), 0);
         return w.finish();
     }
 
@@ -240,6 +247,30 @@ struct TestPackage {
         return (u16)(batches.size() - 1);
     }
 
+    // the same box with compact positions (fmt::VA_POS16: s16 x4 from its centre in steps of 1/64:
+    // exact for these corners), normal, colour, uv0
+    u16 add_box_batch16(Vec3 c, Vec3 e, u16 material) {
+        const u16 b = add_box_batch(c, e, material);
+        fm::VertexBuffer& vb = vbs.back();
+        std::vector<u8>& d = vdata.back();
+        std::vector<u8> out(8 * 20);
+        const f32 scale = 1.0f / 64;
+        for (int i = 0; i < 8; i++) {
+            TestVertex v;
+            memcpy(&v, &d[i * sizeof(v)], sizeof(v));
+            const s16 p[4] = {(s16)std::lround((v.pos[0] - c.x) / scale), (s16)std::lround((v.pos[1] - c.y) / scale),
+                              (s16)std::lround((v.pos[2] - c.z) / scale), 0};
+            memcpy(&out[i * 20], p, 8);
+            memcpy(&out[i * 20 + 8], v.nrm, 4);
+            memcpy(&out[i * 20 + 12], v.clr, 4);
+            memcpy(&out[i * 20 + 16], v.uv, 4);
+        }
+        d = out;
+        vb.attrs = fm::VA_POS16 | fm::VA_NRM | fm::VA_CLR | fm::VA_UV0, vb.stride = 20;
+        vb.pos_origin[0] = c.x, vb.pos_origin[1] = c.y, vb.pos_origin[2] = c.z, vb.pos_scale = scale;
+        return b;
+    }
+
     u16 add_track(u8 target, u8 interp, u16 index, u16 model, u8 reg, std::vector<fm::Key> ks) {
         fm::Track t = {};
         t.target = target, t.interp = interp, t.index = index, t.model = model, t.reg = reg;
@@ -251,7 +282,8 @@ struct TestPackage {
 };
 
 // A scene: a 3x3 grid of 1000-unit cells around the origin (each two detail levels: a box, then a
-// flatter one from 1500 on; the middle cell also a translucent overlay), a tree model (two nodes, the
+// flatter one from 1500 on, with compact positions; the middle cell also a translucent overlay), a
+// tree model (two nodes, the
 // second a Y billboard) with a low-detail model from 800 on, a row of tree instances, a sky, a
 // scrolling and a colour-animated material, an animated instance, lights, a fog, markers.
 struct Scene {
@@ -305,7 +337,7 @@ struct Scene {
             for (int x = -1; x <= 1; x++) {
                 const Vec3 c = {x * 1000.0f, 0, z * 1000.0f};
                 const u16 b0 = p.add_box_batch(c, {490, 50, 490}, (x == 0 && z == 0) ? mat_scroll : mat_ground);
-                const u16 b1 = p.add_box_batch(c, {490, 10, 490}, mat_ground);
+                const u16 b1 = p.add_box_batch16(c, {490, 10, 490}, mat_ground);  // (compact positions)
                 fm::Cell cl = {};
                 const f32 box[6] = {c.x - 500, -60, c.z - 500, c.x + 500, 60, c.z + 500};
                 memcpy(cl.bbox, box, sizeof(box));
@@ -524,6 +556,7 @@ void test_load() {
     };
     add_raw("bad magic", [](std::vector<u8>& b) { b[0] = 'X'; });
     add_raw("other version", [](std::vector<u8>& b) { ((fm::Header*)b.data())->version = 99; });
+    add_raw("version 1", [](std::vector<u8>& b) { ((fm::Header*)b.data())->version = 1; });
     add_raw("file size", [](std::vector<u8>& b) { ((fm::Header*)b.data())->file_size += 32; });
     add_raw("truncated", [](std::vector<u8>& b) { b.resize(b.size() - 64); ((fm::Header*)b.data())->file_size = (u32)b.size(); });
     add_raw("section table past the end", [](std::vector<u8>& b) { ((fm::Header*)b.data())->n_sections = 100000; });
@@ -560,6 +593,21 @@ void test_load() {
     add_scene("texture matrix mode", [](Scene& s) { s.p.tmtx[0].mode = 7; });
     add_scene("vertex layout", [](Scene& s) { s.p.vbs[0].attrs = fm::VA_NRM; });
     add_scene("vertex stride", [](Scene& s) { s.p.vbs[0].stride = 20; });
+    auto compact = [](Scene& s) -> fm::VertexBuffer& { return s.p.vbs[s.p.batches[s.cell_lod1[0]].vbuf]; };
+    add_scene("both position kinds", [&](Scene& s) { compact(s).attrs |= fm::VA_POS; });
+    add_scene("compact stride", [&](Scene& s) { compact(s).stride = 16; });
+    add_scene("compact scale", [&](Scene& s) { compact(s).pos_scale = 0; });
+    add_scene("compact origin", [&](Scene& s) { compact(s).pos_origin[1] = INFINITY; });
+    add_scene("an unknown attribute", [](Scene& s) { s.p.vbs[0].attrs |= 64; });
+    auto rows = [](Scene& s, u32 bytes, u32 size) {
+        s.p.env.pvs_row_bytes = bytes, s.p.env.pvs_max_height = 500;
+        s.p.cvis.assign(size, 0xFF);
+    };
+    add_scene("visibility rows short", [&](Scene& s) { rows(s, 2, 17); });
+    add_scene("visibility rows narrow", [&](Scene& s) { rows(s, 1, 9); });
+    add_scene("visibility rows missing", [&](Scene& s) { rows(s, 2, 0); });
+    add_scene("visibility height", [&](Scene& s) { rows(s, 2, 18), s.p.env.pvs_max_height = NAN; });
+    add_scene("detail distance", [](Scene& s) { s.p.env.detail_distance = -1; });
     add_raw("vertices outside VDAT", [&](std::vector<u8>& b) {
         fm::Section* s = sec(b, fm::SEC_VTXB);
         ((fm::VertexBuffer*)(b.data() + s->offset))[3].count = 100000;
@@ -604,6 +652,8 @@ void test_load() {
         std::string why;
         g3::Package* q = load_bytes(c.bytes, &why);
         expect(q == nullptr && !why.empty(), "corrupted (%s) refused", c.what);
+        if (!strcmp(c.what, "version 1"))
+            expect(why.find("stage the island again") != std::string::npos, "a version 1 package: %s", why.c_str());
         if (!q)
             refused++;
         if (s_failures == 0 && getenv("NOMA_G3D_VERBOSE"))
@@ -858,8 +908,23 @@ void test_materials(const g3::Package& pkg, const Scene& sc) {
         alpha_read |= m.comb.stage[0].src_a[k] == engine::gx::SRC_TEXTURE0 && m.comb.stage[0].op_a[k] == engine::gx::OP_A_SRC_ALPHA;
     expect(!alpha_read, "luminance remap: no alpha read of the L8 texture left");
     g3::build_material(pkg, sc.mat_tree, &m);
-    expect(m.light.light_set == 0, "light set");
-    log("selftest g3d: materials: combiners, units, lighting, pixel state, luminance remap checked");
+    expect(m.light.light_set == 0 && !m.prelit, "light set");
+    // prelit (its lighting in the vertex colours): unlit, colour and alpha the vertex's
+    {
+        Scene s2;
+        s2.p.mats[s2.mat_tree].flags |= fm::MAT_PRELIT;
+        std::string error;
+        g3::Package* q = load_bytes(s2.p.bytes(), &error);
+        expect(q != nullptr, "a prelit material loads (%s)", error.c_str());
+        if (q) {
+            g3::build_material(*q, s2.mat_tree, &m);
+            expect(m.prelit && !m.light.lit && !m.light.alpha_lit && m.light.mat_from_vertex &&
+                       m.light.alpha_mat_from_vertex && m.light.light_set == -1,
+                   "prelit: unlit, the vertex's colour and alpha");
+            delete q;
+        }
+    }
+    log("selftest g3d: materials: combiners, units, lighting (prelit too), pixel state, luminance remap checked");
 }
 
 // ---------------------------------------------------------------- the world
@@ -916,26 +981,58 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
         expect(w.stats().triangles == st.triangles && o2.items.size() == opa.items.size(),
                "a frozen world's next frame: %u triangles (%u before)", w.stats().triangles, st.triangles);
     }
-    // the opaque order front to back: check with the camera moved so the cells' distances differ
+    // the opaque order: front to back without the grouping by material, and with it each material's
+    // items together, each group front to back (checked with the camera moved so the cells' distances
+    // differ)
     {
         g3::Camera c2 = cam;
         c2.eye = {0, 100, 1400}, c2.target = {0, 100, 0};
-        w.set_camera(c2);
         g3::Packet p2;
-        w.build_packet(g3::Pass::OPAQUE, &p2);
-        std::vector<f32> d;
-        for (const g3::DrawItem& it : p2.items) {
-            const auto pos = std::find(sc.cell_lod0.begin(), sc.cell_lod0.end(), it.batch);
-            const auto pos1 = std::find(sc.cell_lod1.begin(), sc.cell_lod1.end(), it.batch);
-            if (pos != sc.cell_lod0.end() || pos1 != sc.cell_lod1.end()) {
-                const fm::Cell& c = pkg.cells()[(u32)((pos != sc.cell_lod0.end() ? pos - sc.cell_lod0.begin() : pos1 - sc.cell_lod1.begin()))];
-                const f32 dz = std::max(std::max(c.bbox[2] - 1400.0f, 1400.0f - c.bbox[5]), 0.0f);
-                const f32 dx = std::max(std::max(c.bbox[0], -c.bbox[3]), 0.0f);
-                const f32 dy = std::max(std::max(c.bbox[1] - 100.0f, 100.0f - c.bbox[4]), 0.0f);
-                d.push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+        auto cell_items = [&](std::vector<f32>* d, std::vector<u16>* mat) {
+            d->clear(), mat->clear();
+            for (const g3::DrawItem& it : p2.items) {
+                const auto pos = std::find(sc.cell_lod0.begin(), sc.cell_lod0.end(), it.batch);
+                const auto pos1 = std::find(sc.cell_lod1.begin(), sc.cell_lod1.end(), it.batch);
+                if (pos != sc.cell_lod0.end() || pos1 != sc.cell_lod1.end()) {
+                    const fm::Cell& c = pkg.cells()[(u32)((pos != sc.cell_lod0.end() ? pos - sc.cell_lod0.begin() : pos1 - sc.cell_lod1.begin()))];
+                    const f32 dz = std::max(std::max(c.bbox[2] - 1400.0f, 1400.0f - c.bbox[5]), 0.0f);
+                    const f32 dx = std::max(std::max(c.bbox[0], -c.bbox[3]), 0.0f);
+                    const f32 dy = std::max(std::max(c.bbox[1] - 100.0f, 100.0f - c.bbox[4]), 0.0f);
+                    d->push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+                    mat->push_back(pkg.batches()[it.batch].material);
+                }
             }
-        }
+        };
+        std::vector<f32> d;
+        std::vector<u16> dm;
+        w.set_features(g3::WF_ALL & ~g3::WF_MATERIAL_SORT);
+        w.set_camera(c2);
+        w.build_packet(g3::Pass::OPAQUE, &p2);
+        cell_items(&d, &dm);
         expect(d.size() == 9 && std::is_sorted(d.begin(), d.end()), "opaque cells front to back (%zu cells)", d.size());
+        w.set_features(g3::WF_ALL);
+        w.build_packet(g3::Pass::OPAQUE, &p2);
+        cell_items(&d, &dm);
+        bool grouped = d.size() == 9;
+        for (size_t i = 1; i < dm.size(); i++) {
+            if (dm[i] != dm[i - 1] && std::find(dm.begin(), dm.begin() + (long)i, dm[i]) != dm.begin() + (long)i)
+                grouped = false;  // (a material seen before, after another)
+            if (dm[i] == dm[i - 1] && d[i] < d[i - 1])
+                grouped = false;  // (a group not front to back)
+        }
+        expect(grouped, "opaque cells grouped by material, each group front to back (%zu cells)", d.size());
+        u32 changes = 0, changes_before = 0;
+        for (size_t i = 1; i < dm.size(); i++)
+            changes += dm[i] != dm[i - 1];
+        w.set_features(g3::WF_ALL & ~g3::WF_MATERIAL_SORT);
+        w.build_packet(g3::Pass::OPAQUE, &p2);
+        cell_items(&d, &dm);
+        for (size_t i = 1; i < dm.size(); i++)
+            changes_before += dm[i] != dm[i - 1];
+        expect(changes < changes_before, "fewer material changes grouped (%u) than front to back (%u)", changes,
+               changes_before);
+        w.set_features(g3::WF_ALL);
+        w.build_packet(g3::Pass::OPAQUE, &p2);
         // from z = 1400: the far row (z = -1000, at 1900) is at its level 1
         u32 far_l1 = 0;
         for (const g3::DrawItem& it : p2.items)
@@ -1036,6 +1133,241 @@ void test_world(const g3::Package& pkg, const Scene& sc) {
         "translucent by priority then back to front, draw distance, groups, LOD scale, material and node "
         "animation, billboards checked",
         st.cells_visible, st.cells_total, st.instances_visible, st.instances_total);
+}
+
+// ---------------------------------------------------------------- visibility rows, detail batches
+// The test scene's 3x3 grid with visibility rows: from the middle cell (4) cells 1 and 6 hidden; the
+// eye's row applies within pvs_max_height (500) over the ground (the scene's, or the cell box's floor,
+// -60), not above it, not outside the grid; WF_VISIBILITY off: none. Then detail batches: the far
+// overlay (the middle cell's, 300 away) flagged as detail, detail_distance 150: culled from the
+// middle (204 away), drawn from 63 away, and with the LOD scale (2) or the feature off.
+void test_visibility() {
+    Scene sc;
+    sc.p.env.pvs_row_bytes = 2, sc.p.env.pvs_max_height = 500;
+    sc.p.cvis.assign(18, 0xFF);
+    sc.p.cvis[4 * 2 + 0] &= (u8) ~(1u << 1);  // row 4: cell 1 hidden ...
+    sc.p.cvis[4 * 2 + 0] &= (u8) ~(1u << 6);  // ... and cell 6
+    sc.p.batches[sc.xlu_batch].flags |= fm::BATCH_DETAIL;
+    sc.p.env.detail_distance = 150;
+    std::string error;
+    g3::Package* pkg = load_bytes(sc.p.bytes(), &error);
+    expect(pkg != nullptr, "a package with visibility rows and detail batches loads (%s)", error.c_str());
+    if (!pkg)
+        return;
+    expect(pkg->visibility_row(4) && pkg->visibility_row(4)[0] == (u8)~(1u << 1 | 1u << 6) && !pkg->visibility_row(9),
+           "the rows as written");
+    g3::World w(*pkg);
+    g3::Packet p;
+    g3::Camera cam;
+    // looking down -z from the middle, wide: every cell in the frustum but the near row behind
+    cam.eye = {0, 100, 0}, cam.target = {0, 100, -1000}, cam.fovy_deg = 90, cam.aspect = 2.5f, cam.near_ = 10;
+    cam.far_ = 70000;
+    auto frame = [&](f32 ground) {
+        w.set_camera(cam, ground);
+        w.build_packet(g3::Pass::OPAQUE, &p);
+        return w.stats();
+    };
+    w.update(0);
+    w.set_features(g3::WF_ALL & ~g3::WF_VISIBILITY);
+    const g3::WorldStats all = frame(NAN);
+    w.set_features(g3::WF_ALL);
+    const g3::WorldStats box = frame(NAN);       // (the floor: the cell's box, -60: 160 under the eye)
+    const g3::WorldStats ground = frame(80);     // the ground 20 under the eye
+    cam.eye.y = 600, cam.target.y = 600;
+    const g3::WorldStats high = frame(80);       // 520 over the ground: the rows don't apply
+    const g3::WorldStats high_box = frame(NAN);  // 660 over the box's floor
+    cam.eye = {0, 100, -1400}, cam.target = {0, 100, -2400};
+    const g3::WorldStats edge = frame(NAN);      // cell 1 (no row hides anything there)
+    cam.eye = {0, 100, -1600}, cam.target = {0, 100, -2600};
+    const g3::WorldStats outside = frame(NAN);   // beyond the grid
+    // (cell 1 is in the frustum from the middle; cell 6 behind the eye: only 1 counts as hidden)
+    expect(all.pvs_cell == -1 && all.cells_pvs_hidden == 0, "rows off: none applied");
+    expect(box.pvs_cell == 4 && box.cells_pvs_hidden == 1 && box.cells_visible == all.cells_visible - 1,
+           "the middle cell's row (box floor): %d, %u hidden, %u of %u visible", box.pvs_cell, box.cells_pvs_hidden,
+           box.cells_visible, all.cells_visible);
+    expect(ground.pvs_cell == 4 && ground.cells_pvs_hidden == 1, "the middle cell's row (the ground given)");
+    expect(high.pvs_cell == -1 && high_box.pvs_cell == -1 && high.cells_pvs_hidden == 0,
+           "an eye higher than the rows' height: none (%d, %d)", high.pvs_cell, high_box.pvs_cell);
+    expect(edge.pvs_cell == 1 && edge.cells_pvs_hidden == 0, "cell 1's row: %d, %u hidden", edge.pvs_cell,
+           edge.cells_pvs_hidden);
+    expect(outside.pvs_cell == -1, "outside the grid: none (%d)", outside.pvs_cell);
+    // detail batches (translucent pass): the overlay at z = -300 (300 from the eye), the other at +300
+    cam.eye = {0, 100, 0}, cam.target = {0, 100, -1000};
+    auto has = [&](u16 batch) {
+        for (const g3::DrawItem& it : p.items)
+            if (it.batch == batch)
+                return true;
+        return false;
+    };
+    w.set_camera(cam);
+    w.build_packet(g3::Pass::TRANSLUCENT, &p);
+    const bool far_culled = !has(sc.xlu_batch) && w.stats().details_culled == 1;
+    cam.eye.z = -150, cam.target.z = -1150;
+    w.set_camera(cam);
+    w.build_packet(g3::Pass::TRANSLUCENT, &p);
+    const bool near_drawn = has(sc.xlu_batch) && w.stats().details_culled == 0;
+    cam.eye.z = 0, cam.target.z = -1000;
+    w.set_camera(cam);
+    w.set_lod_scale(2);
+    w.build_packet(g3::Pass::TRANSLUCENT, &p);
+    const bool scaled = has(sc.xlu_batch);
+    w.set_lod_scale(1);
+    w.set_features(g3::WF_ALL & ~g3::WF_DETAIL);
+    w.build_packet(g3::Pass::TRANSLUCENT, &p);
+    const bool off = has(sc.xlu_batch);
+    w.set_features(g3::WF_ALL);
+    expect(far_culled && near_drawn && scaled && off,
+           "detail batch: culled beyond the distance %d, drawn nearer %d, with the LOD scale %d, the feature off %d",
+           far_culled, near_drawn, scaled, off);
+    log("selftest g3d: visibility rows: the middle cell's row hides %u cell (%u of %u visible, %u without), not "
+        "above the rows' height, not outside the grid; detail batches culled by distance (the LOD scale, the switch)",
+        box.cells_pvs_hidden, box.cells_visible, box.cells_total, all.cells_visible);
+    delete pkg;
+}
+
+// ---------------------------------------------------------------- the animation rate, the combiners kept
+// Three swaying trees in view, 200, 2500 and 8000 away (their meshes 61 units about their origin:
+// 177, 14 and 4.4 pixels across on the 3DS's screen at 45 degrees; their crowns move a fraction of a
+// pixel a frame): over
+// 12 updates the near one posed at each, the middle one every second, the far one every fourth; one
+// behind the eye never; WF_ANIM_LOD off: all at each. Props carried out of view by their animation,
+// or under a pixel across, not drawn. The water's colour (C0 red, steps 0, 255, 128, 50 a frame): translated at each new
+// value in the first loop, then found among the kept translations; no change, no translation.
+void test_anim_rate() {
+    Scene sc;
+    sc.p.insts.clear();
+    const f32 zs[4] = {-200, -2500, -8000, 400};  // (the last behind the eye)
+    for (f32 z : zs) {
+        fm::Instance in = {};
+        in.model = sc.model_tree, in.flags = fm::INST_ANIMATED, in.anim = 2;  // tree_sway
+        const f32 mtx[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, z}};
+        memcpy(in.mtx, mtx, sizeof(mtx));
+        sc.p.insts.push_back(in);
+    }
+    sc.p.models[sc.model_tree].lod_next = fm::NONE16;  // (one model at every distance)
+    std::string error;
+    g3::Package* pkg = load_bytes(sc.p.bytes(), &error);
+    expect(pkg != nullptr, "the swaying trees load (%s)", error.c_str());
+    if (!pkg)
+        return;
+    const u16 trunk = pkg->models()[sc.model_tree].first_batch;
+    g3::Camera cam;
+    cam.eye = {0, 20, 0}, cam.target = {0, 20, -1000}, cam.aspect = 5.0f / 3.0f, cam.near_ = 10, cam.far_ = 70000;
+    for (int pass = 0; pass < 2; pass++) {
+        g3::World w(*pkg);
+        if (pass)
+            w.set_features(g3::WF_ALL & ~g3::WF_ANIM_LOD);
+        g3::Packet p;
+        f32 last[3] = {NAN, NAN, NAN};
+        u32 changed[3] = {}, poses = 0;
+        for (int f = 0; f < 13; f++) {
+            w.update((f32)f);
+            w.set_camera(cam);
+            w.build_packet(g3::Pass::OPAQUE, &p);
+            if (f)
+                poses += w.stats().poses;
+            for (const g3::DrawItem& it : p.items) {
+                if (it.batch != trunk)
+                    continue;
+                const f32* m = &p.matrices[12 * it.matrix];
+                for (int i = 0; i < 3; i++)
+                    if (std::fabs(m[11] - zs[i]) < 1e-3f) {
+                        if (f && m[1] != last[i])
+                            changed[i]++;
+                        last[i] = m[1];
+                    }
+            }
+        }
+        if (!pass) {
+            // (the first update poses each, the second measures their speed: 0)
+            expect(changed[0] == 12 && changed[1] >= 6 && changed[1] <= 7 && changed[2] >= 3 && changed[2] <= 4,
+                   "animation rate by size: %u, %u, %u poses of 12 (want 12, 6, 3), %u in all", changed[0],
+                   changed[1], changed[2], poses);
+            log("selftest g3d: animation rate: trees 177, 14 and 4.4 pixels across posed at %u, %u, %u of 12 "
+                "updates; one behind the eye never",
+                changed[0], changed[1], changed[2]);
+        } else {
+            expect(changed[0] == 12 && changed[1] == 12 && changed[2] == 12 && poses == 36,
+                   "animation rate off: %u, %u, %u of 12, %u in all", changed[0], changed[1], changed[2], poses);
+        }
+    }
+    delete pkg;
+    // animated props drawn where their meshes are as posed: a tree whose animation carries it 3000
+    // units to the side (out of view, though its sphere at its matrix is in view), one 40,000 away
+    // (0.9 pixels across); WF_DETAIL off: both drawn
+    {
+        Scene s3;
+        s3.p.insts.clear();
+        fm::Anim a = {};
+        a.name = s3.p.strs.add("tree_away"), a.frames = 10, a.loop = 1;
+        a.first_track = (u32)s3.p.tracks.size(), a.n_tracks = 1;
+        s3.p.add_track(fm::TT_NODE_TRANS_X, fm::IP_STEP, 0, s3.model_tree, 0, {{0, 3000, 0}});
+        s3.p.anims.push_back(a);
+        const u16 away = (u16)(s3.p.anims.size() - 1);
+        const f32 at[2][2] = {{0, -500}, {0, -40000}};
+        const u16 anims[2] = {away, 2};
+        for (int i = 0; i < 2; i++) {
+            fm::Instance in = {};
+            in.model = s3.model_tree, in.flags = fm::INST_ANIMATED, in.anim = anims[i];
+            const f32 mtx[3][4] = {{1, 0, 0, at[i][0]}, {0, 1, 0, 0}, {0, 0, 1, at[i][1]}};
+            memcpy(in.mtx, mtx, sizeof(mtx));
+            s3.p.insts.push_back(in);
+        }
+        s3.p.models[s3.model_tree].lod_next = fm::NONE16;
+        g3::Package* q = load_bytes(s3.p.bytes(), &error);
+        expect(q != nullptr, "the props load (%s)", error.c_str());
+        if (q) {
+            g3::World w(*q);
+            g3::Packet p;
+            w.update(0);
+            w.set_camera(cam);
+            w.build_packet(g3::Pass::OPAQUE, &p);
+            const g3::WorldStats on = w.stats();
+            w.set_features(g3::WF_ALL & ~g3::WF_DETAIL);
+            w.build_packet(g3::Pass::OPAQUE, &p);
+            const g3::WorldStats off = w.stats();
+            expect(on.instances_visible == 0 && on.instances_small == 2 && off.instances_visible == 2,
+                   "props by where their meshes are and their size: %u drawn, %u not (%u with the switch off)",
+                   on.instances_visible, on.instances_small, off.instances_visible);
+            delete q;
+        }
+    }
+    // the combiners kept: the water (the middle cell, in view from the middle)
+    Scene s2;
+    pkg = load_bytes(s2.p.bytes(), &error);
+    if (!pkg)
+        return;
+    g3::World w(*pkg);
+    g3::Packet p;
+    cam.eye = {0, 100, 0}, cam.target = {0, 100, -1000};
+    u32 made = 0, kept = 0;
+    std::vector<u32> konst;
+    for (int f = 0; f < 8; f++) {
+        w.update((f32)f);
+        w.set_camera(cam);
+        w.build_packet(g3::Pass::OPAQUE, &p);
+        made += w.stats().translations, kept += w.stats().translations_cached;
+        for (const g3::MatDynamic& d : p.mat_states)
+            if (d.material == s2.mat_scroll)
+                konst.push_back(d.comb.stage[0].konst & 0xFF);
+    }
+    w.update(7.5f);  // (a step track: the same value as at 7)
+    w.set_camera(cam);
+    // (as the island's frame line reads them, after the update and before the draws: the last frame's,
+    // 50 found kept)
+    const g3::WorldStats last = w.stats();
+    w.build_packet(g3::Pass::OPAQUE, &p);
+    const u32 still = w.stats().translations + w.stats().translations_cached;
+    const std::vector<u32> want = {0, 255, 128, 50, 0, 255, 128, 50};
+    expect(made == 4 && kept == 4 && still == 0 && konst == want,
+           "combiners: %u translated, %u kept (want 4, 4), %u for an unchanged value; the constants follow", made,
+           kept, still);
+    expect(last.translations == 0 && last.translations_cached == 1,
+           "combiners: the last frame's counts until the next frame's packets (%u, %u; want 0, 1)", last.translations,
+           last.translations_cached);
+    log("selftest g3d: combiners: a looping colour animation translated %u times in 8 frames, %u found kept", made,
+        kept);
+    delete pkg;
 }
 
 // ---------------------------------------------------------------- the world's cost, at the island's scale
@@ -1257,8 +1589,15 @@ void test_real_package(const std::string& path) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     std::string error;
+    u32 version = 0;
+    if (n >= 8)
+        memcpy(&version, (const u8*)block + 4, 4);
     g3::Package* pkg = g3::Package::load(block, (u32)n, &error);
     const double load_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!pkg && version == 1) {  // (refused, rightly: the island is to be staged again)
+        log("selftest g3d: %s: %s: the real-package part skipped", path.c_str(), error.c_str());
+        return;
+    }
     expect(pkg != nullptr, "the real package loads: %s", error.c_str());
     if (!pkg)
         return;
@@ -1340,7 +1679,38 @@ void test_real_package(const std::string& path) {
         "stages (dropped)",
         world_ms, (double)w.world_scale(), approximated, (u32)w.materials().size(), approximated ? ": " : "",
         which.c_str(), indirect);
+    u32 prelit = 0, compact = 0, detail = 0;
+    for (const g3::Material& m : w.materials())
+        prelit += m.prelit;
+    for (const fm::VertexBuffer& vb : pkg->vertex_buffers())
+        compact += (vb.attrs & fm::VA_POS16) != 0;
+    for (const fm::Batch& b : pkg->batches())
+        detail += (b.flags & fm::BATCH_DETAIL) != 0;
+    const fm::Env& env = pkg->env();
+    log("selftest g3d: version 2: %u of %u materials prelit, %u of %u vertex buffers compact, %u detail batches "
+        "(culled beyond %g), visibility rows %s (%u bytes a cell, up to %g over the ground)",
+        prelit, (u32)w.materials().size(), compact, pkg->vertex_buffers().count, detail, (double)env.detail_distance,
+        env.pvs_row_bytes ? "present" : "none", env.pvs_row_bytes, (double)env.pvs_max_height);
+    // the ground under an eye, as the island scene finds it (its collision's first surface below, within
+    // the visibility rows' height; none: below that), for the rows
+    engine::collision::World col;
+    for (const fm::Collision& c : pkg->collisions())
+        col.add_kcl(pkg->at(c.data), c.size, pkg->str(c.name));
+    for (const fm::Cylinder& c : pkg->cylinders())
+        col.add_cylinder({c.x, c.z, c.y0, c.y1, c.radius});
+    col.finish();
+    auto ground_under = [&](Vec3 eye) {
+        if (!env.pvs_row_bytes)
+            return (f32)NAN;
+        const f32 reach = env.pvs_max_height + 1.0f;
+        engine::collision::Hit hit;
+        return col.ground(eye.x, eye.z, eye.y, eye.y - reach, &hit) ? hit.point.y : eye.y - reach;
+    };
+    // each view: the frame (its stats), then the World's time a frame (update, cull, both packets:
+    // the mean of 200, the animations running) with the speed-ups and without; the material changes in
+    // the items' order (what the backend sends again)
     u32 views = 0;
+    double sum_on = 0, sum_off = 0;
     for (const fm::Marker& m : pkg->markers()) {
         const char* name = pkg->str(m.name);
         if (strncmp(name, "view_", 5) != 0)
@@ -1350,19 +1720,44 @@ void test_real_package(const std::string& path) {
         cam.target = m.kind == 2 ? Vec3{m.dir[0], m.dir[1], m.dir[2]} : cam.eye + Vec3{m.dir[0], m.dir[1], m.dir[2]};
         cam.aspect = 400.0f / 240.0f, cam.near_ = 1.5f, cam.far_ = 80000;
         g3::Packet opa, xlu;
-        const auto t2 = std::chrono::steady_clock::now();
-        w.update(600);
-        w.set_camera(cam);
-        w.build_packet(g3::Pass::OPAQUE, &opa);
-        w.build_packet(g3::Pass::TRANSLUCENT, &xlu);
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
-        const g3::WorldStats& s = w.stats();
-        log("selftest g3d: %s: cells %u/%u, instances %u/%u, items %u opaque + %u translucent, %u triangles, %zu "
-            "matrices, %zu animated materials; culled and built in %.2f ms (host)",
-            name, s.cells_visible, s.cells_total, s.instances_visible, s.instances_total, s.items_opaque,
-            s.items_translucent, s.triangles, opa.matrices.size() / 12, opa.mat_states.size(), ms);
+        double ms[2] = {0, 0};
+        u32 changes[2] = {0, 0};
+        g3::WorldStats st[2];
+        for (int on = 1; on >= 0; on--) {
+            w.set_features(on ? g3::WF_ALL : 0);
+            const int frames = 200;
+            const auto t2 = std::chrono::steady_clock::now();
+            const f32 ground = ground_under(cam.eye);
+            for (int f = 0; f < frames; f++) {
+                w.update(600.0f + f);
+                w.set_camera(cam, ground);
+                w.build_packet(g3::Pass::OPAQUE, &opa);
+                w.build_packet(g3::Pass::TRANSLUCENT, &xlu);
+            }
+            ms[on] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count() / frames;
+            st[on] = w.stats();
+            for (const g3::Packet* p : {&opa, &xlu})
+                for (size_t i = 0; i < p->items.size(); i++)
+                    changes[on] += !i || pkg->batches()[p->items[i].batch].material !=
+                                             pkg->batches()[p->items[i - 1].batch].material;
+        }
+        const g3::WorldStats& s = st[1];
+        log("selftest g3d: %s: cells %u/%u (%u hidden by cell %d's row), instances %u/%u, items %u opaque + %u "
+            "translucent (%u details culled), %u triangles, %zu matrices, %zu animated materials, %u material "
+            "changes; the World %.3f ms a frame (host; %.3f without the speed-ups: %u items, %u triangles, %u "
+            "material changes)",
+            name, s.cells_visible, s.cells_total, s.cells_pvs_hidden, s.pvs_cell, s.instances_visible,
+            s.instances_total, s.items_opaque, s.items_translucent, s.details_culled, s.triangles,
+            opa.matrices.size() / 12, opa.mat_states.size(), changes[1], ms[1], ms[0],
+            st[0].items_opaque + st[0].items_translucent, st[0].triangles, changes[0]);
+        sum_on += ms[1], sum_off += ms[0];
         views++;
     }
+    w.set_features(g3::WF_ALL);
+    if (views)
+        log("selftest g3d: the World a frame, the mean of %u views: %.3f ms with the speed-ups, %.3f without (host; "
+            "the 3DS's ARM11 at 804 MHz some 20-30 times slower: an estimate)",
+            views, sum_on / views, sum_off / views);
     if (!views)
         log("selftest g3d: the package has no view_* markers");
     delete pkg;
@@ -1394,13 +1789,21 @@ void selftest_g3d() {
         if (pkg) {
             test_materials(*pkg, sc);
             test_world(*pkg, sc);
+            test_visibility();
+            test_anim_rate();
             test_native_draw(*pkg);
             delete pkg;
         }
     }
     test_world_cost();
     const char* path = getenv("NOMA_G3D_PACKAGE");
-    test_real_package(path ? path : "wuhu/island.ng3d");
+    if (!path) {  // (the restaged island while it sits beside the old one)
+        FILE* f = fopen("wuhu/island_v2.ng3d", "rb");
+        path = f ? "wuhu/island_v2.ng3d" : "wuhu/island.ng3d";
+        if (f)
+            fclose(f);
+    }
+    test_real_package(path);
     log("selftest g3d: %d checks, %d failed: %s", s_checks, s_failures, s_failures ? "MISMATCH" : "ok");
 }
 

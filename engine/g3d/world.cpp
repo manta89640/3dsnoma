@@ -1,5 +1,6 @@
-// A world drawn by the native g3d (world.h): culling, detail levels, animation, the draw order, the
-// packets.
+// A world drawn by the native g3d (world.h): culling (the frustum, distances, the visibility rows,
+// detail batches), detail levels, animation (at a rate by size; combiners translated when their
+// registers change), the draw order, the packets.
 #include "engine/g3d/world.h"
 
 #include <algorithm>
@@ -133,19 +134,49 @@ u8 clamp_u8(f32 v) {
     return (u8)(i < 0 ? 0 : i > 255 ? 255 : i);
 }
 
+// the 3DS's top screen: 240 lines (half of them: what a frustum's half height covers)
+constexpr f32 SCREEN_HALF_PX = 120;
+// the animation rate (pose_instance): every second update under ANIM_HALF_PX pixels across, every
+// fourth under ANIM_QUARTER_PX, while the nodes move under ANIM_STEP_PX (a third of it) a frame
+constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
+// an animated prop under a pixel across isn't drawn (WF_DETAIL)
+constexpr f32 SIZE_CULL_PX = 1.0f;
+
+// depth tested (less, less or equal, or their opposites) and written, colour written, neither blended
+// nor a logic op: where it comes among its kind changes nothing but the state the GPU is given (the
+// PICA tests depth after the combiners: no early test that front to back would feed). (ALWAYS, EQUAL
+// or a depth-only material would make the order show.)
+bool is_plain(const Material& m) {
+    const u8 f = m.pixel.depth_func;  // GPU_TESTFUNC: 4 less, 5 lequal, 6 greater, 7 gequal
+    return m.pixel.depth_test && m.pixel.depth_write && f >= 4 && f <= 7 && m.pixel.color_write && !m.pixel.blend &&
+           !m.pixel.logic;
+}
+
 }  // namespace
 
 struct World::Impl {
     const Package& pkg;
     f32 k = 1;
     std::vector<Material> mats;
+    u32 features = WF_ALL;
 
     // ---- material animations: the environment's (world, sea, sky), each material they drive with
     // a dynamic block (its current registers, colours, texture SRTs and what they make)
     std::vector<u16> mat_anims;
+    // a translation of a material's combiners for one set of its registers (what the translation
+    // folds into the stages' constants), kept for when the registers come back to it
+    struct CombEntry {
+        s16 reg[4][4], konst[4][4];
+        engine::gx::Combiners comb;
+        u32 used = 0;  // the update it was last wanted at (the least recent one makes way)
+        bool valid = false;
+    };
+    static constexpr u32 COMB_CACHE = 4;
     struct Dyn {
         MatDynamic d;
-        f32 srt[3][5];   // the first three texture matrices' scale s, t, rotation, translation s, t
+        f32 srt[3][5];         // the first three texture matrices' scale s, t, rotation, translation s, t
+        bool comb_stale = false;  // the registers changed since d.comb was made
+        CombEntry cache[COMB_CACHE];
     };
     std::vector<Dyn> dyn;
     std::vector<int> dyn_of;                    // per material: index into dyn, -1
@@ -156,23 +187,49 @@ struct World::Impl {
         Mtx34 mtx;          // model -> world
         Vec3 centre;        // bounding sphere of its model, world
         f32 radius, scale;  // (scale: the matrix's largest)
+        u32 slot = 0;       // its nodes' world matrices: finals[slot..] (room for its LOD chain's largest)
+        u16 posed_model = NONE;  // the model they were posed for (NONE: not yet)
+        u32 posed_tick = 0;      // the update they were posed at
+        bool animated = false;   // node tracks play on it
+        Vec3 at{0, 0, 0};        // of its nodes' places at the last pose the nearest the eye (where it
+                                 // is: an animation can carry it far from its matrix, along a path
+                                 // its sphere spans)
+        f32 speed = 0;           // the most a node's place moved an update, between its last two poses
+        Vec3 mesh_centre{0, 0, 0};  // its meshes' bounding sphere as last posed (world)
+        f32 mesh_r = 0;
     };
     std::vector<Inst> insts;
-    // node tracks per animation, by (model, node): track indices
+    // node tracks per animation, by (model, node): track indices; and per (animation, model) each
+    // node's entry in that list (-1: none)
     struct NodeTracks {
         u16 model, node;
         std::vector<u32> tracks;
     };
     std::vector<std::vector<NodeTracks>> anim_nodes;  // per animation (filled for instance animations)
+    struct NodeMap {
+        u16 anim, model;
+        std::vector<int> of_node;
+    };
+    std::vector<NodeMap> node_maps;
+    std::vector<u8> model_billboards;  // per model: it has billboard nodes
+    // per model: the radius of its meshes about its origin (its batches' boxes where their nodes rest):
+    // what the screen shows of it, which its bounding sphere (an animated prop's spans its path: a
+    // bird 5 units long flies a circle 500 across) doesn't say
+    std::vector<f32> mesh_radius;
+    u32 sea_slot = 0, sky_slot = 0;
+    bool sea_posed = false;
 
     // ---- what the scene set
     std::vector<u8> cell_hidden, model_hidden;
     f32 cell_distance = 0, inst_distance = 0, lod_scale = 1;
     f32 frame = 0;
+    u32 tick = 0;       // updates so far (the animation rates count them)
     Camera cam;
+    f32 eye_ground = NAN;
     Frustum fr;
     Mtx34 view_guest;
     bool dirty = true;  // camera, time or settings changed since the last cull
+    bool grid = false;  // the cells are the Env's grid, in order (visibility rows usable)
 
     // ---- this frame's visible set (cull())
     struct VisCell {
@@ -188,33 +245,46 @@ struct World::Impl {
     };
     std::vector<VisCell> vis_cells;
     std::vector<VisInst> vis_insts;
-    std::vector<Mtx34> finals;
+    std::vector<Mtx34> finals;  // every instance's slot, the sea's and the sky's
     WorldStats* stats = nullptr;
     // the triangles each pass's last packet holds (stats->triangles is their sum: a world that isn't
     // culled again -- frozen, the camera still -- must not count a pass twice)
     u32 pass_tris[2] = {0, 0};
 
-    // ---- packet building scratch
+    // ---- the passes' candidates (collected with the cull, sorted at their first build)
     struct Cand {
         s32 priority;
         f32 distance;
         u32 order;
         u32 final;  // its matrix: a finals index, ~0u: the identity (the static world)
+        u16 material;
+        u16 coords;  // its vertex buffer's texture coordinate scale (an index: same scale, same index)
+        bool plain;  // depth tested and written, not blended: its place among them doesn't matter
         DrawItem item;
         u32 tris;
     };
-    std::vector<Cand> cands;
+    std::vector<Cand> cands[2];
+    u32 n_sky = 0;               // the opaque pass's first candidates: the sky's, in order
+    bool sorted[2] = {false, false};
     std::vector<int> matrix_of;  // per finals entry: index in the packet's matrices, -1
     std::vector<int> state_of;   // per material: index in the packet's mat_states, -1
-    std::vector<u8> srt_changed, tev_changed;  // per dynamic block (update())
+    // per vertex buffer: its texture coordinates' scale as an index (buffers that share one share it):
+    // a material's items grouped by it want the backend's texture rows made fewer times
+    std::vector<u16> coords_of;
 
     explicit Impl(const Package& p) : pkg(p) {}
 
     void init();
-    void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, bool sky);
+    const NodeMap* node_map(u16 anim, u16 model) const;
+    void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base);
+    void billboard(u16 model, u32 base);
+    void pose_instance(u32 i, u16 model, f32 distance);
+    int eye_cell() const;
     void cull();
+    void collect();
+    void add_model_items(const VisInst& v, f32 detail);
     void build(Pass pass, Packet* p);
-    void add_model_items(const VisInst& v, Pass pass, u32 flags);
+    void refresh_combiners(Dyn& d);
 };
 
 void World::Impl::init() {
@@ -225,6 +295,8 @@ void World::Impl::init() {
         build_material(pkg, i, &mats[i]);
     cell_hidden.assign(pkg.cells().count, 0);
     model_hidden.assign(pkg.models().count, 0);
+    grid = env.pvs_row_bytes && env.cell_size > 0 &&
+           (uint64_t)env.n_cells_x * env.n_cells_z == (uint64_t)pkg.cells().count;
     // who uses each texture matrix record
     tmtx_users.assign(pkg.tex_mtx().count, {});
     for (u32 m = 0; m < pkg.materials().count; m++) {
@@ -259,6 +331,12 @@ void World::Impl::init() {
                     memcpy(d.srt[i], v, sizeof(v));
                 }
             }
+            // (the packaged registers' translation is the first one kept)
+            CombEntry& e = d.cache[0];
+            memcpy(e.reg, d.d.tev_reg, sizeof(e.reg));
+            memcpy(e.konst, d.d.tev_konst, sizeof(e.konst));
+            e.comb = d.d.comb;
+            e.valid = true;
             dyn_of[m] = (int)dyn.size();
             dyn.push_back(d);
         }
@@ -280,9 +358,43 @@ void World::Impl::init() {
             }
         }
     }
-    // instances: their bounding spheres; their animations' node tracks
+    // models with billboard nodes (turned every frame, whether posed again or not)
+    model_billboards.assign(pkg.models().count, 0);
+    for (u32 m = 0; m < pkg.models().count; m++) {
+        const fmt::Model& md = pkg.models()[m];
+        for (u32 n = 0; n < md.n_nodes; n++) {
+            const fmt::Node& nd = pkg.nodes()[md.first_node + n];
+            if ((nd.flags & fmt::NODE_BILLBOARD) && nd.billboard)
+                model_billboards[m] = 1;
+        }
+    }
+    mesh_radius.assign(pkg.models().count, 0);
+    for (u32 m = 0; m < pkg.models().count; m++) {
+        const fmt::Model& md = pkg.models()[m];
+        for (u32 b = md.first_batch; b < md.first_batch + md.n_batches; b++) {
+            const fmt::Batch& bt = pkg.batches()[b];
+            Vec3 at{0, 0, 0};
+            if (bt.node < md.n_nodes) {
+                const fmt::Node& nd = pkg.nodes()[md.first_node + bt.node];
+                at = {nd.bind[0][3], nd.bind[1][3], nd.bind[2][3]};
+            }
+            const Vec3 c = box_centre(bt.bbox), h = {bt.bbox[3] - c.x, bt.bbox[4] - c.y, bt.bbox[5] - c.z};
+            mesh_radius[m] = std::max(mesh_radius[m], length(at + c) + length(h));
+        }
+    }
+    // the most nodes a model of a chain has (a slot's size)
+    auto chain_nodes = [&](u16 model) {
+        u32 most = 1;
+        for (u32 steps = 0; model != NONE && steps <= pkg.models().count; steps++) {
+            most = std::max<u32>(most, pkg.models()[model].n_nodes);
+            model = pkg.models()[model].lod_next;
+        }
+        return most;
+    };
+    // instances: their bounding spheres, their slots; their animations' node tracks
     anim_nodes.assign(pkg.anims().count, {});
     insts.resize(pkg.instances().count);
+    u32 slots = 0;
     for (u32 i = 0; i < insts.size(); i++) {
         const fmt::Instance& in = pkg.instances()[i];
         const fmt::Model& m = pkg.models()[in.model];
@@ -291,7 +403,10 @@ void World::Impl::init() {
         n.scale = max_scale(n.mtx);
         n.centre = transform(n.mtx, box_centre(m.bbox));
         n.radius = m.radius * n.scale;
-        if (in.anim != NONE && (in.flags & fmt::INST_ANIMATED) && anim_nodes[in.anim].empty()) {
+        n.slot = slots;
+        slots += chain_nodes(in.model);
+        n.animated = in.anim != NONE && (in.flags & fmt::INST_ANIMATED);
+        if (n.animated && anim_nodes[in.anim].empty()) {
             const fmt::Anim& an = pkg.anims()[in.anim];
             for (u32 t = an.first_track; t < an.first_track + an.n_tracks; t++) {
                 const fmt::Track& tr = pkg.tracks()[t];
@@ -304,32 +419,69 @@ void World::Impl::init() {
                     list.push_back({tr.model, tr.index, {}}), it = list.end() - 1;
                 it->tracks.push_back(t);
             }
+            // each node's tracks, by model
+            for (u32 e = 0; e < anim_nodes[in.anim].size(); e++) {
+                const NodeTracks& nt = anim_nodes[in.anim][e];
+                auto mp = std::find_if(node_maps.begin(), node_maps.end(),
+                                       [&](const NodeMap& x) { return x.anim == in.anim && x.model == nt.model; });
+                if (mp == node_maps.end()) {
+                    node_maps.push_back({in.anim, nt.model, std::vector<int>(pkg.models()[nt.model].n_nodes, -1)});
+                    mp = node_maps.end() - 1;
+                }
+                if (nt.node < mp->of_node.size())
+                    mp->of_node[nt.node] = (int)e;
+            }
         }
+        n.animated = n.animated && !anim_nodes[in.anim].empty();
     }
+    if (env.sea_model != NONE)
+        sea_slot = slots, slots += std::max<u32>(1, pkg.models()[env.sea_model].n_nodes);
+    if (env.sky_model != NONE)
+        sky_slot = slots, slots += std::max<u32>(1, pkg.models()[env.sky_model].n_nodes);
+    finals.assign(slots, identity34());
+    // the vertex buffers' coordinate scales, numbered
+    std::vector<std::pair<f32, f32>> scales;
+    coords_of.resize(pkg.vertex_buffers().count);
+    for (u32 v = 0; v < coords_of.size(); v++) {
+        const fmt::VertexBuffer& vb = pkg.vertex_buffers()[v];
+        const std::pair<f32, f32> sc = (vb.flags & fmt::VB_UV_FLOAT) ? std::make_pair(1.0f, 1.0f)
+                                                                     : std::make_pair(vb.uv_scale[0], vb.uv_scale[1]);
+        auto it = std::find(scales.begin(), scales.end(), sc);
+        coords_of[v] = (u16)(it - scales.begin());
+        if (it == scales.end())
+            scales.push_back(sc);
+    }
+    matrix_of.reserve(slots);
+    state_of.reserve(mats.size());
+    vis_cells.reserve(pkg.cells().count);
+    vis_insts.reserve(insts.size() + 2);
 }
 
-// The world matrices of a model's nodes (into finals): at rest (the bind matrices) or posed by an
-// animation's node tracks at the current frame, under `mtx`; billboard nodes turned to the camera.
-void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, bool sky) {
+const World::Impl::NodeMap* World::Impl::node_map(u16 anim, u16 model) const {
+    for (const NodeMap& m : node_maps)
+        if (m.anim == anim && m.model == model)
+            return &m;
+    return nullptr;
+}
+
+// The world matrices of a model's nodes (into finals[base..]): at rest (the bind matrices) or posed
+// by an animation's node tracks at the current frame, under `mtx` (billboards: billboard()).
+void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base) {
     const fmt::Model& m = pkg.models()[model];
-    const u32 base = (u32)finals.size();
     // (a model without nodes draws its batches with the matrix it is placed with)
-    finals.resize(base + std::max<u32>(m.n_nodes, 1));
     finals[base] = mtx;
-    const std::vector<NodeTracks>* tracks = anim != NONE ? &anim_nodes[anim] : nullptr;
+    const NodeMap* map = anim != NONE ? node_map(anim, model) : nullptr;
+    const std::vector<NodeTracks>* tracks = map ? &anim_nodes[anim] : nullptr;
     f32 f = 0;
-    if (tracks && !tracks->empty()) {
+    if (tracks) {
         const fmt::Anim& an = pkg.anims()[anim];
         f = anim_frame(frame + anim_offset, an.frames, an.loop);
     }
     for (u32 k = 0; k < m.n_nodes; k++) {
         const fmt::Node& nd = pkg.nodes()[m.first_node + k];
         Mtx34 local_world;  // model space
-        const NodeTracks* nt = nullptr;
-        if (tracks)
-            for (const NodeTracks& x : *tracks)
-                if (x.model == model && x.node == k)
-                    nt = &x;
+        const NodeTracks* nt = map && k < map->of_node.size() && map->of_node[k] >= 0 ? &(*tracks)[(u32)map->of_node[k]]
+                                                                                       : nullptr;
         if (nt) {
             f32 s[3], r[3], t[3];
             memcpy(s, nd.scale, sizeof(s)), memcpy(r, nd.rotate, sizeof(r)), memcpy(t, nd.translate, sizeof(t));
@@ -351,15 +503,21 @@ void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, b
         }
         finals[base + k] = local_world;
     }
+    for (u32 k = 0; k < m.n_nodes; k++)
+        finals[base + k] = concat(mtx, finals[base + k]);
+}
+
+// A model's billboard nodes (in finals[base..]) turned to the camera, keeping their place and scale:
+// Y billboards (nw4r modes 5, 6) about the world's y axis, the others wholly; the perspective modes
+// (2, 4, 6) toward the eye, the rest along the view direction. (It reads only a matrix's place and
+// its axes' lengths, which it keeps: turning a turned matrix again is turning the one it came from.)
+void World::Impl::billboard(u16 model, u32 base) {
+    const fmt::Model& m = pkg.models()[model];
     for (u32 k = 0; k < m.n_nodes; k++) {
-        Mtx34& w = finals[base + k];
-        w = concat(mtx, w);
         const fmt::Node& nd = pkg.nodes()[m.first_node + k];
-        if (!(nd.flags & fmt::NODE_BILLBOARD) || !nd.billboard || sky)
+        if (!(nd.flags & fmt::NODE_BILLBOARD) || !nd.billboard)
             continue;
-        // turned to the camera, keeping its place and scale: Y billboards (nw4r modes 5, 6) about
-        // the world's y axis, the others wholly; the perspective modes (2, 4, 6) toward the eye,
-        // the rest along the view direction
+        Mtx34& w = finals[base + k];
         const Vec3 pos = {w.m[0][3], w.m[1][3], w.m[2][3]};
         f32 sc[3];
         for (int j = 0; j < 3; j++)
@@ -386,16 +544,110 @@ void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, b
     }
 }
 
-// this frame's visible cells and instances, with their detail levels and poses
+// An instance drawn this frame as `model`: posed again if its model changed, or if it is animated
+// and due: every update, or with WF_ANIM_LOD every second one while its meshes are under
+// ANIM_HALF_PX pixels across on the 3DS's screen and its nodes move under ANIM_STEP_PX a frame there,
+// every fourth under ANIM_QUARTER_PX and a third of ANIM_STEP_PX (what it lags behind stays within a
+// pixel and a half); its billboards turned.
+void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
+    Inst& n = insts[i];
+    const fmt::Instance& in = pkg.instances()[i];
+    u32 rate = 1;
+    if (n.animated && (features & WF_ANIM_LOD) && n.posed_model == model) {
+        // (pixels a unit is at its distance; its size and speed in pixels)
+        const f32 tv = std::tan(cam.fovy_deg * 0.5f * 3.14159265f / 180.0f);
+        const f32 px = SCREEN_HALF_PX / (std::max(length(n.at - cam.eye), 1e-3f) * tv);
+        const f32 size = 2 * mesh_radius[model] * n.scale * px, step = n.speed * px;
+        rate = size < ANIM_QUARTER_PX && 3 * step <= ANIM_STEP_PX ? 4 : size < ANIM_HALF_PX && step <= ANIM_STEP_PX ? 2 : 1;
+    }
+    (void)distance;
+    const bool due = n.posed_model != model || (n.animated && tick - n.posed_tick >= rate);
+    if (due) {
+        // (its nodes' places before, for how fast they move)
+        const fmt::Model& m = pkg.models()[model];
+        const u32 nn = std::max<u32>(m.n_nodes, 1);
+        Vec3 was[64];
+        const bool track = n.animated && n.posed_model == model && nn <= 64;
+        if (track)
+            for (u32 k = 0; k < nn; k++)
+                was[k] = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
+        pose(model, n.mtx, n.animated ? in.anim : NONE, in.anim_offset, n.slot);
+        if (track) {
+            f32 most = 0;
+            for (u32 k = 0; k < nn; k++)
+                most = std::max(most, length(Vec3{finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3],
+                                                  finals[n.slot + k].m[2][3]} - was[k]));
+            n.speed = most / (f32)std::max<u32>(1, tick - n.posed_tick);
+        } else {
+            n.speed = 0;
+        }
+        // (where it is: of its nodes' places, the nearest the eye)
+        f32 nearest = 1e30f;
+        for (u32 k = 0; k < nn; k++) {
+            const Vec3 p = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
+            const f32 d = length(p - cam.eye);
+            if (d < nearest)
+                nearest = d, n.at = p;
+        }
+        // its meshes' sphere as posed: about their boxes' centres' box, out to the furthest box's corner
+        if (n.animated) {
+            Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+            for (u32 b = m.first_batch; b < m.first_batch + m.n_batches; b++) {
+                const fmt::Batch& bt = pkg.batches()[b];
+                const Vec3 c = transform(finals[n.slot + (bt.node < m.n_nodes ? bt.node : 0)], box_centre(bt.bbox));
+                lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+                hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+            }
+            n.mesh_centre = (lo + hi) * 0.5f;
+            n.mesh_r = 0;
+            for (u32 b = m.first_batch; b < m.first_batch + m.n_batches; b++) {
+                const fmt::Batch& bt = pkg.batches()[b];
+                const Mtx34& w = finals[n.slot + (bt.node < m.n_nodes ? bt.node : 0)];
+                const Vec3 c = transform(w, box_centre(bt.bbox));
+                const Vec3 h = {bt.bbox[3] - bt.bbox[0], bt.bbox[4] - bt.bbox[1], bt.bbox[5] - bt.bbox[2]};
+                n.mesh_r = std::max(n.mesh_r, length(c - n.mesh_centre) + 0.5f * length(h) * max_scale(w));
+            }
+        }
+        n.posed_tick = tick;
+        n.posed_model = model;
+        stats->poses++;
+    }
+    if (model_billboards[model])
+        billboard(model, n.slot);
+}
+
+// the cell whose visibility row applies to the eye, -1 if none does
+int World::Impl::eye_cell() const {
+    if (!grid)
+        return -1;
+    const fmt::Env& e = pkg.env();
+    const f32 fx = (cam.eye.x - e.grid_origin[0]) / e.cell_size, fz = (cam.eye.z - e.grid_origin[1]) / e.cell_size;
+    if (!(fx >= 0 && fx < (f32)e.n_cells_x && fz >= 0 && fz < (f32)e.n_cells_z))
+        return -1;
+    const u32 i = std::min((u32)fz, e.n_cells_z - 1) * e.n_cells_x + std::min((u32)fx, e.n_cells_x - 1);
+    const f32 ground = std::isfinite(eye_ground) ? eye_ground : pkg.cells()[i].bbox[1];
+    return cam.eye.y - ground <= e.pvs_max_height ? (int)i : -1;
+}
+
+// this frame's visible cells and instances, with their detail levels and poses; then the passes'
+// candidates
 void World::Impl::cull() {
     vis_cells.clear();
     vis_insts.clear();
-    finals.clear();
+    // (the combiners' translations are counted after this, as the packets are built: until the next
+    // cull the stats say what the last frame did, as a scene reading them before its draws sees them)
     *stats = WorldStats();
     pass_tris[0] = pass_tris[1] = 0;
     stats->cells_total = pkg.cells().count;
     stats->instances_total = pkg.instances().count;
     const Vec3 eye = cam.eye;
+    const f32 tv = std::tan(cam.fovy_deg * 0.5f * 3.14159265f / 180.0f);
+    const u8* row = nullptr;
+    if (features & WF_VISIBILITY) {
+        stats->pvs_cell = eye_cell();
+        if (stats->pvs_cell >= 0)
+            row = pkg.visibility_row((u32)stats->pvs_cell);
+    }
     for (u32 i = 0; i < pkg.cells().count; i++) {
         const fmt::Cell& c = pkg.cells()[i];
         if (cell_hidden[i] || !box_visible(fr, c.bbox))
@@ -403,6 +655,10 @@ void World::Impl::cull() {
         const f32 d = box_distance(c.bbox, eye);
         if (cell_distance > 0 && d > cell_distance)
             continue;
+        if (row && !(row[i >> 3] >> (i & 7) & 1)) {
+            stats->cells_pvs_hidden++;
+            continue;
+        }
         u8 lod = 0;
         while (lod + 1 < c.n_lods && d >= c.lod_distance[lod + 1] * lod_scale)
             lod++;
@@ -426,50 +682,135 @@ void World::Impl::cull() {
                 break;
             model = m.lod_next;
         }
-        VisInst v = {i, model, d, (u32)finals.size()};
-        pose(model, n.mtx, (in.flags & fmt::INST_ANIMATED) ? in.anim : NONE, in.anim_offset, false);
-        vis_insts.push_back(v);
+        pose_instance(i, model, d);
+        // an animated one: where its meshes are now (its sphere spans the path they move on), and
+        // whether they are a pixel across there
+        if (n.animated && (features & WF_DETAIL)) {
+            const f32 dm = std::max(length(n.mesh_centre - eye) - n.mesh_r, 1e-3f);
+            if (!sphere_visible(fr, n.mesh_centre, n.mesh_r) || 2 * n.mesh_r * SCREEN_HALF_PX < SIZE_CULL_PX * dm * tv) {
+                stats->instances_small++;
+                continue;
+            }
+        }
+        vis_insts.push_back({i, model, d, n.slot});
     }
     stats->instances_visible = (u32)vis_insts.size();
     const fmt::Env& env = pkg.env();
     if (env.sea_model != NONE) {
-        VisInst v = {~0u, env.sea_model, 0, (u32)finals.size()};
-        pose(env.sea_model, identity34(), NONE, 0, false);
-        vis_insts.push_back(v);
+        if (!sea_posed)
+            pose(env.sea_model, identity34(), NONE, 0, sea_slot), sea_posed = true;
+        if (model_billboards[env.sea_model])
+            billboard(env.sea_model, sea_slot);
+        vis_insts.push_back({~0u, env.sea_model, 0, sea_slot});
     }
     if (env.sky_model != NONE) {
-        VisInst v = {~1u, env.sky_model, 0, (u32)finals.size()};
-        pose(env.sky_model, translation(eye), NONE, 0, true);
-        vis_insts.push_back(v);
+        pose(env.sky_model, translation(eye), NONE, 0, sky_slot);
+        vis_insts.push_back({~1u, env.sky_model, 0, sky_slot});
     }
+    collect();
 }
 
-void World::Impl::add_model_items(const VisInst& v, Pass pass, u32 flags) {
+// a model's batches as candidates of their passes (the sky's all in the opaque pass, first)
+void World::Impl::add_model_items(const VisInst& v, f32 detail) {
     const fmt::Model& m = pkg.models()[v.model];
     const bool sky = v.inst == ~1u, sea = v.inst == ~0u;
     for (u32 b = m.first_batch; b < m.first_batch + m.n_batches; b++) {
         const fmt::Batch& bt = pkg.batches()[b];
         const Material& mat = mats[bt.material];
-        if (!sky && mat.translucent != (pass == Pass::TRANSLUCENT))
-            continue;
         if (mat.pixel.cull_gx == 3)
             continue;  // (GX culls all of it)
+        const u32 pass = !sky && mat.translucent;
         const u32 fin = v.first_final + (bt.node < m.n_nodes ? bt.node : 0);
         f32 box[6];
         transform_box(finals[fin], bt.bbox, box);
         // (the sea's batches are culled one by one: it spans the world)
         if (sea && !box_visible(fr, box))
             continue;
+        if (!sky && detail > 0 && (bt.flags & fmt::BATCH_DETAIL) && box_distance(box, cam.eye) > detail) {
+            stats->details_culled++;
+            continue;
+        }
+        std::vector<Cand>& out = cands[pass];
         Cand c;
         c.priority = sky ? -1000 : mat.priority;
-        c.distance = sky ? 0 : pass == Pass::TRANSLUCENT ? length(box_centre(box) - cam.eye)
-                                  : sea ? box_distance(box, cam.eye) : v.distance;
-        c.order = (u32)cands.size();
+        c.distance = sky ? 0 : pass ? length(box_centre(box) - cam.eye) : sea ? box_distance(box, cam.eye) : v.distance;
+        c.order = (u32)out.size();
         c.final = fin;
-        c.item = {(u16)b, 0, 0xFFFF, (u16)flags};
+        c.material = bt.material;
+        c.coords = coords_of[bt.vbuf];
+        c.plain = !sky && is_plain(mat);
+        c.item = {(u16)b, 0, 0xFFFF, (u16)(sky ? DRAW_SKY : 0)};
         c.tris = bt.n_indices / 3;
-        cands.push_back(c);
+        out.push_back(c);
     }
+}
+
+// the candidates of both passes: the sky's first, the cells' batches at their level, the models'
+// (instances, sea); detail batches beyond the detail distance left out
+void World::Impl::collect() {
+    cands[0].clear(), cands[1].clear();
+    sorted[0] = sorted[1] = false;
+    const f32 detail = (features & WF_DETAIL) ? pkg.env().detail_distance * lod_scale : 0.0f;
+    for (const VisInst& v : vis_insts)
+        if (v.inst == ~1u)
+            add_model_items(v, detail);
+    n_sky = (u32)cands[0].size();
+    for (const VisCell& vc : vis_cells) {
+        const fmt::Cell& c = pkg.cells()[vc.cell];
+        for (u32 i = 0; i < c.count[vc.lod]; i++) {
+            const u16 b = pkg.cell_batches()[c.first[vc.lod] + i];
+            const fmt::Batch& bt = pkg.batches()[b];
+            const Material& mat = mats[bt.material];
+            if (mat.pixel.cull_gx == 3)
+                continue;
+            if (detail > 0 && (bt.flags & fmt::BATCH_DETAIL) && box_distance(bt.bbox, cam.eye) > detail) {
+                stats->details_culled++;
+                continue;
+            }
+            const u32 pass = mat.translucent;
+            std::vector<Cand>& out = cands[pass];
+            Cand cd;
+            cd.priority = mat.priority;
+            cd.distance = pass ? length(box_centre(bt.bbox) - cam.eye) : vc.distance;
+            cd.order = (u32)out.size();
+            cd.final = ~0u;
+            cd.material = bt.material;
+            cd.coords = coords_of[bt.vbuf];
+            cd.plain = is_plain(mat);
+            cd.item = {b, 0, 0xFFFF, 0};
+            cd.tris = bt.n_indices / 3;
+            out.push_back(cd);
+        }
+    }
+    for (const VisInst& v : vis_insts)
+        if (v.inst != ~1u)
+            add_model_items(v, detail);
+}
+
+// a material's combiners for its current registers: one of the last translations, or a new one
+void World::Impl::refresh_combiners(Dyn& d) {
+    d.comb_stale = false;
+    CombEntry* oldest = &d.cache[0];
+    for (CombEntry& e : d.cache) {
+        if (e.valid && !memcmp(e.reg, d.d.tev_reg, sizeof(e.reg)) && !memcmp(e.konst, d.d.tev_konst, sizeof(e.konst))) {
+            e.used = tick;
+            d.d.comb = e.comb;
+            stats->translations_cached++;
+            return;
+        }
+        if (!e.valid || (oldest->valid && e.used < oldest->used))
+            oldest = &e;
+    }
+    const fmt::Material& fm = pkg.materials()[d.d.material];
+    engine::gx::tev_to_combiners(tev_regs(fm, d.d.tev_reg, d.d.tev_konst), d.d.comb);
+    if (const u32 lum = mats[d.d.material].lum_units)
+        engine::gx::remap_luminance(d.d.comb.stage, lum);
+    memcpy(oldest->reg, d.d.tev_reg, sizeof(oldest->reg));
+    memcpy(oldest->konst, d.d.tev_konst, sizeof(oldest->konst));
+    oldest->comb = d.d.comb;
+    oldest->used = tick;
+    oldest->valid = true;
+    stats->translations++;
 }
 
 void World::Impl::build(Pass pass, Packet* p) {
@@ -497,43 +838,39 @@ void World::Impl::build(Pass pass, Packet* p) {
     p->light_sets.assign(pkg.light_sets().begin(), pkg.light_sets().end());
     p->fogs.assign(pkg.fogs().begin(), pkg.fogs().end());
 
-    // the candidates: cells' batches at their level, the models' (instances, sea; the sky first)
-    cands.clear();
-    for (const VisInst& v : vis_insts)
-        if (v.inst == ~1u && pass == Pass::OPAQUE)
-            add_model_items(v, pass, DRAW_SKY);
-    const u32 n_sky = (u32)cands.size();
-    for (const VisCell& vc : vis_cells) {
-        const fmt::Cell& c = pkg.cells()[vc.cell];
-        for (u32 i = 0; i < c.count[vc.lod]; i++) {
-            const u16 b = pkg.cell_batches()[c.first[vc.lod] + i];
-            const fmt::Batch& bt = pkg.batches()[b];
-            const Material& mat = mats[bt.material];
-            if (mat.translucent != (pass == Pass::TRANSLUCENT) || mat.pixel.cull_gx == 3)
-                continue;
-            Cand cd;
-            cd.priority = mat.priority;
-            cd.distance = pass == Pass::TRANSLUCENT ? length(box_centre(bt.bbox) - cam.eye) : vc.distance;
-            cd.order = (u32)cands.size();
-            cd.final = ~0u;
-            cd.item = {b, 0, 0xFFFF, 0};
-            cd.tris = bt.n_indices / 3;
-            cands.push_back(cd);
-        }
+    // the order (once a cull): the sky as it comes; then by priority; opaque: the plain batches by
+    // material and their buffers' coordinate scale (WF_MATERIAL_SORT), then front to back;
+    // translucent: back to front; then as they came
+    const u32 pi = pass == Pass::TRANSLUCENT;
+    std::vector<Cand>& cs = cands[pi];
+    if (!sorted[pi]) {
+        sorted[pi] = true;
+        const bool by_material = features & WF_MATERIAL_SORT;
+        if (pi)
+            std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) {
+                if (a.priority != b.priority)
+                    return a.priority < b.priority;
+                if (a.distance != b.distance)
+                    return a.distance > b.distance;
+                return a.order < b.order;
+            });
+        else
+            std::sort(cs.begin() + n_sky, cs.end(), [by_material](const Cand& a, const Cand& b) {
+                if (a.priority != b.priority)
+                    return a.priority < b.priority;
+                if (by_material) {
+                    if (a.plain != b.plain)
+                        return a.plain;
+                    if (a.plain && a.material != b.material)
+                        return a.material < b.material;
+                    if (a.plain && a.coords != b.coords)
+                        return a.coords < b.coords;
+                }
+                if (a.distance != b.distance)
+                    return a.distance < b.distance;
+                return a.order < b.order;
+            });
     }
-    for (const VisInst& v : vis_insts)
-        if (v.inst != ~1u)
-            add_model_items(v, pass, 0);
-    // the order: the sky as it comes, then by priority, then front to back (opaque) or back to
-    // front (translucent), then as they came
-    const bool back_to_front = pass == Pass::TRANSLUCENT;
-    std::sort(cands.begin() + n_sky, cands.end(), [&](const Cand& a, const Cand& b) {
-        if (a.priority != b.priority)
-            return a.priority < b.priority;
-        if (a.distance != b.distance)
-            return back_to_front ? a.distance > b.distance : a.distance < b.distance;
-        return a.order < b.order;
-    });
     // the items, with their matrices and material states put in the packet as they are first used
     matrix_of.assign(finals.size(), -1);
     state_of.assign(mats.size(), -1);
@@ -541,8 +878,9 @@ void World::Impl::build(Pass pass, Packet* p) {
     p->matrices.assign(k_identity, k_identity + 12);
     p->mat_states.clear();
     p->items.clear();
+    p->items.reserve(cs.size());
     u32 tris = 0;
-    for (const Cand& c : cands) {
+    for (const Cand& c : cs) {
         DrawItem it = c.item;
         if (c.final != ~0u) {
             int& mi = matrix_of[c.final];
@@ -553,12 +891,14 @@ void World::Impl::build(Pass pass, Packet* p) {
             }
             it.matrix = (u16)mi;
         }
-        const u16 mat = pkg.batches()[it.batch].material;
-        if (dyn_of[mat] >= 0) {
-            int& si = state_of[mat];
+        if (dyn_of[c.material] >= 0) {
+            int& si = state_of[c.material];
             if (si < 0) {
+                Dyn& d = dyn[(u32)dyn_of[c.material]];
+                if (d.comb_stale)
+                    refresh_combiners(d);
                 si = (int)p->mat_states.size();
-                p->mat_states.push_back(dyn[(u32)dyn_of[mat]].d);
+                p->mat_states.push_back(d.d);
             }
             it.mat_state = (u16)si;
         }
@@ -566,7 +906,7 @@ void World::Impl::build(Pass pass, Packet* p) {
         tris += c.tris;
     }
     (pass == Pass::OPAQUE ? stats->items_opaque : stats->items_translucent) = (u32)p->items.size();
-    pass_tris[pass == Pass::TRANSLUCENT] = tris;
+    pass_tris[pi] = tris;
     stats->triangles = pass_tris[0] + pass_tris[1];
 }
 
@@ -607,16 +947,20 @@ void World::set_lod_scale(f32 scale) {
     impl_->dirty = true;
 }
 
+void World::set_features(u32 features) {
+    impl_->features = features & WF_ALL;
+    impl_->dirty = true;
+}
+u32 World::features() const { return impl_->features; }
+
 void World::update(f32 frame) {
     Impl& w = *impl_;
     w.frame = frame;
+    w.tick++;
     w.dirty = true;  // (instance poses)
     if (w.dyn.empty())
         return;
     const Package& pkg = package_;
-    std::vector<u8>& srt_changed = w.srt_changed;
-    std::vector<u8>& tev_changed = w.tev_changed;
-    srt_changed.assign(w.dyn.size(), 0), tev_changed.assign(w.dyn.size(), 0);
     for (u16 a : w.mat_anims) {
         const fmt::Anim& an = pkg.anims()[a];
         const f32 f = anim_frame(frame, an.frames, an.loop);
@@ -628,14 +972,26 @@ void World::update(f32 frame) {
                     const int di = w.dyn_of[user >> 8];
                     if ((user & 255) >= 3 || di < 0)
                         continue;
-                    w.dyn[(u32)di].srt[user & 255][tr.target - fmt::TT_TEXMTX_SCALE_S] = v;
-                    srt_changed[(u32)di] = 1;
+                    Impl::Dyn& d = w.dyn[(u32)di];
+                    f32& slot = d.srt[user & 255][tr.target - fmt::TT_TEXMTX_SCALE_S];
+                    if (slot == v)
+                        continue;
+                    slot = v;
+                    // (the matrix again, now: a few multiplies)
+                    const fmt::Material& fm = pkg.materials()[d.d.material];
+                    const u32 k = user & 255;
+                    if (k < fm.n_tex_mtx) {
+                        const fmt::TexMtx& tm = pkg.tex_mtx()[fm.tex_mtx_first + k];
+                        tex_srt_matrix(tm.mode, d.srt[k][0], d.srt[k][1], d.srt[k][2], d.srt[k][3], d.srt[k][4],
+                                       d.d.tex_mtx[k]);
+                    }
                 }
             } else if (tr.target >= fmt::TT_MAT_REG_R && tr.target <= fmt::TT_MAT_REG_A) {
                 const int di = w.dyn_of[tr.index];
                 if (di < 0)
                     continue;
-                MatDynamic& d = w.dyn[(u32)di].d;
+                Impl::Dyn& dy = w.dyn[(u32)di];
+                MatDynamic& d = dy.d;
                 const f32 v = eval_track(tr, pkg.keys().data, f);
                 const u32 c = tr.target - fmt::TT_MAT_REG_R;
                 switch (tr.reg) {
@@ -643,37 +999,36 @@ void World::update(f32 frame) {
                 case fmt::CR_AMB0: d.amb_color[c] = clamp_u8(v); break;
                 case fmt::CR_TEV0:
                 case fmt::CR_TEV1:
-                case fmt::CR_TEV2: d.tev_reg[1 + tr.reg - fmt::CR_TEV0][c] = clamp_reg(v), tev_changed[(u32)di] = 1; break;
+                case fmt::CR_TEV2: {
+                    // (the registers are folded into the combiners' constants: translated again when
+                    // the material is next drawn, if they changed)
+                    s16& r = d.tev_reg[1 + tr.reg - fmt::CR_TEV0][c];
+                    const s16 nv = clamp_reg(v);
+                    dy.comb_stale |= r != nv;
+                    r = nv;
+                    break;
+                }
                 case fmt::CR_KONST0:
                 case fmt::CR_KONST1:
                 case fmt::CR_KONST2:
-                case fmt::CR_KONST3: d.tev_konst[tr.reg - fmt::CR_KONST0][c] = clamp_reg(v), tev_changed[(u32)di] = 1; break;
+                case fmt::CR_KONST3: {
+                    s16& r = d.tev_konst[tr.reg - fmt::CR_KONST0][c];
+                    const s16 nv = clamp_reg(v);
+                    dy.comb_stale |= r != nv;
+                    r = nv;
+                    break;
+                }
                 default: break;  // (channel 1's colours: not used)
                 }
             }
         }
     }
-    for (u32 i = 0; i < w.dyn.size(); i++) {
-        Impl::Dyn& d = w.dyn[i];
-        const Material& m = w.mats[d.d.material];
-        const fmt::Material& fm = pkg.materials()[d.d.material];
-        if (srt_changed[i])
-            for (u32 k = 0; k < 3 && k < fm.n_tex_mtx; k++) {
-                const fmt::TexMtx& tm = pkg.tex_mtx()[fm.tex_mtx_first + k];
-                tex_srt_matrix(tm.mode, d.srt[k][0], d.srt[k][1], d.srt[k][2], d.srt[k][3], d.srt[k][4], d.d.tex_mtx[k]);
-            }
-        if (tev_changed[i]) {
-            // the registers are folded into the combiners' constants: translate again
-            engine::gx::tev_to_combiners(tev_regs(fm, d.d.tev_reg, d.d.tev_konst), d.d.comb);
-            if (m.lum_units)
-                engine::gx::remap_luminance(d.d.comb.stage, m.lum_units);
-        }
-    }
 }
 
-void World::set_camera(const Camera& camera) {
+void World::set_camera(const Camera& camera, f32 eye_ground) {
     Impl& w = *impl_;
     w.cam = camera;
+    w.eye_ground = eye_ground;
     w.fr = frustum(camera);
     w.view_guest = look_at(scaled(camera, w.k));
     w.dirty = true;

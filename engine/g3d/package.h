@@ -9,9 +9,11 @@
 // buffers, batches, nodes, models, cells, instances, animations, tracks, keys, lights, light sets,
 // fogs) and every offset (texel data in TDAT and 128-byte aligned, vertex data in VDAT, KCL files
 // in BLOB), every index buffer entry against its vertex buffer, the formats (texture formats and
-// sizes, GX -> PICA conversions, vertex layouts and strides), node trees (a parent comes before its
-// children), LOD chains (no loops), and keys (in frame order). The first problem found is the
-// reason given.
+// sizes, GX -> PICA conversions, vertex layouts and strides, compact positions' origin and scale),
+// node trees (a parent comes before its children), LOD chains (no loops), keys (in frame order) and
+// the cells' visibility rows (CVIS: a row a cell, a bit for every cell). The first problem found is
+// the reason given. A version 1 package (from before compact positions, prelit materials and the
+// visibility rows) is refused with that reason: the island is staged again.
 #pragma once
 
 #include <cstdint>
@@ -77,6 +79,13 @@ public:
     Span<u16> indices() const { return array<u16>(fmt::SEC_IDAT); }
     // the environment (if the package has none: no sky or sea, no animations, k = 1, no grid)
     const fmt::Env& env() const { return *env_; }
+    // cell i's visibility row (bit j, LSB first: cell j may be seen from cell i's walkable space, at
+    // eye heights up to Env::pvs_max_height over the ground), or nullptr if the package has none
+    const u8* visibility_row(u32 cell) const {
+        return env_->pvs_row_bytes && cell < cells().count ? data_ + section(fmt::SEC_CVIS)->offset +
+                                                                 (size_t)cell * env_->pvs_row_bytes
+                                                           : nullptr;
+    }
 
     // A texture as the GPU takes it: its PICA format and every level, in place in the file, or
     // converted at load (fmt::TEX_GX_RAW, engine/g3d/texture.h) and kept beside it.
