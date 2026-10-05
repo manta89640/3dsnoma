@@ -6,11 +6,13 @@
 #include <csignal>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -58,8 +60,16 @@ void log(const char* fmt, ...) {
     }
 }
 
+static bool workers_park(u64 timeout_us);
+static bool job_park(u64 timeout_us);
+// (the threads beside the guest's sleep for good first, as on the 3DS: exit's destructors would go
+// on under them)
 void platform_quit(const char* why) {
     log("quit: %s", why);
+    const bool ax = dsp_ax_park(500000), job = job_park(500000), workers = workers_park(500000);
+    if (!ax || !job || !workers)
+        log("quit: these didn't stop:%s%s%s", ax ? "" : " the audio thread", job ? "" : " the helper",
+            workers ? "" : " a worker");
     if (s_log)
         fflush(s_log);
     exit(0);
@@ -149,17 +159,101 @@ bool platform_io_thread_start(void (*fn)()) {
     std::thread(fn).detach();
     return true;
 }
-// NOMA_AX_THREAD=1: the AX frames on a thread of their own, as the New 3DS can (the host doesn't
-// need it; for testing that path)
+// NOMA_CORES=multi: the 3DS's layout on a New 3DS (platform/3ds/main.cpp), its audio thread and its
+// helper; the host doesn't need them (runs are the same every time inline): for testing those paths
+static bool multi() {
+    static const bool s_multi = getenv("NOMA_CORES") && !strcmp(getenv("NOMA_CORES"), "multi");
+    return s_multi;
+}
+// NOMA_AX_THREAD=1 (or NOMA_CORES=multi): the AX frames on a thread of their own, as the New 3DS's
 bool platform_audio_thread_start(void (*fn)()) {
-    if (!getenv("NOMA_AX_THREAD"))
+    const char* e = getenv("NOMA_AX_THREAD");
+    if (e ? atoi(e) == 0 : !multi())
         return false;
     std::thread(fn).detach();
     return true;
 }
 // (the host's cores are many: the OS's own priority is fine)
+static std::atomic<int> s_workers{0}, s_workers_paused{0};
+static std::atomic<bool> s_workers_park{false};
 bool platform_worker_start(void (*fn)(void*), void* arg) {
-    std::thread(fn, arg).detach();
+    s_workers.fetch_add(1);
+    std::thread([fn, arg] {
+        fn(arg);
+        s_workers.fetch_sub(1);
+    }).detach();
+    return true;
+}
+void platform_worker_pause_point() {
+    if (!s_workers_park.load())
+        return;
+    s_workers_paused.fetch_add(1);
+    for (;;)
+        std::this_thread::sleep_for(std::chrono::hours(1));
+}
+static bool workers_park(u64 timeout_us) {
+    s_workers_park.store(true);
+    const u64 t0 = host_time_us();
+    while (s_workers.load() != s_workers_paused.load()) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return true;
+}
+// the helper (platform_job_start), with NOMA_CORES=multi: one thread, made at the first job
+static HostSignal *s_job_go, *s_job_done;
+static void (*s_job_fn)(void*);
+static void* s_job_arg;
+static int s_job_thread;  // 0: not made yet; 1: running; -1: none
+static std::atomic<bool> s_job_busy{false}, s_job_park{false}, s_job_parked{false};
+bool platform_job_start(void (*fn)(void*), void* arg) {
+    if (s_job_thread == 0) {
+        s_job_thread = -1;
+        if (multi() && !getenv("NOMA_JOB_INLINE")) {
+            s_job_go = platform_signal_new(), s_job_done = platform_signal_new();
+            std::thread([] {
+                for (;;) {
+                    if (s_job_park.load() && !s_job_busy.load()) {
+                        s_job_parked.store(true);
+                        for (;;)
+                            std::this_thread::sleep_for(std::chrono::hours(1));
+                    }
+                    platform_wait(s_job_go, 1000000);
+                    if (!s_job_busy.load())
+                        continue;
+                    s_job_fn(s_job_arg);
+                    s_job_busy.store(false);
+                    platform_signal(s_job_done);
+                }
+            }).detach();
+            s_job_thread = 1;
+            log("jobs: on a thread of their own");
+        }
+    }
+    if (s_job_thread < 0 || s_job_park.load())
+        return false;
+    platform_job_wait();
+    s_job_fn = fn, s_job_arg = arg;
+    s_job_busy.store(true);
+    platform_signal(s_job_go);
+    return true;
+}
+void platform_job_wait() {
+    while (s_job_busy.load())
+        platform_wait(s_job_done, 2000);
+}
+static bool job_park(u64 timeout_us) {
+    if (s_job_thread <= 0)
+        return true;
+    s_job_park.store(true);
+    platform_signal(s_job_go);
+    const u64 t0 = host_time_us();
+    while (!s_job_parked.load()) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
     return true;
 }
 

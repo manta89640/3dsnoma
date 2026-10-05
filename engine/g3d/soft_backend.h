@@ -5,9 +5,11 @@
 //
 // What it draws is what the PICA backend (platform/3ds/g3d_pica.cpp) has the 3DS GPU draw, with the
 // GPU's rules: the runtime materials' combiners (engine/gx/tev_combiner's six stages in the PICA's
-// encodings) evaluated with the PICA's arithmetic, the combiner buffer included; textures as the
+// encodings) evaluated with the PICA's arithmetic, the combiner buffer included; positions f32 or s16
+// (fmt::VA_POS16: the buffer's origin and scale folded into the item's transform); textures as the
 // package gives them to the GPU (ETC1, the luminance formats) decoded to RGBA8 once, at prepare;
-// colour channel 0 lit per vertex by the packet's light sets; one alpha comparison; the PICA's blend
+// colour channel 0 lit per vertex by the packet's light sets (a prelit material: the vertex colour
+// as it is, material.h); one alpha comparison; the PICA's blend
 // factors and equations. Where it lands is GX's: a vertex goes through the packet's view (guest
 // units) times S(world_scale) times its item's matrix, then the GX projection and viewport current at
 // the packet's command (GxView), to window coordinates and 24-bit depth exactly as raster.cpp places

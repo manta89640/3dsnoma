@@ -38,7 +38,7 @@ ROOT =os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 HEADER = os.path.join(ROOT, "engine/g3d/ng3d_format.h")
 
 MAGIC = 0x4433474E          # 'NG3D'
-VERSION = 1
+VERSION = 2
 NONE16 = 0xFFFF
 NONE32 = 0xFFFFFFFF
 
@@ -70,7 +70,8 @@ STRUCTS = {
                  ("amb_color", "u8", (4,)), ("maps", "TexMap", (8,)), ("texgens", "TexGen", (8,)),
                  ("tex_mtx_first", "u16", ()), ("n_tex_mtx", "u16", ()), ("reserved", "u32", (2,))],
     "VertexBuffer": [("data", "u32", ()), ("count", "u32", ()), ("attrs", "u8", ()), ("stride", "u8", ()),
-                     ("flags", "u8", ()), ("pad", "u8", ()), ("uv_scale", "f32", (2,))],
+                     ("flags", "u8", ()), ("pad", "u8", ()), ("uv_scale", "f32", (2,)), ("pos_origin", "f32", (3,)),
+                     ("pos_scale", "f32", ())],
     "Batch": [("material", "u16", ()), ("vbuf", "u16", ()), ("first_index", "u32", ()),
               ("n_indices", "u32", ()), ("bbox", "f32", (6,)), ("node", "u16", ()), ("flags", "u16", ())],
     "Node": [("name", "u32", ()), ("parent", "u16", ()), ("flags", "u16", ()), ("scale", "f32", (3,)),
@@ -99,7 +100,8 @@ STRUCTS = {
             ("sea_anim_srt", "u16", ()), ("sea_anim_clr", "u16", ()), ("world_anim_srt", "u16", ()),
             ("world_anim_clr", "u16", ()), ("pad", "u16", ()), ("world_bbox", "f32", (6,)),
             ("mii_units_per_unit", "f32", ()), ("cell_size", "f32", ()), ("n_cells_x", "u32", ()),
-            ("n_cells_z", "u32", ()), ("grid_origin", "f32", (2,)), ("reserved", "u32", (8,))],
+            ("n_cells_z", "u32", ()), ("grid_origin", "f32", (2,)), ("pvs_row_bytes", "u32", ()),
+            ("pvs_max_height", "f32", ()), ("detail_distance", "f32", ()), ("reserved", "u32", (5,))],
 }
 
 # section tags, in the order this writer lays them out (small tables first, bulk data last)
@@ -111,7 +113,7 @@ SECTIONS = [
     ("SEC_TRAK", "TRAK", "Track"), ("SEC_KEYS", "KEYS", "Key"), ("SEC_ENVR", "ENVR", "Env"),
     ("SEC_LITE", "LITE", "Light"), ("SEC_LSET", "LSET", "LightSet"), ("SEC_FOGS", "FOGS", "Fog"),
     ("SEC_MARK", "MARK", "Marker"), ("SEC_COLL", "COLL", "Collision"), ("SEC_CYLS", "CYLS", "Cylinder"),
-    ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
+    ("SEC_CVIS", "CVIS", None), ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
     ("SEC_BLOB", "BLOB", None),
 ]
 # the Package attribute holding each array section's records
@@ -128,9 +130,10 @@ ENUMS = {
     "TexFormat": dict(TF_RGBA8=0, TF_RGB8=1, TF_RGBA5551=2, TF_RGB565=3, TF_RGBA4=4, TF_LA8=5, TF_HILO8=6,
                       TF_L8=7, TF_A8=8, TF_LA4=9, TF_L4=10, TF_A4=11, TF_ETC1=12, TF_ETC1A4=13),
     "TexFlags": dict(TEX_GX_RAW=1, TEX_ALPHA=2, TEX_CUTOUT=4),
-    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8),
-    "VtxAttr": dict(VA_POS=1, VA_NRM=2, VA_CLR=4, VA_UV0=8, VA_UV1=16),
+    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8, MAT_PRELIT=16),
+    "VtxAttr": dict(VA_POS=1, VA_NRM=2, VA_CLR=4, VA_UV0=8, VA_UV1=16, VA_POS16=32),
     "VbFlags": dict(VB_UV_FLOAT=1),
+    "BatchFlags": dict(BATCH_DETAIL=1),
     "NodeFlags": dict(NODE_VISIBLE=1, NODE_BILLBOARD=2),
     "InstFlags": dict(INST_STATIC=1, INST_COLLIDE=2, INST_ANIMATED=4),
     "TrackTarget": dict(TT_NODE_SCALE_X=0, TT_NODE_SCALE_Y=1, TT_NODE_SCALE_Z=2, TT_NODE_ROT_X=3,
@@ -281,10 +284,21 @@ def texture_bytes(t):
 
 
 def vertex_bytes(attrs, flags):
-    """Bytes of a vertex of this layout (VtxAttr order: POS, NRM, CLR, UV0, UV1)."""
+    """Bytes of a vertex of this layout (VtxAttr order: POS or POS16, NRM, CLR, UV0, UV1)."""
     uv = 8 if flags & VB_UV_FLOAT else 4
-    return (12 if attrs & VA_POS else 0) + (4 if attrs & VA_NRM else 0) + (4 if attrs & VA_CLR else 0) + \
-        (uv if attrs & VA_UV0 else 0) + (uv if attrs & VA_UV1 else 0)
+    return (12 if attrs & VA_POS else 8 if attrs & VA_POS16 else 0) + (4 if attrs & VA_NRM else 0) + \
+        (4 if attrs & VA_CLR else 0) + (uv if attrs & VA_UV0 else 0) + (uv if attrs & VA_UV1 else 0)
+
+
+def vertex_positions(vb, data):
+    """A vertex buffer's positions as (count, 3) float32, decoded (VA_POS16: s16 * pos_scale +
+    pos_origin, as the header says), from its bytes."""
+    import numpy as np
+    raw = np.frombuffer(data, np.uint8)[:vb.count * vb.stride].reshape(vb.count, vb.stride)
+    if vb.attrs & VA_POS16:
+        q = raw[:, 0:6].copy().view("<i2").reshape(-1, 3).astype(np.float32)
+        return q * np.float32(vb.pos_scale) + np.array(vb.pos_origin, np.float32)
+    return raw[:, 0:12].copy().view("<f4").reshape(-1, 3)
 
 
 # ------------------------------------------------------------------------------------- the package
@@ -298,7 +312,8 @@ class Package:
     """A package in memory: a list of records per array section (attributes named after
     SECTION_LISTS), `env` (one Env), the string table, and the payloads the records point to:
     texture_data[i] (Texture i's bytes, all its levels), vertex_data[i] (VertexBuffer i's bytes),
-    blobs[i] (Collision i's bytes). `indices` and `cell_batches` are lists of ints (u16)."""
+    blobs[i] (Collision i's bytes). `indices` and `cell_batches` are lists of ints (u16); `cvis` is the
+    CVIS section's bytes (Env.pvs_row_bytes a cell, bit j of row i at byte j >> 3, bit j & 7)."""
 
     def __init__(self):
         for attr in SECTION_LISTS.values():
@@ -307,6 +322,7 @@ class Package:
         self.strs = bytearray(b"\0")
         self._str_index = {"": 0}
         self.texture_data, self.vertex_data, self.blobs = [], [], []
+        self.cvis = b""
 
     # strings: offset in STRS, deduplicated
     def str(self, s):
@@ -334,6 +350,9 @@ class Package:
             return bytes(self.strs), 0
         if tag4 == "ENVR":
             return (self.env.pack(), 1) if self.env is not None else (b"", 0)
+        if tag4 == "CVIS":
+            rb = self.env.pvs_row_bytes if self.env is not None else 0
+            return bytes(self.cvis), (len(self.cvis) // rb if rb else 0)
         if tag4 in ("CBAT", "IDAT"):
             lst = getattr(self, SECTION_LISTS[tag4])
             return struct.pack("<%dH" % len(lst), *lst), len(lst)
@@ -431,6 +450,8 @@ class Package:
                 setattr(p, SECTION_LISTS[t4], list(struct.unpack_from("<%dH" % s.count, data, s.offset)))
             elif t4 == "ENVR":
                 p.env = Rec.unpack("Env", data, s.offset)
+            elif t4 == "CVIS":
+                p.cvis = bytes(data[s.offset:s.offset + s.size])
             elif t4 in SECTION_LISTS:
                 kind = kinds[t4]
                 n = sizeof(kind)
@@ -495,10 +516,16 @@ class Package:
         for i, v in enumerate(self.vertex_buffers):
             if v.data % 16 or v.count > 65536:
                 bad.append("vertex buffer %d: data %d count %d" % (i, v.data, v.count))
-            if v.stride < vertex_bytes(v.attrs, v.flags) or v.stride % 4 or not v.attrs & VA_POS:
-                bad.append("vertex buffer %d: attributes %02x, stride %d" % (i, v.attrs, v.stride))
+            if v.stride < vertex_bytes(v.attrs, v.flags) or v.stride % 4 or \
+                    bool(v.attrs & VA_POS) == bool(v.attrs & VA_POS16) or v.attrs & ~63 or v.flags & ~VB_UV_FLOAT:
+                bad.append("vertex buffer %d: attributes %02x, flags %02x, stride %d" % (i, v.attrs, v.flags,
+                                                                                        v.stride))
+            if v.attrs & VA_POS16 and not (v.pos_scale > 0 and all(abs(x) < 1e30 for x in v.pos_origin)):
+                bad.append("vertex buffer %d: position origin %s, scale %g" % (i, v.pos_origin, v.pos_scale))
             in_sec("vertex buffer %d" % i, "VDAT", v.data, v.count * v.stride)
         for i, b in enumerate(self.batches):
+            if b.flags & ~BATCH_DETAIL:
+                bad.append("batch %d: flags %04x" % (i, b.flags))
             if b.material >= nm or b.vbuf >= len(self.vertex_buffers) or b.n_indices % 3 or \
                     b.first_index + b.n_indices > ni:
                 bad.append("batch %d: material %d vbuf %d indices %d+%d" % (i, b.material, b.vbuf,
@@ -579,6 +606,16 @@ class Package:
                     bad.append("env %s: %d" % (what, v))
             if e.n_cells_x * e.n_cells_z and len(self.cells) not in (0, e.n_cells_x * e.n_cells_z):
                 bad.append("env grid %dx%d but %d cells" % (e.n_cells_x, e.n_cells_z, len(self.cells)))
+            if e.pvs_row_bytes:
+                if e.pvs_row_bytes * 8 < len(self.cells) or len(self.cvis) != e.pvs_row_bytes * len(self.cells):
+                    bad.append("CVIS: %d bytes, %d a row, %d cells" % (len(self.cvis), e.pvs_row_bytes,
+                                                                       len(self.cells)))
+                elif not e.pvs_max_height > 0:
+                    bad.append("env pvs_max_height %g" % e.pvs_max_height)
+            elif self.cvis:
+                bad.append("CVIS: %d bytes but env pvs_row_bytes 0" % len(self.cvis))
+            if not 0 <= e.detail_distance < 1e30:
+                bad.append("env detail_distance %g" % e.detail_distance)
         for i, m in enumerate(self.markers):
             s_ok("marker %d" % i, m.name)
             if m.kind > MK_WARP:
@@ -599,7 +636,7 @@ class Package:
         out = {lst: [strip(r, LIST_KIND[lst]) if isinstance(r, Rec) else r for r in getattr(self, lst)]
                for lst in SECTION_LISTS.values()}
         out.update(env=self.env, strs=bytes(self.strs), texture_data=self.texture_data,
-                   vertex_data=self.vertex_data, blobs=self.blobs)
+                   vertex_data=self.vertex_data, blobs=self.blobs, cvis=bytes(self.cvis))
         return out
 
     def summary(self):

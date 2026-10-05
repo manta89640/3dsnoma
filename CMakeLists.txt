@@ -118,6 +118,8 @@ set(ENGINE_SOURCES
   engine/wuhu/island.cpp
   engine/wuhu/island_load.cpp
   engine/wuhu/island_mii.cpp
+  engine/wuhu/midoha.cpp
+  engine/wuhu/midoha_outfit.cpp
   engine/wuhu/music.cpp
   engine/wuhu/places.cpp
   engine/wuhu/player.cpp
@@ -224,4 +226,10 @@ else()
   add_executable(ng3d-bake tools/ng3d_bake.cpp engine/g3d/package.cpp engine/g3d/texture.cpp
                            engine/g3d/package_writer.cpp)
   target_include_directories(ng3d-bake PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime)
+  # ng3d-pvs: the cells' visibility rows of a package (CVIS), from cube maps at eye points
+  # (tools/ng3d_pvs.cpp; tools/wuhu/stage_wuhu.py writes its input)
+  find_package(Threads REQUIRED)
+  add_executable(ng3d-pvs tools/ng3d_pvs.cpp)
+  target_compile_options(ng3d-pvs PRIVATE -O2)
+  target_link_libraries(ng3d-pvs Threads::Threads)
 endif()

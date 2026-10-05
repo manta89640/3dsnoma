@@ -4,12 +4,13 @@
 // 1. Depth parity with GX: random triangles at view distances from 2 to 30,000 package units, drawn
 //    once as a GX draw through raster.cpp (position matrix = the packet's view x S(k)) and once as a
 //    native draw, under the same GX projection and viewport: the two depth buffers must agree (what
-//    lets the island and the Mii share the frame's depth).
-// 2. A real package (NOMA_G3D_PACKAGE, default wuhu/island.ng3d) drawn from each of its view_*
-//    camera markers: the World's packets (both passes) through the backend into the host EFB, under
-//    the GX state a frame of the game would have (GXSetProjection from the camera scaled by k, a
-//    640x456 viewport and scissor, the 342 bias) -- PNGs to NOMA_G3D_OUT (default g3drender), the
-//    time each view takes (with the backend's threads, and with one), and, with NOMA_G3D_REF set to
+//    lets the island and the Mii share the frame's depth). Again with the native draw's positions
+//    compact (fmt::VA_POS16), the triangles first put on its grid.
+// 2. A real package (NOMA_G3D_PACKAGE, default wuhu/island.ng3d) drawn
+//    from each of its view_* camera markers: the World's packets (both passes) through the backend
+//    into the host EFB, under the GX state a frame of the game would have (GXSetProjection from the
+//    camera scaled by k, a 640x456 viewport and scissor, the 342 bias) -- PNGs to NOMA_G3D_OUT
+//    (default g3drender), the time each view takes (with the backend's threads, and with one), and, with NOMA_G3D_REF set to
 //    a directory of tools/g3d/preview_views.py's renders of the same package (<view>.ppm), the
 //    difference against them: PSNR, the share of pixels off by more than 16 in a channel, a
 //    difference picture. The first view is also drawn the way the game will draw it: World::emit's
@@ -171,8 +172,9 @@ struct ParityVertex {
 static_assert(sizeof(ParityVertex) == 16, "ParityVertex");
 
 // a package of one batch of triangles in one vertex buffer, one material: the vertex colour, depth
-// test LEQUAL with update, no culling
-std::vector<u8> parity_package(const std::vector<ParityVertex>& v) {
+// test LEQUAL with update, no culling; with `scale`, the positions compact (fmt::VA_POS16: s16 from
+// `origin` in steps of `scale`, which the caller has the vertices exactly on)
+std::vector<u8> parity_package(const std::vector<ParityVertex>& v, f32 scale = 0, const f32* origin = nullptr) {
     g3::StringTable strs;
     fm::Material m = {};
     m.name = strs.add("mt_parity");
@@ -192,6 +194,20 @@ std::vector<u8> parity_package(const std::vector<ParityVertex>& v) {
     std::vector<fm::Material> mats = {m};
     fm::VertexBuffer vb = {};
     vb.count = (u32)v.size(), vb.attrs = fm::VA_POS | fm::VA_CLR, vb.stride = sizeof(ParityVertex);
+    std::vector<u8> vdat((const u8*)v.data(), (const u8*)(v.data() + v.size()));
+    if (scale > 0) {
+        vb.attrs = fm::VA_POS16 | fm::VA_CLR, vb.stride = 12;
+        memcpy(vb.pos_origin, origin, 12);
+        vb.pos_scale = scale;
+        vdat.assign(v.size() * 12, 0);
+        for (size_t i = 0; i < v.size(); i++) {
+            s16 q[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 3; k++)
+                q[k] = (s16)std::lround(((f64)v[i].pos[k] - origin[k]) / scale);
+            memcpy(&vdat[i * 12], q, 8);
+            memcpy(&vdat[i * 12 + 8], v[i].clr, 4);
+        }
+    }
     std::vector<fm::VertexBuffer> vbs = {vb};
     std::vector<u16> idx(v.size());
     for (size_t i = 0; i < v.size(); i++)
@@ -209,7 +225,7 @@ std::vector<u8> parity_package(const std::vector<ParityVertex>& v) {
     w.relocate(fm::SEC_VTXB, offsetof(fm::VertexBuffer, data), fm::SEC_VDAT);
     w.array(fm::SEC_IDAT, idx);
     w.array(fm::SEC_BTCH, batches);
-    w.section(fm::SEC_VDAT, v.data(), (u32)(v.size() * sizeof(ParityVertex)), 0);
+    w.section(fm::SEC_VDAT, vdat.data(), (u32)vdat.size(), 0);
     w.section(fm::SEC_TDAT, nullptr, 0, 0, 128);
     return w.finish();
 }
@@ -246,7 +262,9 @@ void gx_draw_triangles(const f32 mv[3][4], const std::vector<ParityVertex>& v) {
     r.draw(0x90, 0, (u32)v.size(), data.data());
 }
 
-void test_parity() {
+// (compact: the triangles' positions put on an s16 grid first -- the GX draw gets them as floats, the
+// native one as s16 with the buffer's origin and scale)
+void test_parity(bool compact) {
     const f32 k = 9.2f;  // (the island's scale: a package unit is 9.2 of the guest's)
     g3::Camera cam;
     cam.eye = {100, 50, 200}, cam.target = {130, 40, -300}, cam.fovy_deg = 45, cam.aspect = (f32)W / H;
@@ -273,6 +291,23 @@ void test_parity() {
             v.push_back(pv);
         }
     }
+    // compact positions: the s16 grid about the triangles' middle, in power-of-two steps that hold them
+    f32 origin[3] = {0, 0, 0}, scale = 0;
+    if (compact) {
+        f64 lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+        for (const ParityVertex& pv : v)
+            for (int a = 0; a < 3; a++)
+                lo[a] = std::min(lo[a], (f64)pv.pos[a]), hi[a] = std::max(hi[a], (f64)pv.pos[a]);
+        f64 extent = 0;
+        for (int a = 0; a < 3; a++) {
+            origin[a] = (f32)std::floor((lo[a] + hi[a]) * 0.5);
+            extent = std::max(extent, std::max(hi[a] - origin[a], origin[a] - lo[a]));
+        }
+        scale = (f32)std::exp2(std::ceil(std::log2(extent / 32000.0)));
+        for (ParityVertex& pv : v)
+            for (int a = 0; a < 3; a++)
+                pv.pos[a] = (f32)(std::lround(((f64)pv.pos[a] - origin[a]) / scale) * (f64)scale + origin[a]);
+    }
     set_gx_frame(gc);
     // GX: matrix = view x S(k)
     f32 mv[3][4];
@@ -285,7 +320,7 @@ void test_parity() {
     std::vector<u32> gx_depth(e.depth, e.depth + e.width * e.height);
     // native: the same triangles through a package and a packet
     std::string error;
-    const std::vector<u8> bytes = parity_package(v);
+    const std::vector<u8> bytes = parity_package(v, scale, origin);
     void* block = malloc(bytes.size());
     memcpy(block, bytes.data(), bytes.size());
     g3::Package* pkg = g3::Package::load(block, (u32)bytes.size(), &error);
@@ -333,10 +368,13 @@ void test_parity() {
                 only_native++;
             }
         }
-    log("selftest g3drender: depth parity, %zu triangles at 2-30000 units (k %.1f): %llu pixels drawn by both, %llu "
+    char how[64] = "";
+    if (compact)
+        snprintf(how, sizeof(how), ", compact positions in steps of %g", (double)scale);
+    log("selftest g3drender: depth parity, %zu triangles at 2-30000 units (k %.1f%s): %llu pixels drawn by both, %llu "
         "only by GX, %llu only natively; their depths equal at %llu, within 4 steps at %llu, within 1e-4 of the "
         "view distance at %llu, further apart at %llu (mean difference %.1f steps)",
-        v.size() / 3, (double)k, (unsigned long long)both, (unsigned long long)only_gx, (unsigned long long)only_native,
+        v.size() / 3, (double)k, how, (unsigned long long)both, (unsigned long long)only_gx, (unsigned long long)only_native,
         (unsigned long long)agree[0], (unsigned long long)agree[1], (unsigned long long)agree[2],
         (unsigned long long)agree[3], both ? (double)steps / (double)both : 0.0);
     expect(both > 50000, "the parity triangles cover the frame (%llu pixels)", (unsigned long long)both);
@@ -637,7 +675,8 @@ void test_views() {
 
 void selftest_g3drender() {
     s_failures = s_checks = 0;
-    test_parity();
+    test_parity(false);
+    test_parity(true);
     test_views();
     log("selftest g3drender: %d checks, %d failed: %s", s_checks, s_failures, s_failures ? "MISMATCH" : "ok");
 }

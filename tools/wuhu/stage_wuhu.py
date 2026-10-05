@@ -1,47 +1,59 @@
 #!/usr/bin/env python3
-"""Stage Wuhu Island for the native g3d: Wii Sports Resort's island -> DATA/wuhu/island.ng3d.
+"""Stage Wuhu Island for the native g3d: Wii Sports Resort's island -> DATA/wuhu/island.ng3d (NG3D 2).
 
-    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--keep-raw] [--json OUT]
+    tools/wuhu/stage_wuhu.py DATA [--wsr ROOT] [--bake TOOL | --no-bake] [--pvs TOOL | --no-pvs]
+                             [--keep-raw] [--name NAME] [--json OUT] [--no-prelit] [--no-pos16]
 
 ROOT is your Wii Sports Resort extraction (default ../wii-sports-extract/wii-sports-resort next to
 this repository; files/ under it is the disc's root). DATA is the port's data directory (the one
-tools/stage_data.py makes); the package goes to DATA/wuhu/island.ng3d, a summary of what went into
-it to DATA/wuhu/island.json. Nothing of the disc is copied anywhere else, and nothing it makes
-belongs in the repository.
+tools/stage_data.py makes); the package goes to DATA/wuhu/NAME.ng3d (NAME default island), a summary
+of what went into it to DATA/wuhu/NAME.json. Nothing of the disc is copied anywhere else, and nothing
+it makes belongs in the repository.
 
 What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md sections 0.3, 8):
-  - WS2_common_island as Island Flyover (mode 13) shows it, cut into cells of CELL units on x/z by
-    triangle centroid, a batch per (cell, material), and the placed objects of
-    PlnEnv0.carc/WS2_pln_island_tag0.pmp group 1 (what the Flyover's 1-player mode spawns: exclude
-    bit 2 skipped) that stand still, baked into the cells: trees (the full model near, the lighter
-    one from 3,000 units), boats at anchor, the fountain, the venues' gates (to 20,000 units), and
-    near the eye only parasols, tents, parked cars, kayaks, flags at rest, poles, tees, buoys and
-    the venues' small props; WS2_common_island_V too.
-  - Wedge Island (Island_16 and its sea rim) as a still instance whose far model is its light one
-    (Island_16b), as WSR shows it from the ground.
+  - one static world cut into cells of CELL units on x/z (triangles by centroid, a placed object
+    whole by its position), each with three detail levels (LOD_DISTANCES): level 0 WS2_common_island
+    as Island Flyover (mode 13) shows it, Wedge Island included, with WS2_common_island_V, the
+    placed objects of PlnEnv0.carc/WS2_pln_island_tag0.pmp group 1 (what the Flyover's 1-player mode
+    spawns: exclude bit 2 skipped) that stand still -- trees (full models), boats at anchor, the
+    fountain, the venues' gates, and as detail (BATCH_DETAIL, culled beyond DETAIL_DISTANCE)
+    parasols, tents, parked cars, kayaks, flags at rest, poles, tees, buoys and the venues' small
+    props -- and the sea by the shores and inland (lake, pool, falls, shore foam, waves, ripples);
+    level 1 the far island (WS2_common_island_R, WSR's own low-detail copy, with a few of the
+    island's nodes it lacks), the waters, the trees' lighter models, the boats and gates; level 2 the
+    far island and its waters. One batch a (cell, material, detail) in a level's list; slivers of a
+    material cut off at a cell's edge go to the neighbour with the rest of it.
   - the moving ones as models placed by instances with their own node animation: windmills,
     balloons, the airship, moving cars, cruisers and the liner on their routes, whales, gulls and
-    hawks on circles.
-  - WS2_common_sea (all but Water16 and 16b; sea2_dummy -> sea2_day) and WS2_common_vr (the sky,
-    with the sun in it) as models; the island's, sea's, sky's, sun's and fountain's texture and
-    colour animations.
-  - the ground-level day environment (Bic F0's lights and light sets; fog 0 off, the open sea's fog
-    1), k = 10, markers (spawn, landmarks, camera presets, the exploration menu's warps, each
+    hawks on circles; small ones culled by distance (INSTANCE_CULL).
+  - the open sea (WS2_common_sea's plane away from the shores; sea2_dummy -> sea2_day) and
+    WS2_common_vr (the sky, with the sun in it) as models; the island's, sea's, sky's, sun's and
+    fountain's texture and colour animations.
+  - the ground-level day environment (Bic F0's lights and light sets; the fog table, but no material
+    fogged), k = 10, markers (spawn, landmarks, camera presets, the exploration menu's warps, each
     checked on the collision) and the island's collision (WS2_common_island1..5.kcl, tree trunks as
     cylinders).
+  - for speed (NG3D version 2): positions as s16 steps of 1/12 unit about each buffer's origin
+    (VA_POS16), static lighting baked into the vertex colours of every lit material whose colours no
+    animation drives, but the windmills' (MAT_PRELIT, no normals where nothing else needs them;
+    LIVE_LIT_PLACED), the cells' visibility rows (CVIS, from the host tool ng3d-pvs: TOOL, default
+    build-host/ng3d-pvs).
 The package is baked: after writing it, TOOL UNBAKED OUT runs (the renderer's ng3d-bake, default
 build-host/ng3d-bake, which converts the GX texels to PICA ones offline), with UNBAKED =
-DATA/wuhu/island.unbaked.ng3d (kept with --keep-raw: tools/g3d/preview.py reads GX texels) and OUT =
-DATA/wuhu/island.ng3d. Without the tool it stops: the 3DS refuses an unbaked package. --no-bake
-writes one anyway (the host converts GX texels as it loads).
+DATA/wuhu/NAME.unbaked.ng3d (kept with --keep-raw: tools/g3d/preview.py reads GX texels) and OUT =
+DATA/wuhu/NAME.ng3d. Without the tool it stops: the 3DS refuses an unbaked package. --no-bake
+writes one anyway (the host converts GX texels as it loads). --no-prelit and --no-pos16 make
+packages for comparisons.
 """
 import argparse
 import json
 import math
 import os
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter, OrderedDict
 
@@ -62,6 +74,8 @@ DEFAULT_WSR = os.path.join(os.path.dirname(ROOT), "wii-sports-extract/wii-sports
 # the 3DS loads only baked packages (converting at load time would race the GX path's texture
 # uploads, which share pica_tex.h's tables, on the GPU thread)
 DEFAULT_BAKE = os.path.join(ROOT, "build-host", "ng3d-bake")
+# the cells' visibility rows (CVIS) come from tools/ng3d_pvs.cpp (the host build's ng3d-pvs)
+DEFAULT_PVS = os.path.join(ROOT, "build-host", "ng3d-pvs")
 
 # ----------------------------------------------------------------------------------- choices
 # Island Flyover's node visibility (main.dol's table at 0x8066A37C, column 13 = Pln day; research
@@ -74,15 +88,59 @@ HIDDEN_MODE13 = {"Island_16b_Model", "Island_17_Model", "Island_17b_Model", "Isl
 # x/z cells of the static world, units (research gfx.md section 4: 39 non-empty cells, 53-264 draws
 # a frame, the largest cell 16k vertices -- within one u16 index space)
 CELL = 4000.0
-# detail levels of a cell, by the eye's distance to its box: 0 = everything, the trees' full models;
-# 1 (from 3,000 units) = the trees' lighter models (WS2_common_tree_M, tree2_M) and the large props
-# only -- on the 3DS's 240-line screen with a 45-degree view a 230-unit tree is about 22 pixels tall
-# at 3,000 units, where the two tree models look alike, and a 30-unit car or parasol 3 pixels; 2
-# (from 20,000) = the terrain alone: a tree is 3 pixels tall there, and only Wedge Island and the
-# far islets are that far from anywhere on the main island
-LOD_DISTANCES = [0.0, 3000.0, 20000.0]
-TAG_ALL, TAG_PROP, TAG_NEAR, TAG_MID = 0, 1, 2, 3          # which levels a piece is in
-TAG_LEVELS = {TAG_ALL: (0, 1, 2), TAG_PROP: (0, 1), TAG_NEAR: (0,), TAG_MID: (1,)}
+# Detail levels of a cell, by the eye's distance to its box (docs/wuhu.md "Cells and detail levels"
+# has the measures behind the numbers):
+#   0 = everything: the island at full detail with its edge-blend strips, the trees' full models,
+#       every prop, the sea's shore foam, waves and ripples (the strips and the small props are
+#       BATCH_DETAIL as well: gone beyond DETAIL_DISTANCE even in a level-0 cell);
+#   1 (from LOD1) = the far island: WS2_common_island_R's geometry (WSR's own low-detail copy of
+#       the island, drawn mirrored as its water reflection: the same frame, 15k triangles for the
+#       whole archipelago, one TEV stage a material, Wedge Island's light model in it), the lake,
+#       the falls and the sea by the shores, the trees' lighter models (WS2_common_tree_M,
+#       tree2_M; the palm has one), the boats and the venues' gates;
+#   2 (from LOD2) = the far island and its waters alone: a 230-unit conifer is 4 pixels tall at
+#       15,000 units on the 3DS's 240 lines at 45 degrees, a boat 2.
+# (Three levels are the format's; trees can't be dropped by size within a level, which goes on to
+# any distance, so they go with level 2's start.)
+LOD1, LOD2 = 5000.0, 15000.0
+LOD_DISTANCES = [0.0, LOD1, LOD2]
+# the tags: which levels a piece is in
+TAG_ALL, TAG_PROP, TAG_NEAR, TAG_MID, TAG_FAR, TAG_MID_FAR = 0, 1, 2, 3, 4, 5
+TAG_LEVELS = {TAG_ALL: (0, 1, 2), TAG_PROP: (0, 1), TAG_NEAR: (0,), TAG_MID: (1,), TAG_FAR: (2,),
+              TAG_MID_FAR: (1, 2)}
+# the far island (levels 1-2) is island_R's but for these nodes of the island model, which R lacks
+# (the round stage of Swordplay on the water, the court beside the lighthouse) or has without their
+# grass for no saving (three islets: 22-28 triangles against 31-59): the island's own (its non-detail
+# draws) at every level, R's left out
+FAR_FROM_ISLAND = {"Island_21_Model", "Island_3b_Model", "Island_12_Model", "Island_13_Model", "Island_14_Model"}
+R_LEFT_OUT = {"Island_12_Model", "Island_13_Model", "Island_14_Model"}
+# The cells' visibility rows (CVIS): from each cell, the cells some triangle of which shows from an eye
+# over the cell's ground (tools/ng3d_pvs.cpp: cube maps, the cells' opaque triangles occluding as the
+# farthest of the detail levels they may be drawn at). Eyes: a column every PVS_SPACING units over the
+# cell, at every floor the collision has there (ground or water, not the invisible fences), at heights
+# PVS_HEIGHTS (fractions of PVS_MAX_HEIGHT; 2.5 units at the least) over it and under what is above
+# it. PVS_MAX_HEIGHT: three heights of the island's Mii (158 Wii no Ma units at k / 1.7, the size the
+# island draws it: engine/wuhu/island.cpp MII_SCALE), where the follow camera sits on flat ground and
+# a little over; a camera higher over the ground under it (zoomed out, raised, over a drop) doesn't
+# use the rows
+PVS_MAX_HEIGHT = 80.0
+PVS_SPACING = 400.0
+PVS_HEIGHTS = (0.0, 0.5, 1.0)
+PVS_FACE = 128
+# a cell's material with fewer triangles than this (a sliver of a material crossing the cell's edge)
+# goes to the neighbouring cell that draws the most of it
+SLIVER, SLIVER_MARGIN = 32, 16.0
+# BATCH_DETAIL batches (Env::detail_distance culls them by their own box): the edge-blend strips
+# laid over the terrain where grass, cliff, sand and earth meet, the sea's shore foam, waves and
+# ripples, the decals, and the small props (PMP classes staged "small")
+DETAIL_DISTANCE = 3000.0
+DETAIL_MATERIALS = {"mt_gake_blend", "mt_kusa_blend", "mt_suna_blend", "mt_tuti_blend", "mt_stage_logo",
+                    "png_net_b", "mt_zd_w_kiwa", "mt_zd_w_kiwa_off", "mt_ze_w_nami", "mt_ze_w_nami2",
+                    "mt_zb_w_hamon"}
+# the sea model keeps the open sea: the sea plane's triangles wider than this (or outside the cells'
+# grid); the rest of the sea -- the plane near the shores, the lake, the pool, the falls and
+# flows, the shore foam, waves and ripples -- goes into the cells by triangle centroid
+SEA_CELL_MAX = CELL / 2
 
 # where the Mii appears (research placement.md section 5): Wuhu Town's plaza south of the coin-toss
 # fountain, facing it (-Z); checked on the collision below
@@ -119,6 +177,8 @@ ENV_FOGS = (BIC, "Env/WS2_bic_F0/WS2_bic_F0_fog.pfog")
 ENV_PENV = (BIC, "Env/WS2_bic_F0/WS2_bic_F0_Env.penv")
 SEA_FOG = ("Stage/Static/StageArc.carc", "Binary/WS2_common_binary/ws2_common_day.pfobj")
 SEA_FOG_INDEX = 1
+# whether materials keep their fog (MAT_FOG): not since the speed round (stage_env says why)
+KEEP_FOG = False
 # EGG's type-0 lights are positions in the world: the sun's (Map_Light, Obj_Light) are 82,000-103,000
 # units out. The ones within a few hundred units of the origin (Flag_Light at (-10, 0, 50),
 # PlayerObj_Light, Sea_Light) light props thousands of units away: they are directions written as
@@ -140,15 +200,11 @@ POINT_LIGHT_MIN_DISTANCE = 10000.0
 SUN_DISTANCE = 60000.0
 SUN_SCREEN = 0.5 * 2.39 * 10000.0 * 456.0
 
-# Wedge Island (Island_16) far away: WSR's ground-level modes show its light model, Island_16b (3,999
-# triangles against 9,976, research env.md: the two can't be told apart from the main island, even
-# through a 6x zoom), with its own sea rim (Water16b: the waves, no shore foam). Here the full model
-# with Water16 is an instance whose model chain goes to 16b + Water16b from LOD_WEDGE units off its
-# centre: anywhere on Wedge Island and its islets (all within 5,000) it is the full one, from the main
-# island (25,000 and more) the light one; the switch is over open sea.
-WEDGE_NODES = ("Island_16_Model", "Water16")
+# Wedge Island (Island_16) is in the cells like the rest of the island: its full model and sea rim
+# (Water16) at levels 0-1, island_R's light model of it (Island_16b_model, as WSR's ground-level
+# modes show it: research env.md, the two can't be told apart from the main island) at level 2.
+# Water16b (16b's own rim: its pond and waves) is left out: the pond is Water16's, the waves detail.
 WEDGE_FAR_NODES = ("Island_16b_Model", "Water16b")
-LOD_WEDGE = 12000.0
 
 # The exploration menu's places (docs/wuhu_design.md section 8): markers of kind MK_WARP in the order
 # the menu lists them -- the town, the beaches and the coasts, the mountain, the castle and the
@@ -228,8 +284,9 @@ VIEWS = OrderedDict([
 ])
 
 # CmnObjManager classes (main.dol 0x80669518) by PMP (group 1) type (0x80669858), and how each
-# is staged: "static" baked into the cells for levels 0-1 (TAG_PROP), "small" baked for level 0
-# only (TAG_NEAR), "tree" baked with two detail levels, "instance" a model + instance (+ animation),
+# is staged: "static" baked into the cells for levels 0-1 (TAG_PROP; NEAR_STATIC level 0), "small"
+# baked for level 0 only (TAG_NEAR) as detail, "tree" baked with two detail levels, "instance" a
+# model + instance (+ animation),
 # "out" left out (the reason in docs/wuhu.md)
 PMP_CLASS = {0: 2, 1: 3, 2: 4, 3: 6, 4: 8, 5: 41, 6: 42, 7: 5, 9: 7, 10: 9, 11: 10, 12: 10, 18: 10, 19: 10,
              13: 11, 15: 11, 24: 11, 25: 11, 35: 12, 33: 13, 14: 14, 16: 15, 20: 16, 22: 16, 23: 16, 21: 17,
@@ -288,9 +345,14 @@ CRUISER_SPEED = 20.0 / 29.0
 BIRD_SPEED = 1.9
 WINDMILL_DESYNC = 37.0         # frames between windmills' phases (they turn together in WSR's data)
 
-# distances beyond which small instances aren't drawn (0 = always): a 20-unit gull is under two
-# pixels at 6,000; the big ones (airship, liner, balloons, whales, windmills) are left to the fog
-INSTANCE_CULL = {5: 6000.0, 23: 6000.0, 26: 12000.0, 33: 20000.0}
+# distances beyond which small instances aren't drawn (0 = always), from the near side of their
+# bounding sphere (World): a 20-unit gull or hawk is 3 pixels across at 2,000 units on the 3DS's 240
+# lines at 45 degrees, a 55-unit car 5 at 3,000, a 600-unit whale 22 at 8,000, a 160-unit cruiser 6
+# at 8,000; the big ones (airship, liner, balloons, windmills) always. (The cars' and cruisers'
+# spheres hold their whole routes: a renderer culling them by where they are now gains most.)
+INSTANCE_CULL = {5: 2000.0, 23: 2000.0, 26: 3000.0, 32: 8000.0, 33: 8000.0}
+# the "static" props at level 0 only (small next to the boats and the gates)
+NEAR_STATIC = {21}
 
 
 # ----------------------------------------------------------------------------------- sources
@@ -484,6 +546,11 @@ def warp_check(kcl, cylinders, pos, body, wall_ny=0.3, ring=5.0):
     return out
 
 
+def mat_name(mdl, d):
+    """The name of a draw's material."""
+    return next(m.name for m in mdl.materials if m.index == d.mat)
+
+
 def landmark_name(l):
     """A LandMarkData name without its number ("28_コイン・トスの噴水" -> "コイン・トスの噴水")."""
     return l["name"].split("_", 1)[1] if "_" in l["name"] else l["name"]
@@ -591,11 +658,85 @@ def spawned(objs, exclude_mask):
 # ----------------------------------------------------------------------------------- staging
 
 
+def env_lights(w):
+    """The day's lights and light sets as the package records them (stage_env adds them in this
+    order): ([dict(name, kind, rgba, position, direction, info)], [dict(id, name, lights, ambient)])
+    -- Bic F0's lights in the sets of SCN0 WS2_Scene (a material's light set number is the set's
+    index)."""
+    lights, ambient = read_plight(w.get(*ENV_LIGHTS))
+    scn = w.brres("Common/Static/common.carc", "G3D/WS2_Scene.brres")
+    scene = next(iter(scn.scenes.values()))
+    by_id = {l["index"]: l for l in lights}
+    light_index, out = {}, []
+    for ls in sorted(scene.light_sets, key=lambda s: s["id"]):
+        for nm in ls["lights"]:
+            lid = scene.lights[nm]
+            l = by_id.get(lid)
+            if l is None or not l["on"] or lid in light_index:
+                continue
+            # EGG type 0: a light at a position in the world (the sun's 48,000-100,000 units off,
+            # unattenuated; or a direction written as a position: POINT_LIGHT_MIN_DISTANCE); type 1:
+            # directional, from the position toward the aim point. Every light carries that
+            # direction (what a directional-only renderer uses)
+            pos = np.array(l["pos"], np.float64)
+            d = np.array(l["aim"], np.float64) - pos
+            d /= max(np.linalg.norm(d), 1e-9)
+            point = l["type"] == 0 and np.linalg.norm(pos) >= POINT_LIGHT_MIN_DISTANCE
+            light_index[lid] = len(out)
+            out.append(dict(name=nm, kind=ng3d.LK_POINT if point else ng3d.LK_DIRECTIONAL, rgba=l["color"],
+                            position=[float(x) for x in pos], direction=[float(x) for x in d],
+                            info=dict(name=nm, id=lid, egg_type=l["type"], flags="%04x" % l["flags"],
+                                      kind="point" if point else "directional", pos=l["pos"],
+                                      direction=[round(float(x), 4) for x in d], color=l["color"])))
+    sets = []
+    for ls in sorted(scene.light_sets, key=lambda s: s["id"]):
+        idx = [light_index[scene.lights[nm]] for nm in ls["lights"] if scene.lights[nm] in light_index]
+        amb = ambient[scene.ambients[ls["ambient"]]] if ls["ambient"] in scene.ambients else [0, 0, 0, 255]
+        sets.append(dict(id=ls["id"], name=ls["name"], lights=idx, ambient=amb))
+    return out, sets
+
+
+# the colour animations staged (stage_anims), by the model whose materials they drive: a material
+# whose material or ambient colour one drives keeps its lighting live (not MAT_PRELIT)
+CLR0_STAGED = (("WS2_common_island", "WS2_common_island"), ("WS2_common_island_V", "WS2_common_island_V"),
+               ("WS2_common_sea", "WS2_common_sea_nami"))
+
+
+# models placed turned that keep their lighting live (PMP class, model): a model's lighting is baked
+# once, at its rest orientation, so every instance would carry that one. The eight windmills stand
+# 6-87 degrees apart about y (and their blades turn): baked, six of them were lit from the wrong
+# side, 19-42 colour levels off on average and up to 122 (the windmill is 96 vertices). The models
+# moving along world routes (cars, cruisers, the liner, the airship, birds, whales) and the
+# balloons (3-4 levels off) are baked: their light turns with them (docs/wuhu.md).
+LIVE_LIT_PLACED = ((18, "WS2_common_windmill"),)
+
+
+def live_lit_materials(isl, wsr=None):
+    """(model, material) whose channel colours (material or ambient, CLR0 targets 0-3) a staged
+    CLR0 animates, and (given the extraction) every material of LIVE_LIT_PLACED's models."""
+    out = set()
+    for model, anim in CLR0_STAGED:
+        for mname, targets in isl.anims["CLR0"][anim].materials.items():
+            if any(t in (0, 1, 2, 3) for t in targets):
+                out.add((model, mname))
+    for cls, model in LIVE_LIT_PLACED if wsr is not None else ():
+        out |= {(model, m.name) for m in wsr.brres(SA, CLASSES[cls][2]).models[model].materials}
+    return out
+
+
 class Stager:
-    def __init__(self, wsr):
+    def __init__(self, wsr, prelit=True, pos16=True):
         self.wsr = wsr
         self.pkg = ng3d.Package()
-        self.cv = convert.Converter(self.pkg)
+        # the lights first: MAT_PRELIT materials take them into their vertex colours as the
+        # geometry is converted
+        self.lights, self.light_sets = env_lights(wsr)
+        self.island = wsr.brres(SA, "Island/G3D/WS2_common_island.brres")
+        lighting = convert.Lighting([(l["kind"], l["position"], l["direction"], l["rgba"]) for l in self.lights],
+                                    {ls["id"]: (ls["ambient"], ls["lights"]) for ls in self.light_sets}) \
+            if prelit else None
+        self.keep_lit = live_lit_materials(self.island, wsr)
+        self.cv = convert.Converter(self.pkg, lighting, self.keep_lit, pos16)
         self.cells = convert.MeshSet(self.cv)
         self.inv = OrderedDict()           # the inventory written next to the package
         self.cell_groups = {}              # cell -> Counter(node name -> triangles)
@@ -630,9 +771,12 @@ class Stager:
 
     # -- static geometry into the cells
     def bake_model(self, r, mdl, M, tag, hidden=(), tex_override=None, by_centroid=False, cell=None,
-                   group_name=None):
+                   group_name=None, tag_of=None, detail=False, select=None):
         """Every visible draw of `mdl`, moved by M (4x4), into the cells: by triangle centroid
-        (terrain) or all into `cell`."""
+        (terrain) or all into `cell`. tag_of(node name, material name) -> its tag, or None to leave
+        the draw out (default: `tag`); a draw whose material is in DETAIL_MATERIALS, or any if
+        `detail`, makes BATCH_DETAIL batches; select(node name, material name, triangles (n, 3, 3))
+        -> the triangles to keep. Returns the triangles baked."""
         mats = {m.index: m for m in mdl.materials}
         shapes = {s.index: s for s in mdl.shapes}
         tris = 0
@@ -640,13 +784,23 @@ class Stager:
             vis = mdl.nodes[d.node].name if 0 <= d.node < len(mdl.nodes) else None
             if vis in hidden:
                 continue
-            mi = self.material(r, mdl, mats[d.mat], tex_override, d.prio)
+            mname = mats[d.mat].name
+            dtag = tag if tag_of is None else tag_of(vis, mname)
+            if dtag is None:
+                continue
             t = mdl.shape_triangles(shapes[d.shape], world=True)
             if not t or "pos" not in t:
                 continue
             c = convert.corners_from(t, mdl, shapes[d.shape])
             if M is not None:
                 c = convert.transform_corners(c, M)
+            if select is not None:
+                keep = np.repeat(np.asarray(select(vis, mname, c["pos"].reshape(-1, 3, 3)), bool), 3)
+                if not keep.any():
+                    continue
+                c = {k: (v[keep] if k != "uvfrac" else v) for k, v in c.items()}
+            mi = self.material(r, mdl, mats[d.mat], tex_override, d.prio)
+            det = detail or mname in DETAIL_MATERIALS
             n = len(c["pos"]) // 3
             tris += n
             if by_centroid:
@@ -655,31 +809,58 @@ class Stager:
                 cz = np.floor(cen[:, 2] / CELL).astype(np.int64)
                 for key in set(zip(cx.tolist(), cz.tolist())):
                     sel = np.repeat((cx == key[0]) & (cz == key[1]), 3)
-                    self.cells.add(key, mi, {k: (v[sel] if k != "uvfrac" else v) for k, v in c.items()}, tag)
+                    self.cells.add(key, mi, {k: (v[sel] if k != "uvfrac" else v) for k, v in c.items()},
+                                   TAG_LEVELS[dtag], det)
                     if group_name:
                         self.cell_groups.setdefault(key, Counter())[vis or group_name] += int(sel.sum() // 3)
             else:
-                self.cells.add(cell, mi, c, tag)
+                self.cells.add(cell, mi, c, TAG_LEVELS[dtag], det)
         return tris
 
     # ------------------------------------------------------------------------------- island
     def stage_island(self):
         w = self.wsr
-        self.island = isl = w.brres(SA, "Island/G3D/WS2_common_island.brres")
+        isl = self.island
         self.seatex = sea = w.brres(SA, "Island/G3D/WS2_common_seatex.brres")
         self.sea_override = {"sea2_dummy": (sea, "sea2_day")}
-        # (Wedge Island and its sea rim are an instance of their own: stage_wedge)
-        n = self.bake_model(isl, isl.models["WS2_common_island"], None, TAG_ALL,
-                            HIDDEN_MODE13 | {WEDGE_NODES[0]}, by_centroid=True, group_name="island")
-        nv = self.bake_model(isl, isl.models["WS2_common_island_V"], None, TAG_ALL, HIDDEN_MODE13,
+        island, island_r = isl.models["WS2_common_island"], isl.models["WS2_common_island_R"]
+        sea_m = isl.models["WS2_common_sea"]
+        # the island (Wedge Island with it) at level 0, its edge-blend strips detail; a few nodes at
+        # every level (FAR_FROM_ISLAND)
+        def island_tag(node, mat):
+            return TAG_ALL if node in FAR_FROM_ISLAND and mat not in DETAIL_MATERIALS else TAG_NEAR
+        n = self.bake_model(isl, island, None, TAG_NEAR, HIDDEN_MODE13, by_centroid=True, group_name="island",
+                            tag_of=island_tag)
+        nv = self.bake_model(isl, isl.models["WS2_common_island_V"], None, TAG_NEAR, HIDDEN_MODE13,
                              by_centroid=True, group_name="island_V")
-        self.say("island: %d triangles in the cells (mode 13, Wedge Island aside), island_V %d" % (n, nv))
+        # levels 1-2: island_R, the whole of it (its own nodes: one version each of the mountain and
+        # the north coast, Wedge Island's light model)
+        nr = self.bake_model(isl, island_r, None, TAG_MID_FAR, R_LEFT_OUT, by_centroid=True)
+        # the sea near the shores and inland, into the cells: the open sea stays a model
+        x0, z0, nx, nz = self.grid_hint = self.island_grid(island)
+
+        def open_sea(node, mat, tris):
+            cen = tris.mean(1)
+            ext = tris.max(1) - tris.min(1)
+            inside = (cen[:, 0] >= x0) & (cen[:, 0] < x0 + nx * CELL) & (cen[:, 2] >= z0) & (cen[:, 2] < z0 + nz * CELL)
+            return ~inside | (np.maximum(ext[:, 0], ext[:, 2]) > SEA_CELL_MAX) if (node, mat) == (
+                "Water_Sea", "mt_za_water") else np.zeros(len(tris), bool)
+
+        def sea_tag(node, mat):     # (the cave's water, _off, at level 0: R has no cave)
+            return TAG_NEAR if mat in DETAIL_MATERIALS or mat.endswith("_off") else TAG_ALL
+        ns = self.bake_model(isl, sea_m, None, TAG_ALL, {WEDGE_FAR_NODES[1]}, self.sea_override, by_centroid=True,
+                             tag_of=sea_tag, select=lambda node, mat, tris: ~open_sea(node, mat, tris))
+        self.say("island: %d triangles in the cells (mode 13 with Wedge Island), island_V %d, island_R %d "
+                 "(level 2), the sea near the shores and inland %d" % (n, nv, nr, ns))
         self.inv["island"] = dict(source="%s Island/G3D/WS2_common_island.brres" % SA, cell_triangles=n,
-                                  island_V_triangles=nv, hidden_nodes=sorted(HIDDEN_MODE13))
-        # the sea and the sky: models of their own; the sun a part of the sky
-        self.sea_model, _ = self.cv.model(isl, isl.models["WS2_common_sea"],
-                                          hidden=HIDDEN_MODE13 | {WEDGE_NODES[1]}, tex_override=self.sea_override)
-        self.register_materials(isl, isl.models["WS2_common_sea"], self.sea_override)
+                                  island_V_triangles=nv, island_R_triangles=nr, sea_in_cells_triangles=ns,
+                                  hidden_nodes=sorted(HIDDEN_MODE13), detail_materials=sorted(DETAIL_MATERIALS),
+                                  far_from_island=sorted(FAR_FROM_ISLAND), island_R_left_out=sorted(R_LEFT_OUT))
+        # the open sea and the sky: models of their own; the sun a part of the sky
+        self.sea_model, _ = self.cv.model(isl, sea_m, hidden={nd.name for nd in sea_m.nodes if nd.name != "Water_Sea"},
+                                          tex_override=self.sea_override,
+                                          select=lambda m, d, tris: open_sea(m.nodes[d.node].name, mat_name(m, d), tris))
+        self.register_materials(isl, sea_m, self.sea_override)
         self.sun = sunr = w.brres(SA, "Sun/G3D/WS2_common_sun_model.brres")
         penv = read_penv(w.get(*ENV_PENV))
         M, info = sun_matrix(penv)
@@ -705,29 +886,22 @@ class Stager:
             if k in self.cv.mat:
                 self.mat_by_name[(mdl.name, m.name)] = self.cv.mat[k]
 
-    def stage_wedge(self):
-        """Wedge Island (Island_16 with its sea rim Water16) as a still instance whose model chain
-        goes to the light model (Island_16b, Water16b) from LOD_WEDGE units off (WEDGE_NODES)."""
-        isl, pkg = self.island, self.pkg
-        island, sea = isl.models["WS2_common_island"], isl.models["WS2_common_sea"]
-        models = []
-        for land, water in (WEDGE_NODES, WEDGE_FAR_NODES):
-            others = {n.name for n in island.nodes if n.name != land}
-            mi, _ = self.cv.model(isl, island, name=land, hidden=others, parts=[
-                convert.Part(water, isl, sea, None, {n.name for n in sea.nodes if n.name != water},
-                             self.sea_override)])
-            models.append(mi)
-        self.register_materials(isl, island)
-        near, far = (pkg.models[m] for m in models)
-        near.lod_next, near.lod_distance = models[1], LOD_WEDGE
-        pkg.add("instances", model=models[0], flags=ng3d.INST_STATIC, anim=NONE16, class_id=0,
-                mtx=[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]])
-        tris = [sum(pkg.batches[b].n_indices // 3 for b in range(m.first_batch, m.first_batch + m.n_batches))
-                for m in (near, far)]
-        self.say("Wedge Island: %s %d triangles, %s %d from %.0f units off its centre (radius %.0f)" % (
-            "+".join(WEDGE_NODES), tris[0], "+".join(WEDGE_FAR_NODES), tris[1], LOD_WEDGE, near.radius))
-        self.inv["wedge_island"] = dict(near=list(WEDGE_NODES), far=list(WEDGE_FAR_NODES), triangles=tris,
-                                        lod_distance=LOD_WEDGE, radius=near.radius)
+    def island_grid(self, island):
+        """The cells' grid as the island's triangles span it (Wedge Island included): (x0, z0, nx,
+        nz) in cells of CELL from the corner (x0, z0)."""
+        shapes = {sh.index: sh for sh in island.shapes}
+        lo, hi = np.full(2, np.inf), np.full(2, -np.inf)
+        for d in island.draws("DrawOpa") + island.draws("DrawXlu"):
+            if island.nodes[d.node].name in HIDDEN_MODE13:
+                continue
+            t = island.shape_triangles(shapes[d.shape], world=True)
+            if not t or "pos" not in t:
+                continue
+            cen = np.asarray(t["pos"], np.float64).reshape(-1, 3, 3).mean(1)[:, [0, 2]]
+            lo, hi = np.minimum(lo, cen.min(0)), np.maximum(hi, cen.max(0))
+        c0 = np.floor(lo / CELL).astype(int)
+        c1 = np.floor(hi / CELL).astype(int)
+        return float(c0[0] * CELL), float(c0[1] * CELL), int(c1[0] - c0[0] + 1), int(c1[1] - c0[1] + 1)
 
     # ------------------------------------------------------------------------------- props
     def stage_props(self):
@@ -747,7 +921,9 @@ class Stager:
             counts.setdefault(cls, dict(name=CLASSES[cls][0], placed=0, handling="out", brres=CLASSES[cls][2],
                                         models=list(CLASSES[cls][3])))
             counts[cls]["dropped_by_exclude_bit"] = n
-        # static props and trees
+        # static props and trees: trees at full detail at level 0, their lighter model at level 1
+        # (the palm's one model at 0-1); the boats and gates at levels 0-1, the fountain at 0; the
+        # small props at level 0, BATCH_DETAIL
         for o in objs:
             name, how, path, models = CLASSES[o["cls"]]
             if how not in ("static", "small", "tree"):
@@ -756,12 +932,16 @@ class Stager:
             cell = self.cell_of(o["pos"][0], o["pos"][2])
             if how == "tree":
                 near, mid = models
-                self.bake_model(r, r.models[near], o["mtx"], TAG_NEAR if mid else TAG_PROP, cell=cell)
                 if mid:
+                    self.bake_model(r, r.models[near], o["mtx"], TAG_NEAR, cell=cell)
                     self.bake_model(r, r.models[mid], o["mtx"], TAG_MID, cell=cell)
-            else:
-                self.bake_model(r, r.models[models[0]], o["mtx"], TAG_PROP if how == "static" else TAG_NEAR,
+                else:
+                    self.bake_model(r, r.models[near], o["mtx"], TAG_PROP, cell=cell)
+            elif how == "static":
+                self.bake_model(r, r.models[models[0]], o["mtx"], TAG_NEAR if o["cls"] in NEAR_STATIC else TAG_PROP,
                                 cell=cell)
+            else:
+                self.bake_model(r, r.models[models[0]], o["mtx"], TAG_NEAR, cell=cell, detail=True)
             handled[o["cls"]] += 1
         self.inv["props"] = counts
         self.say("baked: %s" % ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(handled.items())))
@@ -927,6 +1107,10 @@ class Stager:
     # ------------------------------------------------------------------------------- the cells
     def build_cells(self):
         pkg = self.pkg
+        # the slivers a centroid cut leaves where a material crosses a cell's edge go to the
+        # neighbour that draws the most of it (a draw fewer each)
+        self.cells.absorb_small(SLIVER, lambda g: [(g[0] + dx, g[1] + dz) for dx in (-1, 0, 1) for dz in (-1, 0, 1)
+                                                   if dx or dz], SLIVER_MARGIN)
         built = self.cells.build()
         keys = list(built)
         xs = [k[0] for k in keys]
@@ -949,12 +1133,12 @@ class Stager:
                     world_lo, world_hi = np.minimum(world_lo, lo), np.maximum(world_hi, hi)
 
                 def level(l):
-                    sel = [(b, m) for b, m, t in lst if l in TAG_LEVELS[t]]
+                    sel = [(b, m) for b, m, lv in lst if l in lv]
                     sel.sort(key=lambda bm: (pkg.materials[bm[1]].flags & ng3d.MAT_XLU,
                                              pkg.materials[bm[1]].priority, bm[0]))
                     return [b for b, _ in sel]
                 levels = [level(l) for l in range(3)]
-                n_lods = 3 if any(t != TAG_ALL for _, _, t in lst) else 1
+                n_lods = 3 if any(lv != (0, 1, 2) for _, _, lv in lst) else 1
                 first, count = [0, 0, 0], [0, 0, 0]
                 for l in range(n_lods):
                     first[l] = len(pkg.cell_batches)
@@ -1025,38 +1209,16 @@ class Stager:
     # ------------------------------------------------------------------------------- environment
     def stage_env(self):
         w, pkg = self.wsr, self.pkg
-        lights, ambient = read_plight(w.get(*ENV_LIGHTS))
-        scn = w.brres("Common/Static/common.carc", "G3D/WS2_Scene.brres")
-        scene = next(iter(scn.scenes.values()))
-        by_id = {l["index"]: l for l in lights}
-        light_index = {}
-        env_lights = []
-        for ls in sorted(scene.light_sets, key=lambda s: s["id"]):
-            for nm in ls["lights"]:
-                lid = scene.lights[nm]
-                l = by_id.get(lid)
-                if l is None or not l["on"] or lid in light_index:
-                    continue
-                # EGG type 0: a light at a position in the world (the sun's 48,000-100,000 units
-                # off, unattenuated; or a direction written as a position: POINT_LIGHT_MIN_DISTANCE);
-                # type 1: directional, from the position toward the aim point. Every light carries
-                # that direction (what a directional-only renderer uses)
-                pos = np.array(l["pos"], np.float64)
-                d = np.array(l["aim"], np.float64) - pos
-                d /= max(np.linalg.norm(d), 1e-9)
-                point = l["type"] == 0 and np.linalg.norm(pos) >= POINT_LIGHT_MIN_DISTANCE
-                light_index[lid] = pkg.add("lights", name=pkg.str(nm), kind=ng3d.LK_POINT if point else ng3d.LK_DIRECTIONAL,
-                                           rgba=l["color"], position=list(map(float, pos)),
-                                           direction=[float(x) for x in d])
-                env_lights.append(dict(name=nm, id=lid, egg_type=l["type"], flags="%04x" % l["flags"],
-                                       kind="point" if point else "directional", pos=l["pos"],
-                                       direction=[round(float(x), 4) for x in d], color=l["color"]))
+        # the lights and light sets (env_lights: the ones the prelit materials were baked with)
+        for l in self.lights:
+            pkg.add("lights", name=pkg.str(l["name"]), kind=l["kind"], rgba=l["rgba"], position=l["position"],
+                    direction=l["direction"])
+        env_lights = [l["info"] for l in self.lights]
         sets = []
-        for ls in sorted(scene.light_sets, key=lambda s: s["id"]):
+        for ls in self.light_sets:
             while len(pkg.light_sets) < ls["id"]:
                 pkg.add("light_sets", lights=[NONE16] * 8)
-            idx = [light_index[scene.lights[nm]] for nm in ls["lights"] if scene.lights[nm] in light_index]
-            amb = ambient[scene.ambients[ls["ambient"]]] if ls["ambient"] in scene.ambients else [0, 0, 0, 255]
+            idx, amb = ls["lights"], ls["ambient"]
             pkg.add("light_sets", name=pkg.str(ls["name"]), lights=(idx + [NONE16] * 8)[:8], ambient=amb)
             sets.append(dict(id=ls["id"], name=ls["name"], lights=[pkg.string(pkg.lights[i].name) for i in idx],
                              ambient="#%02x%02x%02x" % tuple(amb[:3])))
@@ -1080,6 +1242,17 @@ class Stager:
             if m.flags & ng3d.MAT_FOG:
                 users.setdefault(m.fog, []).append(pkg.string(m.name))
         fog_users = {i: (len(u) if i != SEA_FOG_INDEX else u) for i, u in sorted(users.items())}
+        # ... and then no fog at all (MAT_FOG cleared; the table stays, and the scene's clear colour
+        # is still fog 1's): fog 0 is off, and fog 1 starts 27,978 units out, where from the ground
+        # the open sea is a few lines at the horizon (research env.md); the PICA backend draws a
+        # fogged item a second time for its fog
+        unfogged = Counter()
+        if not KEEP_FOG:
+            for m in pkg.materials:
+                if m.flags & ng3d.MAT_FOG:
+                    m.flags &= ~ng3d.MAT_FOG
+                    unfogged["fog %d (%s)" % (m.fog, "off" if pkg.fogs[m.fog].type == ng3d.FOG_NONE else "on")] += 1
+            self.cv.stats["materials unfogged (v2: no fog pass)"] = sum(unfogged.values())
         # k (MII_UNITS_PER_ISLAND_UNIT), and the WSR Mii it rests on, measured: the player body's
         # head_set over its feet, and the RFL head on it
         body = w.brres("Common/Kokeshi/common.carc", "G3D/WS2_avaA1.brres").models["WS2_avaA1"]
@@ -1091,7 +1264,7 @@ class Stager:
                            sea_anim_srt=self.sea_srt, sea_anim_clr=self.sea_clr, world_anim_srt=self.world_srt,
                            world_anim_clr=self.world_clr, world_bbox=self.world_bbox, mii_units_per_unit=k,
                            cell_size=CELL, n_cells_x=self.grid[2], n_cells_z=self.grid[3],
-                           grid_origin=[self.grid[0], self.grid[1]])
+                           grid_origin=[self.grid[0], self.grid[1]], detail_distance=DETAIL_DISTANCE)
         self.say("env: %d lights (%s), %d light sets, fogs %s, fogged materials by fog %s; k = %.1f (WSR's Mii: "
                  "head_set %.2f + %.2f x %.1f = %.2f island units; Wii no Ma's %.1f units: %.2f; a %.0f-tall Mii "
                  "is %.1f island units)" % (
@@ -1101,7 +1274,8 @@ class Stager:
                      NOMA_MII_HEIGHT / k))
         self.inv["env"] = dict(source=dict(lights="%s %s" % ENV_LIGHTS, fogs="%s %s" % ENV_FOGS,
                                            sea_fog="%s %s" % SEA_FOG),
-                               lights=env_lights, light_sets=sets, fogs=fogs, fogged_materials=fog_users,
+                               lights=env_lights, light_sets=sets, fogs=fogs, fogged_materials_in_wsr=fog_users,
+                               unfogged_materials=dict(unfogged),
                                clear_colour="#%02x%02x%02x" % tuple(fogs[SEA_FOG_INDEX]["color"][:3]),
                                k=dict(value=k, wsr_head_set_y=head_set, wsr_mii_height=wsr_mii,
                                       noma_mii_height=noma_mii, ratio=noma_mii / wsr_mii,
@@ -1166,6 +1340,118 @@ class Stager:
                                    landmarks_on_vehicles=[l["name"] for l in used if l["kind"] == 3],
                                    seqcams=15, views=list(VIEWS), warp_body=body, warps=warps)
 
+    # ------------------------------------------------------------------------------- visibility
+    def stage_cvis(self, kcl, tool, workdir):
+        """The cells' visibility rows (CVIS) by tools/ng3d_pvs.cpp, from eyes over each cell's floors
+        (PVS_*): the input written to workdir, the tool run, the rows into the package."""
+        pkg, e = self.pkg, self.pkg.env
+        n = len(pkg.cells)
+        ncx, ncz, x0, z0 = e.n_cells_x, e.n_cells_z, e.grid_origin[0], e.grid_origin[1]
+        sets = []
+        for ci, c in enumerate(pkg.cells):
+            masks = {}
+            for l in range(c.n_lods):
+                for k in range(c.first[l], c.first[l] + c.count[l]):
+                    masks[pkg.cell_batches[k]] = masks.get(pkg.cell_batches[k], 0) | 1 << l
+            if c.n_lods == 1:     # (one list for every level)
+                masks = {b: 7 for b in masks}
+            for b, mask in sorted(masks.items()):
+                m = pkg.materials[pkg.batches[b].material]
+                T = batch_triangles(pkg, b)
+                sets.append((ci, 1, mask, m.cull, T))
+                # (a detail batch hides nothing: beyond Env::detail_distance from it it isn't drawn)
+                if occludes(m) and not pkg.batches[b].flags & ng3d.BATCH_DETAIL:
+                    sets.append((ci, 0, mask, m.cull, T))
+        # the open sea (the sea model, as it stands): an occluder drawn whatever the cells' levels
+        sea = pkg.models[e.sea_model]
+        for b in range(sea.first_batch, sea.first_batch + sea.n_batches):
+            bt = pkg.batches[b]
+            m = pkg.materials[bt.material]
+            if occludes(m):
+                M = np.eye(4)
+                M[:3] = np.array(pkg.nodes[sea.first_node + bt.node].bind)
+                sets.append((0xFFFFFFFF, 0, 7, m.cull, batch_triangles(pkg, b, M)))
+        # the eyes: over every floor of a column grid, up to PVS_MAX_HEIGHT
+        tris, attrs, normals = kcl
+        lo, hi = tris.min(1), tris.max(1)
+        floor_ok = (normals[:, 1] > 0.05) & ~np.isin(attrs >> 8, (0x00, 0x08))
+        eyes = []
+        for iz in range(ncz):
+            for ix in range(ncx):
+                cx0, cz0 = x0 + ix * CELL, z0 + iz * CELL
+                near = (lo[:, 0] <= cx0 + CELL) & (hi[:, 0] >= cx0) & (lo[:, 2] <= cz0 + CELL) & (hi[:, 2] >= cz0) & \
+                    ~np.isin(attrs >> 8, (0x00, 0x08))
+                T, A, N = tris[near], attrs[near], normals[near]
+                if not len(T):
+                    continue
+                ok = floor_ok[near]
+                steps = int(round(CELL / PVS_SPACING))
+                for a in range(steps):
+                    for b in range(steps):
+                        x, z = cx0 + (a + 0.5) * PVS_SPACING, cz0 + (b + 0.5) * PVS_SPACING
+                        ys, _, nys = kcl_surfaces(T, A, N, x, z)
+                        ys_f, _, _ = kcl_surfaces(T[ok], A[ok], N[ok], x, z)
+                        for fy in ys_f:
+                            above = ys > fy + 0.01
+                            # (open space over the floor: nothing above it, or the first surface above
+                            # faces down; under a surface facing up the floor is inside something
+                            # solid -- the sea plane under the island)
+                            if above.any() and nys[above][np.argmin(ys[above])] >= 0:
+                                continue
+                            top = min(fy + PVS_MAX_HEIGHT, float(ys[above].min()) - 2.5 if above.any() else np.inf)
+                            for h in PVS_HEIGHTS:
+                                y = min(fy + max(2.5, h * PVS_MAX_HEIGHT), top)
+                                if y > fy:
+                                    eyes.append((iz * ncx + ix, x, y, z))
+        # where a cell's eye may be (what its detail levels are picked from): x/z its square of the
+        # grid, the columns' gaps to its edges included; y the eyes' range
+        ey = {}
+        for c, _, y, _ in eyes:
+            lo_y, hi_y = ey.get(c, (y, y))
+            ey[c] = (min(lo_y, y), max(hi_y, y))
+        out = [b"PVSI", struct.pack("<4I", 2, n, PVS_FACE, 0)]
+        for ci, c in enumerate(pkg.cells):
+            cx0, cz0 = x0 + (ci % ncx) * CELL, z0 + (ci // ncx) * CELL
+            lo_y, hi_y = ey.get(ci, (0.0, 0.0))
+            out.append(struct.pack("<6f3fI6f", *c.bbox, *c.lod_distance, c.n_lods, cx0, lo_y, cz0, cx0 + CELL, hi_y,
+                                   cz0 + CELL))
+        out.append(struct.pack("<I", len(sets)))
+        for ci, kind, mask, cull, T in sets:
+            out.append(struct.pack("<5I", ci, kind, mask, cull, len(T)))
+            out.append(np.ascontiguousarray(T, "<f4").tobytes())
+        out.append(struct.pack("<I", len(eyes)))
+        out.append(b"".join(struct.pack("<I3f", c, x, y, z) for c, x, y, z in eyes))
+        os.makedirs(workdir, exist_ok=True)
+        src, dst = os.path.join(workdir, "cvis.pvsi"), os.path.join(workdir, "cvis.bin")
+        with open(src, "wb") as f:
+            f.write(b"".join(out))
+        t0 = time.time()
+        r = subprocess.run([tool, src, dst], check=True, capture_output=True, text=True)
+        rows = open(dst, "rb").read()
+        rb = (n + 7) // 8
+        if len(rows) != rb * n:
+            raise SystemExit("ng3d-pvs: %d bytes of rows for %d cells" % (len(rows), n))
+        pkg.cvis = rows
+        e.pvs_row_bytes, e.pvs_max_height = rb, PVS_MAX_HEIGHT
+        # what the rows hide: per cell with eyes and geometry, the share of the cells with geometry
+        has_geo = [any(c.count[:c.n_lods]) for c in pkg.cells]
+        has_eyes = Counter(c for c, *_ in eyes)
+        shares = []
+        for i in range(n):
+            if not has_eyes[i] or not has_geo[i]:
+                continue
+            row = rows[i * rb:(i + 1) * rb]
+            shares.append(sum(1 for j in range(n) if has_geo[j] and row[j >> 3] >> (j & 7) & 1) / sum(has_geo))
+        self.say("cell visibility (CVIS): %d eyes (a column every %.0f units, every floor, heights %s of %.0f), "
+                 "%.1f s; from a cell with ground and geometry %.1f%% of the cells with geometry may show on "
+                 "average (%.1f%%-%.1f%%); %s" % (
+                     len(eyes), PVS_SPACING, PVS_HEIGHTS, PVS_MAX_HEIGHT, time.time() - t0,
+                     100 * float(np.mean(shares)), 100 * min(shares), 100 * max(shares), r.stdout.strip()))
+        self.inv["cvis"] = dict(eyes=len(eyes), spacing=PVS_SPACING, heights=list(PVS_HEIGHTS),
+                                max_height=PVS_MAX_HEIGHT, face=PVS_FACE, row_bytes=rb,
+                                visible_share_mean=float(np.mean(shares)), visible_share_min=min(shares),
+                                tool=r.stdout.strip())
+
     # ------------------------------------------------------------------------------- collision
     def stage_collision(self):
         pkg, w = self.pkg, self.wsr
@@ -1211,6 +1497,26 @@ class Stager:
                                              for c, v in trunks.items()})
         self.cylinders = [(c.x, c.z, c.y0, c.y1, c.radius) for c in pkg.cylinders]
         return kcl
+
+
+def batch_triangles(pkg, bi, M=None):
+    """A batch's triangles (n, 3, 3) as float64, decoded (VA_POS16 too), moved by M (4x4) if given."""
+    b = pkg.batches[bi]
+    vb = pkg.vertex_buffers[b.vbuf]
+    P = ng3d.vertex_positions(vb, pkg.vertex_data[b.vbuf]).astype(np.float64)
+    idx = np.array(pkg.indices[b.first_index:b.first_index + b.n_indices], np.int64)
+    T = P[idx].reshape(-1, 3, 3)
+    if M is not None:
+        T = T @ M[:3, :3].T + M[:3, 3]
+    return T
+
+
+def occludes(m):
+    """Does a material's draw hide what is behind it: opaque (no blending, not translucent), depth
+    tested and written, no alpha test, not culled whole."""
+    import preview
+    return not m.flags & ng3d.MAT_XLU and not m.blend & 1 and m.zmode & 0x11 == 0x11 and \
+        not preview._has_alpha_test(m.alpha_compare) and m.cull != 3
 
 
 def sun_matrix(penv):
@@ -1291,17 +1597,27 @@ def main(argv=None):
     ap.add_argument("--keep-raw", action="store_true",
                     help="keep the unbaked package too, as DATA/wuhu/island.unbaked.ng3d (tools/g3d/preview.py "
                          "reads GX texels)")
-    ap.add_argument("--json", help="where the inventory goes (default DATA/wuhu/island.json)")
+    ap.add_argument("--json", help="where the inventory goes (default DATA/wuhu/NAME.json)")
+    ap.add_argument("--name", default="island",
+                    help="the package's name: DATA/wuhu/NAME.ng3d (default island; the speed round's v2 package "
+                         "was staged as island_v2 beside the version 1 one the engine read until then)")
+    ap.add_argument("--pvs", default=DEFAULT_PVS,
+                    help="the cells' visibility tool, ng3d-pvs (default: %s)" % os.path.relpath(DEFAULT_PVS, ROOT))
+    ap.add_argument("--no-pvs", action="store_true", help="no visibility rows (CVIS)")
+    ap.add_argument("--no-prelit", action="store_true", help="leave every material lit at run time (comparisons)")
+    ap.add_argument("--no-pos16", action="store_true", help="write every position as f32 (comparisons)")
     a = ap.parse_args(argv)
     bake = None if a.no_bake else a.bake
     if bake and not os.access(bake, os.X_OK):
         raise SystemExit("no ng3d-bake at %s: build the host target (cmake -S . -B build-host && cmake --build "
                          "build-host --target ng3d-bake) or give --bake PATH. The 3DS refuses a package whose "
                          "textures are still GX's (--no-bake writes one for the host anyway)." % bake)
+    if not a.no_pvs and not os.access(a.pvs, os.X_OK):
+        raise SystemExit("no ng3d-pvs at %s: build the host target (cmake --build build-host --target ng3d-pvs) or "
+                         "give --pvs PATH (--no-pvs: a package without visibility rows)" % a.pvs)
     t0 = time.time()
-    st = Stager(Wsr(a.wsr))
+    st = Stager(Wsr(a.wsr), prelit=not a.no_prelit, pos16=not a.no_pos16)
     st.stage_island()
-    st.stage_wedge()
     st.stage_props()
     st.build_cells()
     st.stage_instances()
@@ -1309,6 +1625,12 @@ def main(argv=None):
     kcl = st.stage_collision()
     st.stage_env()
     st.stage_markers(kcl)
+    if not a.no_pvs:
+        # (the tool's input and output: kept with --keep-raw, as DATA/wuhu/NAME.pvs/)
+        work = os.path.join(a.data, "wuhu", a.name + ".pvs") if a.keep_raw else tempfile.mkdtemp(prefix="ng3d-pvs")
+        st.stage_cvis(kcl, a.pvs, work)
+        if not a.keep_raw:
+            shutil.rmtree(work, ignore_errors=True)
     pkg = st.pkg
     bad = pkg.check()
     if bad:
@@ -1321,8 +1643,8 @@ def main(argv=None):
         raise SystemExit("the package doesn't read back to the same bytes")
     out_dir = os.path.join(a.data, "wuhu")
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, "island.ng3d")
-    raw = os.path.join(out_dir, "island.unbaked.ng3d") if bake else out
+    out = os.path.join(out_dir, a.name + ".ng3d")
+    raw = os.path.join(out_dir, a.name + ".unbaked.ng3d") if bake else out
     with open(raw, "wb") as f:
         f.write(data)
     if bake:
@@ -1341,9 +1663,11 @@ def main(argv=None):
     st.inv["package"] = dict(path=out, bytes=os.path.getsize(out), baked=bool(bake),
                              unbaked=dict(path=raw, bytes=len(data)) if bake and a.keep_raw else None,
                              sections=[dict(tag=t, bytes=s.size, count=s.count) for t, s in sections],
-                             textures=texture_summary(pkg), stats=dict(st.cv.stats))
+                             textures=texture_summary(pkg), stats=dict(st.cv.stats),
+                             positions=dict(quantum=convert.POS_QUANTUM, snap_error=st.cv.snap_error,
+                                            snap_error_3d=st.cv.snap_error_3d))
     st.inv["log"] = st.log
-    with open(a.json or os.path.join(out_dir, "island.json"), "w") as f:
+    with open(a.json or os.path.join(out_dir, a.name + ".json"), "w") as f:
         json.dump(st.inv, f, ensure_ascii=False, indent=1,
                   default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x))
     st.say("wrote %s (%s): %d bytes in %.1f s (%s)%s" % (
@@ -1352,6 +1676,8 @@ def main(argv=None):
         "; unbaked %d bytes kept as %s" % (len(data), raw) if bake and a.keep_raw else ""))
     for k, v in sorted(st.cv.stats.items()):
         print("  %s: %s" % (k, v))
+    print("  positions on a grid of 1/%g unit: moved by at most %.4f a coordinate, %.4f in all" % (
+        1 / convert.POS_QUANTUM, st.cv.snap_error, st.cv.snap_error_3d))
     return 0
 
 

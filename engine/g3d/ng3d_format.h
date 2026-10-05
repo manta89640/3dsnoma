@@ -28,7 +28,7 @@ constexpr u32 tag(char a, char b, char c, char d) {
 }
 
 constexpr u32 MAGIC = tag('N', 'G', '3', 'D');
-constexpr u32 VERSION = 1;
+constexpr u32 VERSION = 2;  // 2: compact positions, prelit materials, cell visibility, detail batches
 constexpr u16 NONE16 = 0xFFFF;
 constexpr u32 NONE32 = 0xFFFFFFFFu;
 
@@ -77,6 +77,7 @@ constexpr u32 SEC_MARK = tag('M', 'A', 'R', 'K');  // Marker[count] (landmarks, 
 constexpr u32 SEC_COLL = tag('C', 'O', 'L', 'L');  // Collision[count] (raw KCL files)
 constexpr u32 SEC_CYLS = tag('C', 'Y', 'L', 'S');  // Cylinder[count] (tree trunks etc.)
 constexpr u32 SEC_BLOB = tag('B', 'L', 'O', 'B');  // data the above point into (KCL bytes, ...)
+constexpr u32 SEC_CVIS = tag('C', 'V', 'I', 'S');  // cell visibility: a bit row per cell (Env::pvs_row_bytes)
 
 // ---------------------------------------------------------------- textures
 // PICA texel formats (the numbering of citro3d's GPU_TEXCOLOR)
@@ -149,6 +150,8 @@ enum MatFlags : u32 {
     MAT_FOG = 2,          // fog applies (GX fog index 0 or 1: Material::fog)
     MAT_INDIRECT = 4,     // the source had indirect stages (dropped: approximated)
     MAT_LIGHT_SET = 8,    // light_set is valid
+    MAT_PRELIT = 16,      // its lighting is baked into the vertex colours (a static sun): drawn as an
+                          // unlit material whose channel colour is the vertex's (no normals needed)
 };
 
 struct Material {
@@ -189,6 +192,7 @@ enum VtxAttr : u8 {
     VA_CLR = 4,     // u8 x4 RGBA
     VA_UV0 = 8,     // s16 x2 * uv_scale[0] (or f32 x2 if VB_UV_FLOAT)
     VA_UV1 = 16,    // s16 x2 * uv_scale[1]
+    VA_POS16 = 32,  // instead of VA_POS: s16 x3 + 1 pad, value = s16 * pos_scale + pos_origin
 };
 enum VbFlags : u8 {
     VB_UV_FLOAT = 1,  // UVs are f32 x2 instead of s16 x2
@@ -201,8 +205,10 @@ struct VertexBuffer {
     u8 flags;      // VbFlags
     u8 pad;
     f32 uv_scale[2];  // s16 UVs: value = s16 * uv_scale
+    f32 pos_origin[3];  // VA_POS16: value = s16 * pos_scale + pos_origin (else 0)
+    f32 pos_scale;      // (else 0)
 };
-static_assert(sizeof(VertexBuffer) == 20, "VertexBuffer");
+static_assert(sizeof(VertexBuffer) == 36, "VertexBuffer");
 
 // a draw: one material, triangles (u16 indices into one vertex buffer)
 struct Batch {
@@ -213,7 +219,11 @@ struct Batch {
     f32 bbox[6];       // min xyz, max xyz (in the space of whoever owns it: world for cells,
                        // the node's for model meshes)
     u16 node;          // model meshes: the node it hangs from; cells: NONE16
-    u16 flags;         // 0
+    u16 flags;         // BatchFlags
+};
+enum BatchFlags : u16 {
+    BATCH_DETAIL = 1,  // small detail (edge-blend strips, small props): drawn only nearer than
+                       // Env::detail_distance
 };
 static_assert(sizeof(Batch) == 40, "Batch");
 
@@ -378,7 +388,12 @@ struct Env {
     f32 cell_size;           // x/z grid of CELL
     u32 n_cells_x, n_cells_z;
     f32 grid_origin[2];      // x, z of cell (0, 0)'s corner
-    u32 reserved[8];
+    u32 pvs_row_bytes;       // CVIS: bytes a row (bit j of row i: cell j may be seen from cell i's
+                             // walkable space, at eye heights up to pvs_max_height over the ground);
+                             // 0: no visibility rows
+    f32 pvs_max_height;      // above that over the ground (a raised camera, flying) the rows don't apply
+    f32 detail_distance;     // BATCH_DETAIL batches are culled beyond it (0: never)
+    u32 reserved[5];
 };
 static_assert(sizeof(Env) == 96, "Env");
 

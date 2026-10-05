@@ -272,6 +272,73 @@ theme (Sound Player semantics).
 - **Depth:** the native draws share the depth buffer with the GX path (the Mii), so both must use the
   same depth mapping (no w-buffer for the island alone). The coplanar overlays (_blend, Kiwa: 0.03-0.4
   iu above the terrain) need a depth offset toward the camera in the PICA backend (and the soft one).
+- **NG3D version 2 (the speed round, after the user's New 3DS ran the island at 20-30 fps):**
+  positions as s16 steps of 1/12 unit about each buffer's origin (VA_POS16), static lighting baked
+  into the vertex colours (MAT_PRELIT: no normals unless a texgen needs them), the far island from
+  island_R at cell level 1 (5,000) and without trees and boats at level 2 (15,000), small detail
+  (edge strips, shore foam, small props: BATCH_DETAIL) culled beyond Env::detail_distance (3,000),
+  the cells' visibility rows (CVIS, Env::pvs_max_height 80), one batch a (cell, material) in a
+  level's list, Wedge Island in the cells, no material fogged. docs/wuhu.md has the numbers.
 - **Hardware rules for PICA shaders (85):** every .out written whole (xyzw) on every path, outside
   ifu/ifc/for; tools/check_shader_outputs.py must pass (package.sh refuses otherwise); GX_MemoryFill only
   into VRAM; any new syscall must be in the RSF's SystemCallAccess list.
+- **Cores (speed round, 2026-10-05):** on a real New 3DS (`NOMA_CORES`, the layout in platform/3ds/main.cpp)
+  the island's World makes its frame (update, camera, both passes' packets) as a job on the helper
+  thread (core 2, above the GPU's thread) from the end of Island::update until the draws take the packets
+  (Island::emit swaps the built packet into a ring packet, which keeps its id); the game's thread touches
+  nothing of the World meanwhile. Per-frame World state set from the island (a camera, a visibility
+  position) goes into Island::world_frame, or before platform_job_start after take_job. Where there's no
+  helper (emulators, the Old 3DS, `NOMA_CORES=single`) the same steps run on the game's thread. The AX
+  mixing runs on core 1; the loader worker stops at its pause points when the app quits.
+
+## 9. ミドハ (Midoha), the first NPC (2026-10-05, session 3dsnoma-8a, branch wuhu/mid)
+
+The user's character, a young man in Mii style with an elf's ears, a high ponytail with a cord of
+jade beads, and a hanbok. His face is a Mii's (RFL draws it) with eyes, brows and mouth painted after
+the concept; his head is ours (his whole hair sculpted, the ears, the band, the cord); his dress is a
+garment model of ours skinned to the Mii body. The user took the designs as they stood (2026-10-05):
+he is on the island by default with the recommended face, D (`NOMA_WUHU_MIDOHA=A|B|C|D` another
+candidate's, `=0` not there).
+
+- **His Mii** (`tools/mii/midoha.py` -> `engine/wuhu/midoha_data.h`, our data): RFLCharData records,
+  bald (RFL hair 30: the skin-coloured skull alone, under the sculpted hair). He is in no Mii
+  database: `engine/wuhu/island_mii.cpp` gives his record to RFL through a middle database of one
+  entry (`RFLInitMiddleDB`, type 4 "user set"; `RFLiAddMiddleDBCharData` adds an RFLCharData, the work
+  of `RFLAddMiddleDBStoreData` less the store data's CRC) and spawns him with the actor manager's
+  middle-database spawn (`room_ActorManager_SpawnFromMiddleDB`, what room_SpawnMii does for a Mii found in one),
+  a frame after the player's Mii (two faces made in one frame share the first one's parts:
+  runtime/hw/gx/texture.cpp checks a texture once a frame), in a manager of two actors.
+- **His head** (`tools/mii/midoha_parts.py` -> `DATA/wuhu/midoha.ng3d`): a native g3d package in RFL
+  head units, vertex colours with their shading baked, one material (unlit, no culling), one
+  instance. `MidohaLook` (engine/wuhu/midoha.cpp) draws it with a World of its own whose instance
+  matrix (World::set_instance_matrix, new: instances a scene moves) is, every frame, the matrix RFL
+  draws his face with: his body's Head_Only node's view matrix (`nw4r_g3d_ScnMdlSimple_GetScnMtxPos`
+  type 2: the head's 0.69 scale in it), back from the camera's view, times RFL's axes
+  (RFLSetCoordinate +X up, +Y front). Drawn after the Mii's opaque pass, under the camera's view
+  loaded again (the native-draw rule: the GX state goes out at the command).
+- **His face's parts** (`tools/mii/midoha_face.py` -> `DATA/wuhu/midoha_face.bin`, our art): no Wii eye
+  is the concept's (an almond eye under a thin upper line with a small wing), so his eyes, brows and
+  mouth are painted after it at RFL's face texture's layout (256 x 256, RGB5A3) and written over the
+  textures RFL makes from his Wii parts (`MidohaFace`, engine/wuhu/midoha.cpp: checked every frame,
+  written again when RFL's come in over them); RFL then draws them on his face as any Mii's. The
+  nose stays RFL's line nose. The island makes his face at 256 texels (the player's stays at 128).
+- **His dress** (`engine/wuhu/midoha_outfit.h`; `tools/mii/midoha_outfit_model.py` the mesh,
+  `tools/mii/midoha_outfit_paint.py` the texture painted from the concept into
+  `tools/mii/midoha_outfit.png`, `tools/mii/midoha_outfit.py` packs both into `DATA/wuhu/midoha_outfit.bin`):
+  the jeogori with its collar bands, the sleeves widening to open cuffs, the belt and buckle, the
+  pleated skirt to the ankles, 3,990 triangles skinned to 13 of the body's nodes (at most 4 weights a
+  vertex, 82 weight sets), the bones by node name with their inverse binds (the form a native skinned
+  path can take). Each frame the envelope matrices come from the body's view matrices and go to GX
+  matrix memory; the batches' display lists name their slots (PNMTXIDX), as the body's own do. The
+  body's own draw is off but for its hands and shoes. Lit as the body (the Mii light's tint, the
+  body's sheen); the texture's level (1024 down to 128, RGB565) chosen by his size on screen.
+  To repaint: paint over `tools/mii/midoha_outfit.png` (`midoha_outfit.py template` shows the
+  pieces' places) and pack it again.
+- **Placing**: before the player's start and off to one side (30 units ahead, 18 across), facing it (`NOMA_WUHU_MIDOHA_AT=<marker>`: there).
+- **Design renders**: `NOMA_MIDOHA_SHOTS=1` (island.cpp's SHOTS): the camera goes round him (turnaround
+  and close-ups on a grey ground, then the plaza), the player's Mii out of sight, each shot logged
+  for the frame dumps.
+- **Cost**: the head pieces 11,164 triangles near, 3,367 from 450 guest units on (three Mii heights:
+  the follow camera's usual distance and beyond), one native batch per piece; the dress 3,990
+  triangles in 28 GX batches (129 matrix loads); guest memory: the outfit block about 2.98 MB (the
+  texture's four levels 2.79 MB), the face images 256 KB, the second actor's slot.

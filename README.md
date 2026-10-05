@@ -60,7 +60,13 @@ decompiled sources, assembly, extracted files) stays out of git.
   (`NOMA_AUDIO_GUARD=0` turns this off); with the voices on the 3DS's DSP, frames the CPU took late
   are made up for (up to 100 ms), as they set the music's tempo. On the 3DS the GPU has a thread
   of its own on another core (`runtime/hw/gx/fifo.cpp`): it decodes the command stream and draws
-  while the main thread runs the guest. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
+  while the main thread runs the guest. On a real New 3DS the AX frames are also mixed on a core
+  of their own (the system core), and Wuhu Island's World makes its frame on the third core beside
+  the GPU's thread (`platform/3ds/main.cpp` has the layout; `NOMA_CORES` below). The bottom screen's
+  status area shows, once a second, the game's frames a second, then milliseconds a frame: the
+  game's CPU time (its thread, less its waits), its waits, the GPU's drawing time; below it the AX
+  mixing's milliseconds a frame and its core (`c0`: the game's own; on a thread, `w`: the game's
+  waits for it) and the heap in use of its size in MB. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
   where the time goes every `NOMA_PROFILE=seconds`: per guest thread, and per function (self
   and total), with the runtime's own work as `(gx)`, `(ax)`, `(ios)`, `(devices)`, `(idle)`.
 - Not yet: the speed work itself
@@ -115,8 +121,12 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    For sound on the 3DS, ndsp needs `sdmc:/3ds/dspfirm.cdc` (dumped with DSP1).
    Wuhu Island (work in progress) is made from your own Wii Sports Resort disc's files:
    `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d`, baked with
-   the host build's `ng3d-bake` (build the host target first); [docs/wuhu.md](docs/wuhu.md) says
-   what goes into it.
+   the host build's `ng3d-bake` and with its cells' visibility from `ng3d-pvs` (build the host
+   targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it.
+   ミドハ's head pieces, face and dress (ours: nothing of Nintendo's goes in) are made by
+   `tools/mii/midoha_parts.py DATA` (`DATA/wuhu/midoha.ng3d`), `tools/mii/midoha_face.py DATA`
+   (`DATA/wuhu/midoha_face.bin`) and `tools/mii/midoha_outfit.py DATA` (`DATA/wuhu/midoha_outfit.bin`,
+   from `tools/mii/midoha_outfit.png`; another outfit: paint over it, `midoha_outfit.py template` shows where).
 
 ## Running on the host
 
@@ -148,14 +158,18 @@ Useful environment variables:
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
 | `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, the edge of a drop too deep to take, a ledge low enough to drop from, a slope too steep to stand on from above and from on it, the suspension bridge) and 20 minutes of random walking at two Mii sizes, every tick checked (on the ground, in no wall, no deep water, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale (10 and 9), `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
-| `NOMA_SELFTEST=g3drender` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | the host's software backend for native draws (`engine/g3d/soft_backend`): its depth against the GX path's on random triangles, then each `view_*` camera of the package drawn (both passes, under the GX state of a 640x456 frame) to `NOMA_G3D_OUT` (PNGs; default `g3drender`), timed, checked through the GX stream, compared with `tools/g3d/preview_views.py`'s renders of the same cameras when `NOMA_G3D_REF` names their directory (PSNR, pixels off, a difference picture), and the overlays drawn again under a range of depth biases (`NOMA_G3D_FOV`, `NOMA_G3D_FRAME`, `NOMA_G3D_VIEWS`) (host) |
+| `NOMA_SELFTEST=g3drender` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | the host's software backend for native draws (`engine/g3d/soft_backend`): its depth against the GX path's on random triangles (f32 positions, then compact ones), then each `view_*` camera of the package drawn (both passes, under the GX state of a 640x456 frame) to `NOMA_G3D_OUT` (PNGs; default `g3drender`), timed, checked through the GX stream, compared with `tools/g3d/preview_views.py`'s renders of the same cameras when `NOMA_G3D_REF` names their directory (PSNR, pixels off, a difference picture), and the overlays drawn again under a range of depth biases (`NOMA_G3D_FOV`, `NOMA_G3D_FRAME`, `NOMA_G3D_VIEWS`) (host) |
 | `NOMA_SOFT3D_THREADS=N` | host: the threads the software backend draws native draws (the island) with (default: as many as the machine has, at most 8) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
-| `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
+| `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn -- cells after the visibility rows, items, details culled, triangles --, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
+| `NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort` | Wuhu Island: the named speed-ups of the island's World off (`engine/g3d/world.h` WorldFeature: the cells' visibility rows, detail batches culled by distance, far props animated at a lower rate, the opaque items grouped by material; `all`), for comparisons on the console |
+| `NOMA_WUHU_MIDOHA=0` (or `A`-`D`), `NOMA_WUHU_MIDOHA_AT=name`, `NOMA_MIDOHA_SHOTS=1` (`2`), `NOMA_MIDOHA_CLIP=file/clip`, `NOMA_MIDOHA_PACKAGE=path`, `NOMA_MIDOHA_OUTFIT=path`, `NOMA_MIDOHA_FACE=0` (or a path) | Wuhu Island: ミドハ, the island's first NPC (docs/wuhu_design.md §9), there by default before the player's start, off to one side: 0 leaves him out, a letter shows another candidate face; at a marker instead; the design renders (the camera round him: turnaround, close-ups, the plaza; 2: his outfit's; each shot logged for the frame dumps); another clip (`Move/Walk`, `Sit_Sofa/Sit_Sofa`); his head pieces or outfit from another file; RFL's own face parts instead of his painted ones |
 | `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
+| `NOMA_CORES=single`, `=multi` | 3DS: where the work beside the game runs. Unset, on a real New 3DS the AX mixing has a thread on the system core (a `.3dsx`: on the third core) and Wuhu Island's World makes its frame on the third core (`NOMA_JOB_INLINE=1`: not that); in an emulator (Azahar, Citra: recognised) and on an Old 3DS both stay on the game's thread, as Azahar runs the cores one after another. `single`: on the game's thread anywhere; `multi`: on their threads on any New 3DS, an emulator's too (an Old 3DS has no third core for them), and on the host (to test those paths). The GPU's thread is the same in all |
+| `NOMA_AX_THREAD=0`, `=1`, `=2` | 3DS: the AX mixing on the game's thread, or on a thread of its own on core 1 (the system core) or 2, whatever `NOMA_CORES` says; with a thread the program doesn't give it up for mixing on the game's thread when the game waits for it longer than the mixing takes (unset, it does) (host: any value but 0 gives it a thread) |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
 
 On the 3DS, the same switches go in `sdmc:/3ds/noma/env.txt` as `KEY=VALUE` lines (including

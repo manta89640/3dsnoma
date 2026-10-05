@@ -7,25 +7,33 @@
 // levels (packages are baked: PICA formats, tiled, the levels one after the other, as the GPU
 // samples them), the vertex data in one block and the u16 indices in another, flushed from the
 // CPU's cache. The attribute buffers' offsets count from the lower of the two blocks (they have 28
-// bits; the GX path's base is its own buffers'). Each vertex buffer's positions are moved to an
-// origin of its own -- a cell's buffers to the cell's centre, a model's to its box's -- and the
-// draw's matrix moves them back: the GPU's floats keep 16 bits of mantissa, a step of 0.06-0.25
-// package units at the island's coordinates (0.016-0.03 from a cell's centre), and the buffers of a
-// cell share their origin so that an overlay and the ground under it (_blend layers) round alike.
+// bits; the GX path's base is its own buffers'). Positions are relative to an origin of their
+// buffer's, which the draw's matrix puts back: compact ones (fmt::VA_POS16, the version 2 island's)
+// are s16 with the buffer's own origin and scale, read by the GPU as shorts, exact in its 24-bit
+// floats; f32 ones are moved at upload to an origin -- a cell's buffers to the cell's centre, a
+// model's to its box's: the GPU's floats keep 16 bits of mantissa, a step of 0.06-0.25 package units
+// at the island's coordinates (0.016-0.03 from a cell's centre), and the buffers of a cell share
+// their origin so that an overlay and the ground under it (_blend layers) round alike. (An s16
+// position quantised with its buffer's scale is off by at most half a step, which the stager keeps
+// far below the 0.03 units an overlay lies above the ground.)
 //
 // draw() writes the GPU's registers directly, its own shader program (shaders/g3d.v.pica)
 // included, between gx_pica.cpp's pica_native_begin and pica_native_end, which bring the GX path's
 // frame up to date before and take nothing it kept about the GPU as still true after. Per item:
-// the vertex buffer's attribute layout and offset; the uniforms (the model-view-projection -- the
-// 3DS's clip transform, the GX projection, the view, the package's scale, the item's matrix and
-// its buffer's origin, multiplied in double precision --, the normal matrix, the material's colours
-// and its light set's lights in view space, the texture matrices with the coordinates' scale and
-// nw4r's env and projection mappings folded in); the material's combiners (engine/gx/tev_combiner:
+// the vertex buffer's attribute layout and offset; the uniforms (the model-view-projection, the
+// normal matrix -- only for a material that reads normals: not a prelit one --, the material's
+// colours and its light set's lights in view space, the texture matrices with the coordinates' scale
+// and nw4r's env and projection mappings folded in); the material's combiners (engine/gx/tev_combiner:
 // the GX path's own translation), textures (each unit with the material's filters, wrap and LOD),
-// the pixel pipeline (alpha test, blending, depth, culling); the draw. Nothing the GPU already has
-// from the item before is sent again. The depth goes out complemented, for precision (see
-// begin_packet); fog is a second pass of the item (fog_pass). The command list is gx_pica's, and an
-// item is drawn only with room left in it for the GX draws to come (ITEM_WORDS).
+// the pixel pipeline (alpha test, blending, depth, culling); the draw. The matrices are made once a
+// packet for each (item matrix, buffer origin and scale): the model-view in double precision (its
+// translation is the island's coordinates less the eye's), the clip rows from it in float (the
+// complemented depth's row made in double once a packet: see begin_packet), kept in a small table
+// that the cell's other items find them in (the World groups the opaque items by material, so a
+// cell's items aren't next to each other). Nothing the GPU already has from the item before is sent
+// again. Fog is a second pass of the item (fog_pass), for the materials that have it (the version 2
+// island's have none). The command list is gx_pica's, and an item is drawn only with room left in it
+// for the GX draws to come (ITEM_WORDS).
 // NOMA_G3D_STATS=N (env.txt): every N frames the draws, triangles, time, state changes and memory.
 #include <3ds.h>
 #include <citro3d.h>
@@ -55,9 +63,10 @@ namespace tev = engine::gx;
 
 // ---------------------------------------------------------------- vertex layouts
 // The layouts the format allows (fmt::VertexBuffer: attrs, flags, stride) as the attribute loaders
-// take them: the attributes the buffer has, in its order (position f32 x3, normal s8 x4 -- its pad
-// byte as w, unread --, colour u8 x4, uv0 and uv1 s16 or f32 x2), then fixed values for the shader
-// inputs it lacks (the normal up, the colour white, the coordinates 0).
+// take them: the attributes the buffer has, in its order (position f32 x3 or s16 x4 -- the compact
+// one's pad as w, which the shader doesn't read --, normal s8 x4 -- its pad byte as w, unread --,
+// colour u8 x4, uv0 and uv1 s16 or f32 x2), then fixed values for the shader inputs it lacks (the
+// normal up, the colour white, the coordinates 0).
 struct Layout {
     u8 attrs, flags, stride;
     u32 format_low, format_high;   // GPUREG_ATTRIBBUFFERS_FORMAT_LOW/HIGH
@@ -80,8 +89,10 @@ u8 layout_of(u8 attrs, u8 flags, u8 stride) {
         f32 fixed[4];
     };
     const u8 uv_format = (flags & fmt::VB_UV_FLOAT) ? GPU_FLOAT : GPU_SHORT;
+    const bool pos16 = attrs & fmt::VA_POS16;
     const In inputs[5] = {
-        {fmt::VA_POS, GPU_FLOAT, 3, {0, 0, 0, 1}},
+        {pos16 ? (u8)fmt::VA_POS16 : (u8)fmt::VA_POS, pos16 ? (u8)GPU_SHORT : (u8)GPU_FLOAT, pos16 ? (u8)4 : (u8)3,
+         {0, 0, 0, 1}},
         {fmt::VA_NRM, GPU_BYTE, 4, {0, 127, 0, 0}},
         {fmt::VA_CLR, GPU_UNSIGNED_BYTE, 4, {255, 255, 255, 255}},
         {fmt::VA_UV0, uv_format, 2, {0, 0, 0, 0}},
@@ -116,7 +127,8 @@ struct VbRes {
     u32 offset = 0;          // from the attribute buffers' base
     u8 layout = 0;
     bool ok = false;         // drawable (it has positions)
-    f32 centre[3] = {};      // its positions are from here (package units)
+    f32 origin[3] = {};      // its positions are from here (package units) ...
+    f32 scale = 1;           // ... in steps of this (compact positions: the buffer's; f32 ones: 1)
     f32 uv_scale[2] = {1, 1};
 };
 struct TexRes {
@@ -180,10 +192,58 @@ u32 s_fog_regs[6];
 const u32 k_unit_border[3] = {GPUREG_TEXUNIT0_BORDER_COLOR, GPUREG_TEXUNIT1_BORDER_COLOR, GPUREG_TEXUNIT2_BORDER_COLOR};
 const u32 k_unit_type[3] = {GPUREG_TEXUNIT0_TYPE, GPUREG_TEXUNIT1_TYPE, GPUREG_TEXUNIT2_TYPE};
 
+// The commands, written in place: libctru's GPUCMD_Add, a call and a copy loop for every register
+// written (26 calls an item; with newlib's byte-wise memcmp in the caches' compares, nearly half of the
+// backend's instructions on the 3DS), as inline writes of the same words -- the first parameter, the
+// header with the count less one, the other parameters, a zero to an even count, more than 256
+// parameters split as GPUCMD_Add splits them -- and the same stop (svcBreak) when the list has no room.
+inline void cmd_check(u32 n) {
+    if (gpuCmdBufOffset + n + 1 > gpuCmdBufSize)
+        svcBreak(USERBREAK_PANIC);
+}
+// one register (mask: its bytes written)
+inline void cmd_one(u32 header, u32 value) {
+    cmd_check(1);
+    u32* b = gpuCmdBuf + gpuCmdBufOffset;
+    b[0] = value, b[1] = header;
+    gpuCmdBufOffset += 2;
+}
+inline void cmd_write(u32 reg, u32 value) { cmd_one(GPUCMD_HEADER(0, 0xF, reg), value); }
+inline void cmd_masked(u32 reg, u32 mask, u32 value) { cmd_one(GPUCMD_HEADER(0, mask, reg), value); }
+// n parameters (n >= 1) to one register, or to it and the ones after it (incremental)
+inline void cmd_add(u32 header, const u32* param, u32 n) {
+    do {
+        const u32 k = n > 256 ? 256 : n;
+        cmd_check(k);
+        u32* b = gpuCmdBuf + gpuCmdBufOffset;
+        b[0] = param[0];
+        b[1] = header | (k - 1) << 20;
+        for (u32 i = 1; i < k; i++)
+            b[1 + i] = param[i];
+        u32 len = k + 1;
+        if (!(k & 1))
+            b[len++] = 0;
+        gpuCmdBufOffset += len;
+        param += k, n -= k;
+        if (header >> 31)
+            header += k;
+    } while (n);
+}
+inline void cmd_writes(u32 reg, const u32* values, u32 n) { cmd_add(GPUCMD_HEADER(0, 0xF, reg), values, n); }
+inline void cmd_incremental(u32 reg, const u32* values, u32 n) { cmd_add(GPUCMD_HEADER(1, 0xF, reg), values, n); }
+// the state caches' compares, a word at a time
+template <u32 N>
+inline bool same_words(const u32 (&a)[N], const u32 (&b)[N]) {
+    u32 d = 0;
+    for (u32 i = 0; i < N; i++)
+        d |= a[i] ^ b[i];
+    return d == 0;
+}
+
 // The command list is gx_pica's, one for the frame (C3D_Init's 2 MB), and a full one stops the
-// program (GPUCMD_Add breaks): an item isn't drawn unless the list keeps room for the most words an
-// item takes (its state, uniforms, draw and fog pass, ~600) and for the GX draws still to come in
-// the frame (the room's whole frame fits in far less). The island's packets take at most 62,000
+// program (cmd_check, as GPUCMD_Add): an item isn't drawn unless the list keeps room for the most
+// words an item takes (its state, uniforms, draw and fog pass, ~600) and for the GX draws still to
+// come in the frame (the room's whole frame fits in far less). The island's packets take at most 62,000
 // words, 24,000 a frame on average (host check, 21 views). NOMA_G3D_STATS counts the items not
 // drawn; the first is logged.
 const u32 ITEM_WORDS = 2048, GX_RESERVE_WORDS = 64u << 10;
@@ -215,32 +275,56 @@ private:
     int layout_ = -1, vbuf_ = -1;
     int light_set_ = -2;   // whose lights the uniforms hold
     u32 n_lights_ = 0;
-    // ---- what the uniforms were made for (the matrices: the item's matrix and its buffer's origin,
-    // which a cell's buffers share, so that a cell's items after the first send none)
+    // ---- the matrices: what they are made from (the item's matrix, its buffer's origin and scale,
+    // which a cell's buffers share, the sky's flag, an overlay's pull) ...
     struct MatrixKey {
         int matrix = -1;
-        f32 centre[3] = {};
+        f32 origin[3] = {};
+        f32 scale = 1;
         u16 flags = 0;
         double pull = 0;  // an overlay's (native_draw.h overlay_pull)
         bool operator==(const MatrixKey& o) const {
-            return matrix == o.matrix && !memcmp(centre, o.centre, sizeof(centre)) && flags == o.flags &&
-                   pull == o.pull;
+            return matrix == o.matrix && origin[0] == o.origin[0] && origin[1] == o.origin[1] &&
+                   origin[2] == o.origin[2] && scale == o.scale && flags == o.flags && pull == o.pull;
         }
-    } mkey_;
+        u32 hash() const {
+            u32 h = (u32)matrix * 0x9E3779B1u ^ flags;
+            u32 b[4];
+            memcpy(b, origin, 12), memcpy(&b[3], &scale, 4);
+            for (u32 v : b)
+                h = (h ^ v) * 0x01000193u;
+            return h ^ (h >> 15);
+        }
+    };
+    // ... and what they are: model (the buffer's positions) -> view in the guest's units (double),
+    // the clip rows (the complemented depth's in row 2), the normal rows (made when first wanted)
+    struct MatrixEntry {
+        MatrixKey key;
+        bool valid = false, has_normals = false;
+        double mv[3][4];
+        f32 mvp[4][4];
+        f32 nmtx[3][4];
+    };
+    static constexpr u32 MATRIX_TABLE = 64;  // (a packet's cells and nodes, hashed; a clash makes one again)
+    MatrixEntry mtable_[MATRIX_TABLE];
+    MatrixEntry* mcur_ = nullptr;  // the item's (what the uniforms hold)
+    MatrixKey mkey_;               // ... made for this key
     u32 mat_key_ = ~0u;    // material << 16 | its state
-    int rows_vbuf_ = -1;   // the vertex buffer the texture rows were made for
+    f32 rows_uv_[2] = {};  // the coordinates' scale the texture rows were made with
 
-    // ---- the packet's: the clip matrix times the GX projection, the GX projection, the lights
+    // ---- the packet's: the clip matrix times the GX projection (double, and in float with the
+    // complemented depth's row), the GX projection, the lights
     double cp_[4][4], proj_[4][4];
+    f32 cpf_[4][4];
     std::vector<f32> lights_;     // per packet light: direction toward it (view space), colour
-    // ---- the item's: model (from its buffer's origin) -> view, in the guest's units
+    // ---- the item's: model (the buffer's positions) -> view, in the guest's units
     double mv_[3][4];
 
     // ---- NOMA_G3D_STATS
     int stats_every_ = 0;
     struct Stats {
-        u32 frames, draws, fog_draws, triangles, indices, items_skipped;
-        u32 mat_changes, matrices, uniform_vectors, cmd_words;
+        u32 frames, draws, fog_draws, prelit_draws, triangles, indices, items_skipped;
+        u32 mat_changes, matrices, matrices_made, uniform_vectors, cmd_words;
         u64 ticks, ticks_max_frame, ticks_frame;
     } st_ = {};
     bool skipped_logged_ = false;
@@ -260,8 +344,8 @@ private:
     void set_pixel(const u32 pixel[6]);
     void draw_batch(const PkgRes& r, const fmt::Batch& b);
     void make_material(PkgRes& r, u32 index, const g3::Material& m);
-    void model_view(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, double out[3][4]) const;
-    void item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky, double pull);
+    MatrixEntry& matrices(const g3::Packet& p, const MatrixKey& key);
+    void normal_rows(MatrixEntry& e);
     void material_uniforms(const g3::Packet& p, const g3::Material& m, const g3::MatDynamic* dyn);
     void texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb);
     bool fog_rows(const g3::Packet& p, const g3::GxView& view, const g3::Material& m, const fmt::Batch& b,
@@ -376,7 +460,8 @@ void PicaBackend::prepare(g3::Package& pkg) {
     const u32 vpa = osConvertVirtToPhys(r->vtx), ipa = osConvertVirtToPhys(r->idx);
     r->base = std::min(vpa, ipa) & ~0xFu;
     r->idx_offset = ipa - r->base;
-    // ---- each buffer's origin: its cell's centre (the first cell that draws it), else its box's
+    // ---- each buffer's origin: a compact one's own; for f32 positions its cell's centre (the first
+    // cell that draws it), else its box's
     r->vbs.resize(vbs.count);
     std::vector<u8> placed(vbs.count, 0);
     for (const fmt::Cell& c : pkg.cells())
@@ -387,18 +472,25 @@ void PicaBackend::prepare(g3::Package& pkg) {
                     continue;
                 placed[v] = 1;
                 for (int k = 0; k < 3; k++)
-                    r->vbs[v].centre[k] = (c.bbox[k] + c.bbox[3 + k]) * 0.5f;
+                    r->vbs[v].origin[k] = (c.bbox[k] + c.bbox[3 + k]) * 0.5f;
             }
+    u32 compact = 0;
     for (u32 v = 0; v < vbs.count; v++) {
         const fmt::VertexBuffer& vb = vbs[v];
         VbRes& vr = r->vbs[v];
-        vr.ok = (vb.attrs & fmt::VA_POS) && vb.count;
+        vr.ok = (vb.attrs & (fmt::VA_POS | fmt::VA_POS16)) && vb.count;
         if (!vr.ok)
             continue;
         vr.offset = vpa + (vb.data - lo) - r->base;
         vr.layout = layout_of(vb.attrs, vb.flags, vb.stride);
         const bool f = vb.flags & fmt::VB_UV_FLOAT;
         vr.uv_scale[0] = f ? 1.0f : vb.uv_scale[0], vr.uv_scale[1] = f ? 1.0f : vb.uv_scale[1];
+        if (vb.attrs & fmt::VA_POS16) {  // (as they are: s16 x scale + origin)
+            memcpy(vr.origin, vb.pos_origin, sizeof(vr.origin));
+            vr.scale = vb.pos_scale;
+            compact++;
+            continue;
+        }
         u8* p = (u8*)r->vtx + (vb.data - lo);
         if (!placed[v]) {
             f32 b[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
@@ -409,13 +501,13 @@ void PicaBackend::prepare(g3::Package& pkg) {
                     b[k] = std::min(b[k], q[k]), b[3 + k] = std::max(b[3 + k], q[k]);
             }
             for (int k = 0; k < 3; k++)
-                vr.centre[k] = (b[k] + b[3 + k]) * 0.5f;
+                vr.origin[k] = (b[k] + b[3 + k]) * 0.5f;
         }
         for (u32 i = 0; i < vb.count; i++) {
             f32 q[3];
             memcpy(q, p + i * vb.stride, 12);
             for (int k = 0; k < 3; k++)
-                q[k] -= vr.centre[k];
+                q[k] -= vr.origin[k];
             memcpy(p + i * vb.stride, q, 12);
         }
     }
@@ -443,16 +535,20 @@ void PicaBackend::prepare(g3::Package& pkg) {
     }
     r->mats.resize(pkg.materials().count);
     r->ok = true;
+    u32 prelit = 0;
+    for (const fmt::Material& m : pkg.materials())
+        prelit += (m.flags & fmt::MAT_PRELIT) != 0;
     log("g3d pica: package prepared in %.1f ms: %u textures, %u KB (RGBA8 %u, RGB565 %u, RGBA5551 %u, LA8 %u, L8 %u, "
-        "LA4 %u, L4 %u, A8 %u, ETC1 %u, ETC1A4 %u)%s; vertices %u KB in %u buffers, indices %u KB; %u KB of the "
-        "linear heap free",
+        "LA4 %u, L4 %u, A8 %u, ETC1 %u, ETC1A4 %u)%s; vertices %u KB in %u buffers (%u compact), indices %u KB; "
+        "%u of %u materials prelit; %u KB of the linear heap free",
         (double)(svcGetSystemTick() - t0) * 1000.0 / SYSCLOCK_ARM11, (unsigned)(r->texs.size() - r->tex_missing),
         (unsigned)(r->tex_bytes >> 10), (unsigned)kb_fmt[fmt::TF_RGBA8], (unsigned)kb_fmt[fmt::TF_RGB565],
         (unsigned)kb_fmt[fmt::TF_RGBA5551], (unsigned)kb_fmt[fmt::TF_LA8], (unsigned)kb_fmt[fmt::TF_L8],
         (unsigned)kb_fmt[fmt::TF_LA4], (unsigned)kb_fmt[fmt::TF_L4], (unsigned)kb_fmt[fmt::TF_A8],
         (unsigned)kb_fmt[fmt::TF_ETC1], (unsigned)kb_fmt[fmt::TF_ETC1A4],
         r->tex_missing ? " (some not made: no memory)" : "", (unsigned)(r->vtx_bytes >> 10), (unsigned)vbs.count,
-        (unsigned)(r->idx_bytes >> 10), (unsigned)(linearSpaceFree() >> 10));
+        (unsigned)compact, (unsigned)(r->idx_bytes >> 10), (unsigned)prelit, (unsigned)pkg.materials().count,
+        (unsigned)(linearSpaceFree() >> 10));
 }
 
 void PicaBackend::release(g3::Package& pkg) {
@@ -473,7 +569,7 @@ void PicaBackend::release(g3::Package& pkg) {
 void PicaBackend::uni(int reg, const f32* v) {
     u32 w[4];
     memcpy(&w[3], &v[0], 4), memcpy(&w[2], &v[1], 4), memcpy(&w[1], &v[2], 4), memcpy(&w[0], &v[3], 4);
-    if (!memcmp(w, uv_[reg], sizeof(w)))
+    if (same_words(w, uv_[reg]))
         return;
     memcpy(uv_[reg], w, sizeof(w));
     if (reg < 64)
@@ -497,8 +593,8 @@ void PicaBackend::upload_uniforms() {
                 hi &= ~(1u << (j - 64));
             j++;
         }
-        GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
-        GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, &uv_[i][0], 4 * (j - i));
+        cmd_write(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000 | i);
+        cmd_writes(GPUREG_VSH_FLOATUNIFORM_DATA, &uv_[i][0], 4 * (j - i));
         st_.uniform_vectors += j - i;
     }
     dirty_lo_ = 0, dirty_hi_ = 0;
@@ -508,7 +604,7 @@ void PicaBackend::set_bools(u32 bools) {
     if (bools == bools_)
         return;
     bools_ = bools;
-    GPUCMD_AddWrite(GPUREG_VSH_BOOLUNIFORM, 0x7FFF0000 | bools);
+    cmd_write(GPUREG_VSH_BOOLUNIFORM, 0x7FFF0000 | bools);
 }
 
 // the light set's lights into the uniforms (the loop's count in i0: lights - 1, from 0, a light
@@ -529,7 +625,7 @@ void PicaBackend::set_lights(const g3::Packet& p, int set) {
     const u32 i0 = (n ? n - 1 : 0) | 2u << 16;
     if (i0 != int0_) {
         int0_ = i0;
-        GPUCMD_AddWrite(GPUREG_VSH_INTUNIFORM_I0, i0);
+        cmd_write(GPUREG_VSH_INTUNIFORM_I0, i0);
     }
 }
 
@@ -539,25 +635,26 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     shaderProgramConfigure(&prog_, true, false);
     shaderInstance_s* vsh = prog_.vertexShader;
     for (u32 i = 0; i < vsh->numFloat24Uniforms; i++)
-        GPUCMD_AddIncrementalWrites(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
-    GPUCMD_AddWrite(GPUREG_ATTRIBBUFFERS_LOC, r.base >> 3);
+        cmd_incremental(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
+    cmd_write(GPUREG_ATTRIBBUFFERS_LOC, r.base >> 3);
     static const u32 k_zero[33] = {};  // (buffers 1-11: none)
-    GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
-    GPUCMD_AddWrite(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
+    cmd_incremental(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
+    cmd_write(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
     // The depth, complemented. The GX path's draws output z (clip space) and the depth map makes the
     // buffer's depth -z/w (citro3d's default: scale -1, offset 0). Near 1, as most of the island is
     // (1 - near/distance, near 15 Mii units), that ratio of two nearly equal 24-bit floats is off by
     // up to ~7e-5 -- hundreds of the buffer's steps, half a package unit of distance 300 units away:
     // an overlay and the ground under it come out in either order. The native shader outputs
-    // z' = -(z + w) instead, from one row the CPU sums in double precision (item_matrix), with 16
-    // bits of precision of its own, and this depth map makes 1 + z'/w of it: the same -z/w, as
+    // z' = -(z + w) instead, from one row the CPU sums in double precision (draw: cpf_'s row 2, the
+    // GX projection's depth row, applied to the model-view in matrices()), with 16 bits of precision
+    // of its own, and this depth map makes 1 + z'/w of it: the same -z/w, as
     // accurate as the buffer (and the same clipping: z' within [-w, 0] as z was). Checked on the
     // host with the GPU's 24-bit floats emulated, over the island's 21 camera views: a point
     // 0.03-0.4 units over a ground vertex and pulled 1/1024 toward the eye came out behind the
     // ground at 23 % of 366,343 ground vertices with z, at none with z' (as with exact arithmetic);
     // overlays are pulled so, at most 4 units at their furthest corner (native_draw.h overlay_pull).
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
     memset(uv_, 0xFF, sizeof(uv_));  // (a NaN: no value compares equal to it)
     dirty_lo_ = 0, dirty_hi_ = 0;
     bools_ = int0_ = ~0u;
@@ -568,9 +665,11 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     memset(pixel_, 0xFF, sizeof(pixel_));
     layout_ = vbuf_ = -1;
     light_set_ = -2;
+    for (MatrixEntry& e : mtable_)
+        e.valid = false;
+    mcur_ = nullptr;
     mkey_ = MatrixKey();
     mat_key_ = ~0u;
-    rows_vbuf_ = -1;
 }
 
 // the vertex buffer: its layout (the loaders, the shader inputs they feed, the fixed values) and
@@ -581,13 +680,13 @@ void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
     if (vb.layout != layout_) {
         layout_ = vb.layout;
         const u32 fmt_words[2] = {L.format_low, L.format_high};
-        GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
-        GPUCMD_AddMaskedWrite(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
-        GPUCMD_AddWrite(GPUREG_VSH_NUM_ATTR, 4);
+        cmd_incremental(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
+        cmd_masked(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
+        cmd_write(GPUREG_VSH_NUM_ATTR, 4);
         const u32 perm[2] = {L.permutation, 0};
-        GPUCMD_AddIncrementalWrites(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
+        cmd_incremental(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
         for (u32 i = 0; i < L.n_fixed; i++) {
-            GPUCMD_AddWrite(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
+            cmd_write(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
             C3D_ImmSendAttrib(L.fixed[i][0], L.fixed[i][1], L.fixed[i][2], L.fixed[i][3]);
         }
         vbuf_ = -1;
@@ -595,7 +694,7 @@ void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
     if (vbuf != vbuf_) {
         vbuf_ = vbuf;
         const u32 buf[3] = {vb.offset, L.buf_config1, L.buf_config2};
-        GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
+        cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
     }
 }
 
@@ -605,15 +704,15 @@ void PicaBackend::set_texenv(const tev::Combiners& comb) {
     for (int i = 0; i < 6; i++) {
         u32 w[5];
         tev::combiner_words(comb.stage[i], w);
-        if (!memcmp(w, texenv_[i], sizeof(w)))
+        if (same_words(w, texenv_[i]))
             continue;
         memcpy(texenv_[i], w, sizeof(w));
-        GPUCMD_AddIncrementalWrites(GPUREG_TEXENV0_SOURCE + (i >= 4 ? i + 2 : i) * 8, w, 5);
+        cmd_incremental(GPUREG_TEXENV0_SOURCE + (i >= 4 ? i + 2 : i) * 8, w, 5);
     }
     const u32 buf = (u32)(comb.buf_rgb & 0xF) << 8 | (u32)(comb.buf_a & 0xF) << 12;
     if (buf != texenv_buf_) {
         texenv_buf_ = buf;
-        GPUCMD_AddMaskedWrite(GPUREG_TEXENV_UPDATE_BUFFER, 0x7, buf);
+        cmd_masked(GPUREG_TEXENV_UPDATE_BUFFER, 0x7, buf);
     }
 }
 
@@ -626,37 +725,37 @@ void PicaBackend::set_units(const UnitRes units[3]) {
         if (!units[u].on)
             continue;
         on |= 1u << u;
-        if (!memcmp(units[u].regs, units_[u], sizeof(units_[u])))
+        if (same_words(units[u].regs, units_[u]))
             continue;
         memcpy(units_[u], units[u].regs, sizeof(units_[u]));
-        GPUCMD_AddIncrementalWrites(k_unit_border[u], units[u].regs, 5);
-        GPUCMD_AddWrite(k_unit_type[u], units[u].regs[5]);
+        cmd_incremental(k_unit_border[u], units[u].regs, 5);
+        cmd_write(k_unit_type[u], units[u].regs[5]);
         changed = true;
     }
     if (!changed && on == unit_config_)
         return;
     unit_config_ = on;
-    GPUCMD_AddMaskedWrite(GPUREG_TEXUNIT_CONFIG, 0xB, 1u << 12 | on);
-    GPUCMD_AddMaskedWrite(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
-    GPUCMD_AddWrite(GPUREG_TEXUNIT0_SHADOW, 1);
+    cmd_masked(GPUREG_TEXUNIT_CONFIG, 0xB, 1u << 12 | on);
+    cmd_masked(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
+    cmd_write(GPUREG_TEXUNIT0_SHADOW, 1);
 }
 
 // the pixel pipeline's registers that differ (as citro3d's effect binding writes them)
 void PicaBackend::set_pixel(const u32 px[6]) {
     if (px[0] != pixel_[0])
-        GPUCMD_AddWrite(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
+        cmd_write(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
     if (px[1] != pixel_[1]) {
-        GPUCMD_AddWrite(GPUREG_DEPTH_COLOR_MASK, px[1]);
-        GPUCMD_AddMaskedWrite(GPUREG_GAS_DELTAZ_DEPTH, 0x8, (u32)GPU_MAKEGASDEPTHFUNC((px[1] >> 4) & 7) << 24);
+        cmd_write(GPUREG_DEPTH_COLOR_MASK, px[1]);
+        cmd_masked(GPUREG_GAS_DELTAZ_DEPTH, 0x8, (u32)GPU_MAKEGASDEPTHFUNC((px[1] >> 4) & 7) << 24);
     }
     if (px[2] != pixel_[2])
-        GPUCMD_AddWrite(GPUREG_BLEND_FUNC, px[2]);
+        cmd_write(GPUREG_BLEND_FUNC, px[2]);
     if (px[3] != pixel_[3])
-        GPUCMD_AddMaskedWrite(GPUREG_COLOR_OPERATION, 0x7, px[3]);
+        cmd_masked(GPUREG_COLOR_OPERATION, 0x7, px[3]);
     if (px[4] != pixel_[4])
-        GPUCMD_AddWrite(GPUREG_LOGIC_OP, px[4]);
+        cmd_write(GPUREG_LOGIC_OP, px[4]);
     if (px[5] != pixel_[5])
-        GPUCMD_AddWrite(GPUREG_FACECULLING_CONFIG, px[5]);
+        cmd_write(GPUREG_FACECULLING_CONFIG, px[5]);
     memcpy(pixel_, px, sizeof(pixel_));
 }
 
@@ -664,21 +763,21 @@ void PicaBackend::set_pixel(const u32 px[6]) {
 void PicaBackend::draw_batch(const PkgRes& r, const fmt::Batch& b) {
     upload_uniforms();
     pica_native_draw_noted();
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
-    GPUCMD_AddWrite(GPUREG_RESTART_PRIMITIVE, 1);
-    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
-    GPUCMD_AddWrite(GPUREG_NUMVERTICES, b.n_indices);
-    GPUCMD_AddWrite(GPUREG_VERTEX_OFFSET, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
-    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 0);
-    GPUCMD_AddWrite(GPUREG_DRAWELEMENTS, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
-    GPUCMD_AddWrite(GPUREG_VTX_FUNC, 1);
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
-    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
+    cmd_write(GPUREG_RESTART_PRIMITIVE, 1);
+    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
+    cmd_write(GPUREG_NUMVERTICES, b.n_indices);
+    cmd_write(GPUREG_VERTEX_OFFSET, 0);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
+    cmd_masked(GPUREG_START_DRAW_FUNC0, 1, 0);
+    cmd_write(GPUREG_DRAWELEMENTS, 1);
+    cmd_masked(GPUREG_START_DRAW_FUNC0, 1, 1);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0);
+    cmd_masked(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
+    cmd_write(GPUREG_VTX_FUNC, 1);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    cmd_masked(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
 }
 
 // ---------------------------------------------------------------- materials
@@ -830,48 +929,60 @@ void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3
 }
 
 // ---------------------------------------------------------------- matrices
-// model (the buffer's positions, from its origin) -> view: the view (guest units) x S(k) x the
-// item's matrix x T(the origin); then the clip matrix and the GX projection; the normal matrix (the
-// cofactors: the inverse transpose up to a scale the shader normalises away)
-void PicaBackend::model_view(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf,
-                             double out[3][4]) const {
-    const f32* M = &p.matrices[12 * (size_t)it.matrix];
-    const f32* c = r.vbs[(u32)vbuf].centre;
-    const double k = p.world_scale;
+// The matrices of a key (made once a packet, then found in the table): model (the buffer's positions:
+// from its origin, in steps of its scale) -> view, the view (guest units) x S(k) x the item's matrix x
+// T(origin) x S(scale), in double -- its translation is the island's coordinates less the eye's, tens
+// of thousands of units that cancel to the few the eye is from the cell, which a float would keep to
+// a hundredth of a unit --, an overlay's pulled toward the eye (native_draw.h overlay_pull); then the
+// clip rows in float (cpf_: the 3DS's clip transform and the GX projection, the complemented depth's
+// row made in double: begin_packet); the sky's depth held at 0.5 (neither near nor far clips it).
+// What a float costs here is a relative 2^-24 of rows the GPU takes at 2^-17 (its 24-bit floats).
+PicaBackend::MatrixEntry& PicaBackend::matrices(const g3::Packet& p, const MatrixKey& key) {
+    MatrixEntry& e = mtable_[key.hash() % MATRIX_TABLE];
+    if (e.valid && e.key == key)
+        return e;
+    st_.matrices_made++;
+    e.key = key, e.valid = true, e.has_normals = false;
+    const f32* M = &p.matrices[12 * (size_t)key.matrix];
+    const double k = p.world_scale, sc = key.scale;
+    const f32* o = key.origin;
     double A[3][4];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++)
-            A[i][j] = k * M[4 * i + j];
-        A[i][3] = k * ((double)M[4 * i + 3] + (double)M[4 * i] * c[0] + (double)M[4 * i + 1] * c[1] +
-                       (double)M[4 * i + 2] * c[2]);
+            A[i][j] = k * sc * M[4 * i + j];
+        A[i][3] = k * ((double)M[4 * i + 3] + (double)M[4 * i] * o[0] + (double)M[4 * i + 1] * o[1] +
+                       (double)M[4 * i + 2] * o[2]);
     }
+    const double s = 1.0 - key.pull;
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 4; j++)
-            out[i][j] = (double)p.view[i][0] * A[0][j] + (double)p.view[i][1] * A[1][j] +
-                        (double)p.view[i][2] * A[2][j] + (j == 3 ? (double)p.view[i][3] : 0.0);
+            e.mv[i][j] = s * ((double)p.view[i][0] * A[0][j] + (double)p.view[i][1] * A[1][j] +
+                              (double)p.view[i][2] * A[2][j] + (j == 3 ? (double)p.view[i][3] : 0.0));
+    f32 mv[3][4];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            mv[i][j] = (f32)e.mv[i][j];
+    for (int r = 0; r < 4; r++)
+        for (int j = 0; j < 4; j++)
+            e.mvp[r][j] = cpf_[r][0] * mv[0][j] + cpf_[r][1] * mv[1][j] + cpf_[r][2] * mv[2][j] + (j == 3 ? cpf_[r][3] : 0.0f);
+    if (key.flags & g3::DRAW_SKY)
+        for (int j = 0; j < 4; j++)
+            e.mvp[2][j] = -0.5f * e.mvp[3][j];
+    return e;
 }
 
-void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, int vbuf, bool sky,
-                              double pull) {
-    model_view(p, r, it, vbuf, mv_);
-    const double s = 1.0 - pull;  // (an overlay pulled toward the eye: native_draw.h overlay_pull)
+// the normal rows: the model-view's cofactors (the inverse transpose up to a scale the shader
+// normalises away; row i: the cross product of the other two rows), signed by the determinant so that
+// a mirroring matrix keeps its normals outward
+void PicaBackend::normal_rows(MatrixEntry& e) {
+    if (e.has_normals)
+        return;
+    e.has_normals = true;
+    f32 m[3][3];
     for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 4; j++)
-            mv_[i][j] *= s;
-    double mvp[4][4];
-    mul44_34(cp_, mv_, mvp);
-    // the depth out as z' = -(z + w) (begin_packet's depth map takes it back to -z/w: see there)
-    for (int j = 0; j < 4; j++)
-        mvp[2][j] = -(mvp[2][j] + mvp[3][j]);
-    if (sky)  // (drawn without depth: kept at depth 0.5, so that neither near nor far clip it)
-        for (int j = 0; j < 4; j++)
-            mvp[2][j] = -0.5 * mvp[3][j];
-    for (int i = 0; i < 4; i++)
-        uni(R.mvp + i, (f32)mvp[i][0], (f32)mvp[i][1], (f32)mvp[i][2], (f32)mvp[i][3]);
-    // the cofactors (row i: the cross product of the other two rows), signed by the
-    // determinant so that a mirroring matrix keeps its normals outward)
-    const double(*m)[4] = mv_;
-    double cof[3][3];
+        for (int j = 0; j < 3; j++)
+            m[i][j] = (f32)e.mv[i][j];
+    f32 cof[3][3];
     for (int i = 0; i < 3; i++) {
         const int a = (i + 1) % 3, b = (i + 2) % 3;
         for (int j = 0; j < 3; j++) {
@@ -879,10 +990,12 @@ void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::Dr
             cof[i][j] = m[a][c] * m[b][d] - m[a][d] * m[b][c];
         }
     }
-    const double det = m[0][0] * cof[0][0] + m[0][1] * cof[0][1] + m[0][2] * cof[0][2];
-    const double sg = det < 0 ? -1.0 : 1.0;
-    for (int i = 0; i < 3; i++)
-        uni(R.nmtx + i, (f32)(sg * cof[i][0]), (f32)(sg * cof[i][1]), (f32)(sg * cof[i][2]), 0);
+    const f32 det = m[0][0] * cof[0][0] + m[0][1] * cof[0][1] + m[0][2] * cof[0][2];
+    const f32 sg = det < 0 ? -1.0f : 1.0f;
+    for (int i = 0; i < 3; i++) {
+        e.nmtx[i][0] = sg * cof[i][0], e.nmtx[i][1] = sg * cof[i][1], e.nmtx[i][2] = sg * cof[i][2];
+        e.nmtx[i][3] = 0;
+    }
 }
 
 // ---------------------------------------------------------------- fog
@@ -913,10 +1026,12 @@ bool PicaBackend::fog_rows(const g3::Packet& p, const g3::GxView& view, const g3
     double zrow[4];
     for (int j = 0; j < 4; j++)
         zrow[j] = mv_[2][j] * unpull;
-    double zmax = -1e300;  // the box's furthest corner (view depth: -z)
+    double zmax = -1e300;  // the box's furthest corner (view depth: -z; the box in the buffer's steps)
+    const double inv = 1.0 / vb.scale;
     for (int i = 0; i < 8; i++) {
-        const double x = (double)b.bbox[i & 1 ? 3 : 0] - vb.centre[0], y = (double)b.bbox[i & 2 ? 4 : 1] - vb.centre[1],
-                     z = (double)b.bbox[i & 4 ? 5 : 2] - vb.centre[2];
+        const double x = ((double)b.bbox[i & 1 ? 3 : 0] - vb.origin[0]) * inv,
+                     y = ((double)b.bbox[i & 2 ? 4 : 1] - vb.origin[1]) * inv,
+                     z = ((double)b.bbox[i & 4 ? 5 : 2] - vb.origin[2]) * inv;
         zmax = std::max(zmax, -(zrow[0] * x + zrow[1] * y + zrow[2] * z + zrow[3]));
     }
     if (zmax < start)
@@ -975,7 +1090,6 @@ void PicaBackend::fog_pass(const g3::Material& m, const fmt::Batch& b, const Pkg
     // (the next item sends its material's state and rows again: the per-register caches skip what
     // is the same)
     mat_key_ = ~0u;
-    rows_vbuf_ = -1;
 }
 
 // ---------------------------------------------------------------- draw
@@ -993,12 +1107,16 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     const u64 t0 = svcGetSystemTick();
     u32 *cmd, cmd_size, cmd_start;
     GPUCMD_GetBuffer(&cmd, &cmd_size, &cmd_start);
-    // the packet's: clip x projection; the lights toward them in view space
+    // the packet's: clip x projection, and its rows as the shader takes them (row 2: the depth out
+    // complemented, z' = -(z + w): see begin_packet); the lights toward them in view space
     double cl[4][4];
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++)
             cl[i][j] = clip[i][j], proj_[i][j] = view.projection[i][j];
     mul44(cl, proj_, cp_);
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            cpf_[i][j] = (f32)(i == 2 ? -(cp_[2][j] + cp_[3][j]) : cp_[i][j]);
     lights_.assign(8 * p.lights.size(), 0.0f);
     for (size_t i = 0; i < p.lights.size(); i++) {
         const g3::Packet::Light& l = p.lights[i];
@@ -1041,20 +1159,27 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
         const bool sky = it.flags & g3::DRAW_SKY;
         const VbRes& vb = r->vbs[b.vbuf];
         set_layout(*r, b.vbuf);
-        // an overlay is pulled toward the eye (native_draw.h overlay_pull): by its box's furthest corner
-        double pull = 0;
-        if (!sky && g3::is_overlay(m)) {
-            double mv[3][4];
-            model_view(p, *r, it, b.vbuf, mv);
-            pull = g3::overlay_pull(mv, b.bbox, vb.centre, p.world_scale);
-        }
-        // its matrices
+        // its matrices (an overlay pulled toward the eye by its box's furthest corner: native_draw.h
+        // overlay_pull, from the model-view in package units)
         MatrixKey key;
-        key.matrix = it.matrix, key.flags = it.flags, key.pull = pull;
-        memcpy(key.centre, vb.centre, sizeof(key.centre));
+        key.matrix = it.matrix, key.flags = it.flags & g3::DRAW_SKY, key.scale = vb.scale;
+        memcpy(key.origin, vb.origin, sizeof(key.origin));
+        if (!sky && g3::is_overlay(m)) {
+            const MatrixEntry& base = matrices(p, key);
+            double mv[3][4];
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 4; j++)
+                    mv[i][j] = j < 3 ? base.mv[i][j] / vb.scale : base.mv[i][j];
+            key.pull = g3::overlay_pull(mv, b.bbox, vb.origin, p.world_scale);
+        }
+        // (found again even when it hasn't moved: an overlay's own lookup above may have taken its place
+        // in the table)
         const bool moved = !(key == mkey_);
+        mcur_ = &matrices(p, key);
         if (moved) {
-            item_matrix(p, *r, it, b.vbuf, sky, pull);
+            memcpy(mv_, mcur_->mv, sizeof(mv_));
+            for (int i = 0; i < 4; i++)
+                uni(R.mvp + i, mcur_->mvp[i]);
             mkey_ = key;
             st_.matrices++;
         }
@@ -1068,21 +1193,28 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             mat_key_ = mkey;
             st_.mat_changes++;
         }
+        // the normal rows, for a material that reads normals (lit, or mapping the environment)
+        if (mr.bools >> R.b_usenrm & 1) {
+            normal_rows(*mcur_);
+            for (int i = 0; i < 3; i++)
+                uni(R.nmtx + i, mcur_->nmtx[i]);
+        }
         u32 pixel[6];
         memcpy(pixel, mr.pixel, sizeof(pixel));
         if (sky)  // (no depth test or write)
             pixel[1] = 1 | (u32)GPU_ALWAYS << 4 | (pixel[1] & 0xF00);
         set_pixel(pixel);
         set_bools(mr.bools | (n_lights_ && (mr.bools >> R.b_lit & 1) ? 1u << R.b_haslights : 0));
-        if (new_mat || b.vbuf != rows_vbuf_ || (moved && mr.projects)) {
+        if (new_mat || vb.uv_scale[0] != rows_uv_[0] || vb.uv_scale[1] != rows_uv_[1] || (moved && mr.projects)) {
             texture_rows(m, mr, dyn, vb);
-            rows_vbuf_ = b.vbuf;
+            rows_uv_[0] = vb.uv_scale[0], rows_uv_[1] = vb.uv_scale[1];
         }
         draw_batch(*r, b);
         st_.draws++, st_.triangles += b.n_indices / 3, st_.indices += b.n_indices;
+        st_.prelit_draws += m.prelit;
         f32 rows[3][4];
         u32 fog_color;
-        if (!sky && fog_rows(p, view, m, b, vb, pull, rows, &fog_color)) {
+        if (!sky && m.fog && fog_rows(p, view, m, b, vb, key.pull, rows, &fog_color)) {
             fog_pass(m, b, *r, rows, fog_color);
             st_.fog_draws++;
         }
@@ -1090,10 +1222,10 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     // unit 0 left an ordinary 2D texture (a projection one samples by texcoord0w, which the GX
     // shader doesn't write)
     if (units_[0][2] != ~0u && ((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION)
-        GPUCMD_AddWrite(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
+        cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
     // the GX path's depth map (citro3d's default, which it never changes)
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
-    GPUCMD_AddWrite(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
     u32 cmd_end;
     GPUCMD_GetBuffer(&cmd, &cmd_size, &cmd_end);
     pica_native_end(&prog_);
@@ -1119,13 +1251,15 @@ void PicaBackend::stats_packet(const g3::Packet& p, const PkgRes& r, u64 ticks, 
     for (const TexRes& t : r.texs)
         textures += t.data != nullptr;
     const double max_ms = (double)std::max(st_.ticks_max_frame, st_.ticks_frame) * ms;
-    log("g3d pica: %u frames: %.0f draws (%.0f fog passes), %.0f triangles, %.0f indices a frame; %.2f ms a "
-        "frame in the backend (at most %.2f); %.0f material changes, %.0f matrices, %.0f uniform vectors, %.0f "
-        "command words a frame; %u items not drawn (command list full; the last frame's list %.0f %% of it); "
-        "resident: %u textures %u KB, vertices %u KB, indices %u KB; %u KB of the linear heap free",
-        (unsigned)st_.frames, st_.draws / f, st_.fog_draws / f, st_.triangles / f, st_.indices / f,
-        (double)st_.ticks * ms / f, max_ms, st_.mat_changes / f, st_.matrices / f, st_.uniform_vectors / f,
-        st_.cmd_words / f, (unsigned)st_.items_skipped, (double)C3D_GetCmdBufUsage() * 100.0, (unsigned)textures,
+    log("g3d pica: %u frames: %.0f draws (%.0f prelit, %.0f fog passes), %.0f triangles, %.0f indices a frame; "
+        "%.2f ms a frame in the backend (at most %.2f); %.0f material changes, %.0f matrix changes (%.0f made), "
+        "%.0f uniform vectors, %.0f command words a frame; %u items not drawn (command list full; the last frame's "
+        "list %.0f %% of it); resident: %u textures %u KB, vertices %u KB, indices %u KB; %u KB of the linear heap "
+        "free",
+        (unsigned)st_.frames, st_.draws / f, st_.prelit_draws / f, st_.fog_draws / f, st_.triangles / f,
+        st_.indices / f, (double)st_.ticks * ms / f, max_ms, st_.mat_changes / f, st_.matrices / f,
+        st_.matrices_made / f, st_.uniform_vectors / f, st_.cmd_words / f, (unsigned)st_.items_skipped,
+        (double)C3D_GetCmdBufUsage() * 100.0, (unsigned)textures,
         (unsigned)(r.tex_bytes >> 10), (unsigned)(r.vtx_bytes >> 10), (unsigned)(r.idx_bytes >> 10),
         (unsigned)(linearSpaceFree() >> 10));
     st_ = Stats();
