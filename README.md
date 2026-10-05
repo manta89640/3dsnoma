@@ -123,6 +123,10 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d`, baked with
    the host build's `ng3d-bake` and with its cells' visibility from `ng3d-pvs` (build the host
    targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it.
+   ミドハ's head pieces, face and dress (ours: nothing of Nintendo's goes in) are made by
+   `tools/mii/midoha_parts.py DATA` (`DATA/wuhu/midoha.ng3d`), `tools/mii/midoha_face.py DATA`
+   (`DATA/wuhu/midoha_face.bin`) and `tools/mii/midoha_outfit.py DATA` (`DATA/wuhu/midoha_outfit.bin`,
+   from `tools/mii/midoha_outfit.png`; another outfit: paint over it, `midoha_outfit.py template` shows where).
 
 ## Running on the host
 
@@ -158,6 +162,7 @@ Useful environment variables:
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
 | `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn -- cells after the visibility rows, items, details culled, triangles --, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
 | `NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort` | Wuhu Island: the named speed-ups of the island's World off (`engine/g3d/world.h` WorldFeature: the cells' visibility rows, detail batches culled by distance, far props animated at a lower rate, the opaque items grouped by material; `all`), for comparisons on the console |
+| `NOMA_WUHU_MIDOHA=0` (or `A`-`D`), `NOMA_WUHU_MIDOHA_AT=name`, `NOMA_MIDOHA_SHOTS=1` (`2`), `NOMA_MIDOHA_CLIP=file/clip`, `NOMA_MIDOHA_PACKAGE=path`, `NOMA_MIDOHA_OUTFIT=path`, `NOMA_MIDOHA_FACE=0` (or a path) | Wuhu Island: ミドハ, the island's first NPC (docs/wuhu_design.md §9), there by default before the player's start, off to one side: 0 leaves him out, a letter shows another candidate face; at a marker instead; the design renders (the camera round him: turnaround, close-ups, the plaza; 2: his outfit's; each shot logged for the frame dumps); another clip (`Move/Walk`, `Sit_Sofa/Sit_Sofa`); his head pieces or outfit from another file; RFL's own face parts instead of his painted ones |
 | `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |

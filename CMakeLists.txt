@@ -115,6 +115,8 @@ set(ENGINE_SOURCES
   engine/wuhu/island.cpp
   engine/wuhu/island_load.cpp
   engine/wuhu/island_mii.cpp
+  engine/wuhu/midoha.cpp
+  engine/wuhu/midoha_outfit.cpp
   engine/wuhu/music.cpp
   engine/wuhu/places.cpp
   engine/wuhu/player.cpp
