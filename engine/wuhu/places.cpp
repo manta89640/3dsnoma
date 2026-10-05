@@ -89,7 +89,7 @@ std::vector<Place> warp_places(const engine::g3d::Package& package) {
     std::vector<Place> places;
     const engine::g3d::Span<engine::g3d::fmt::Marker> markers = package.markers();
     for (u32 i = 0; i < markers.count; i++) {
-        if (markers[i].kind != MARKER_WARP)
+        if (markers[i].kind != engine::g3d::fmt::MK_WARP)
             continue;
         std::u16string name = display_name(package.str(markers[i].name), font);
         if (blank(name)) {

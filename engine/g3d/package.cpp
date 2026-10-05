@@ -356,7 +356,7 @@ bool Package::check_world(std::string* error) {
     Span<fmt::Marker> mk = markers();
     for (u32 i = 0; i < mk.count; i++) {
         CHECK_NAME("marker", i, mk[i].name);
-        if (mk[i].kind > 3 || !finite(mk[i].position, 6))
+        if (mk[i].kind > fmt::MK_WARP || !finite(mk[i].position, 6))
             return fail(error, "marker %u (%s): kind %u", i, str(mk[i].name), mk[i].kind);
     }
     const fmt::Section* blob = section(fmt::SEC_BLOB);

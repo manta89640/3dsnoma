@@ -1,6 +1,6 @@
 // The places the exploration menu can warp to (docs/wuhu_design.md §8): the island package's
-// markers of kind 3, in the package's order, each with the name the menu lists and the caption
-// shows on arrival.
+// markers of kind MK_WARP (engine/g3d/ng3d_format.h), in the package's order, each with the name
+// the menu lists and the caption shows on arrival.
 #pragma once
 
 #include <string>
@@ -13,10 +13,6 @@ class Package;
 }
 
 namespace engine::wuhu {
-
-// a marker's kind: a place to warp to (engine/g3d/ng3d_format.h's Marker; 0 spawn, 1 landmark,
-// 2 camera preset)
-const u32 MARKER_WARP = 3;
 
 struct Place {
     u32 marker;            // its index among the package's markers (IslandContent::warp's)
