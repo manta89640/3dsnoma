@@ -18,8 +18,9 @@ Numbers are measured on the PAL disc (SP2P01) unless marked est.
   package goes to `DATA/wuhu/NAME.ng3d` (NAME `island` unless `--name` says otherwise; 12,284,032
   bytes), and `DATA/wuhu/NAME.json` records what went in: classes, counts, decisions, sizes, the
   checks below. The package is NG3D version 2 (`engine/g3d/ng3d_format.h`): an engine that reads
-  version 1 refuses it. The speed round staged it as `island_v2` beside the version 1 `island.ng3d`
-  (13,266,560 bytes) the engine read until its version 2 loader came.
+  version 1 refuses it, and the engine reads version 2 only (`DATA/wuhu/island.ng3d`; a version 1
+  file there, 13,266,560 bytes, is refused with the reason: stage the island again). The speed
+  round staged it as `island_v2` first; staged as `island`, the bytes are the same.
 - The package is baked: the stager writes it with GX texels to `DATA/wuhu/NAME.unbaked.ng3d`
   (11,356,912 bytes), runs the renderer's offline converter on it (`TOOL UNBAKED OUT`; TOOL is
   `build-host/ng3d-bake` unless `--bake` names another), checks that no texture is left in GX's
@@ -318,7 +319,10 @@ Version 2 of the format makes a vertex cheaper to fetch and to shade:
   `--per-vertex`): colour = material source (the vertex colour, or the material colour) x clamp(
   ambient + the sum of N.L x light colour), the sun's point lights from their positions (the
   engine's World lights the package's point lights from the direction toward the origin, up to 6
-  degrees off on the east beach, 23 on Wedge Island: the bake is GX's), alpha the source's times
+  degrees off on the east beach, 23 on Wedge Island: the bake is GX's; in the island scene's frames
+  from the follow camera at view_wedge and view_distant, the hotel's walls and a tree, baked against
+  the same package lit live is 26 dB, 19-25 % of the pixels more than 16 levels off, where version 1
+  against it is 38-41 dB), alpha the source's times
   the ambient's. Its channel words then say unlit with the vertex colour (colour and alpha), its
   light set is dropped. 90 of the 110 materials; lit at run time stay the waves (`mt_ze_w_nami`,
   `nami2`: their CLR0 drives the material alpha) and the windmills (`mt_Windmill`: a model's
@@ -576,7 +580,11 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
   | + each cell batch by its box | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
   | + visibility rows | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (249) |
 
-  (Vertices: the distinct ones each draw indexes, what the vertex shader runs on.) A walking
+  The engine's World does all of these since the speed round was integrated (a cell batch outside
+  the view by its own box too), and more: an animated prop is drawn only where its meshes are and
+  over a pixel across. `NOMA_SELFTEST=g3d` through the views (the ground under each eye from the
+  collision): 91.6 draws and 21,256 triangles on average (view_town 140, 47,246; view_beach 44,
+  5,899). (Vertices: the distinct ones each draw indexes, what the vertex shader runs on.) A walking
   frame's 35,664 triangles and 120.5 draws: the full island near 14,200 (40 draws, its detail
   strips with it), trees 5,300 (9), props 3,900 (7), the far island 1,500 (16), the sea in the
   cells 750 (12), the sky and the open sea, the instances 9,800 (34: the route-driven cars and
