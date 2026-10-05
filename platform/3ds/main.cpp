@@ -833,6 +833,10 @@ int main(int argc, char** argv) {
     guest::s_status_on = true;
     guest::s_tick0 = svcGetSystemTick();
     std::string data = guest::DATA_DIR;
+    // the last run's log kept (a crash's, or the run before the app started itself again: erasing
+    // the save, choosing a Mii)
+    remove((data + "/noma.prev.log").c_str());
+    rename((data + "/noma.log").c_str(), (data + "/noma.prev.log").c_str());
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");
     if (guest::s_log)
         setvbuf(guest::s_log, nullptr, _IOFBF, 16 << 10);
