@@ -16,7 +16,8 @@
 //   * the sky (Env::sky_model) first, centred on the eye (it follows the camera), every batch with
 //     DRAW_SKY (no depth test or write);
 //   * of all these, a detail batch (fmt::BATCH_DETAIL) only within Env::detail_distance (times the
-//     LOD scale) of the eye.
+//     LOD scale) of the eye, and an animated instance only where its meshes are in view as posed and
+//     a pixel across on the 3DS's screen (its bounding sphere spans the path they move on).
 // Visibility rows (fmt::SEC_CVIS): when the eye is over the package's cell grid (cells in grid order,
 // Env::n_cells_x x n_cells_z) and no higher than Env::pvs_max_height over the ground under it (the
 // scene says where the ground is: set_camera; else the eye cell's box floor stands in, which is never
@@ -68,6 +69,7 @@ struct WorldStats {
     u32 cells_pvs_hidden = 0;   // cells in the frustum and range that the eye cell's row hid
     int pvs_cell = -1;          // the cell whose visibility row applied (-1: none)
     u32 instances_visible = 0, instances_total = 0;
+    u32 instances_small = 0;    // animated ones whose meshes, as posed, are out of view or under a pixel
     u32 items_opaque = 0, items_translucent = 0;
     u32 details_culled = 0;     // detail batches beyond the detail distance
     u32 triangles = 0;          // in what was emitted this frame
@@ -79,7 +81,7 @@ struct WorldStats {
 // what a World's speed-ups do (all on by default; off: as it was without them, for comparisons)
 enum WorldFeature : u32 {
     WF_VISIBILITY = 1,    // the visibility rows
-    WF_DETAIL = 2,        // detail batches culled by distance
+    WF_DETAIL = 2,        // detail batches culled by distance, animated props by where they are and size
     WF_ANIM_LOD = 4,      // far instances animated at a lower rate
     WF_MATERIAL_SORT = 8, // plain opaque batches grouped by material
     WF_ALL = 15,

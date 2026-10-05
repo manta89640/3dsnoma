@@ -362,11 +362,12 @@ void Island::log_frame() {
     const engine::g3d::WorldStats& s = world_->stats();
     const Vec3 p = player_->position();
     static const char* const STATES[] = {"wait", "walk", "run", "fall"};
-    guest::log("wuhu: fps %.1f, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed), items %u+%u "
+    guest::log("wuhu: fps %.1f, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out of view or "
+               "under a pixel), items %u+%u "
                "(%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, %.1f, %.1f) ground 0x%04X; yaw %.0f, "
                "%s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
                fps, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
-               (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.items_opaque,
+               (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
                (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],

@@ -1229,7 +1229,8 @@ void test_visibility() {
 // 177, 14 and 4.4 pixels across on the 3DS's screen at 45 degrees; their crowns move a fraction of a
 // pixel a frame): over
 // 12 updates the near one posed at each, the middle one every second, the far one every fourth; one
-// behind the eye never; WF_ANIM_LOD off: all at each. The water's colour (C0 red, steps 0, 255, 128, 50 a frame): translated at each new
+// behind the eye never; WF_ANIM_LOD off: all at each. Props carried out of view by their animation,
+// or under a pixel across, not drawn. The water's colour (C0 red, steps 0, 255, 128, 50 a frame): translated at each new
 // value in the first loop, then found among the kept translations; no change, no translation.
 void test_anim_rate() {
     Scene sc;
@@ -1290,6 +1291,46 @@ void test_anim_rate() {
         }
     }
     delete pkg;
+    // animated props drawn where their meshes are as posed: a tree whose animation carries it 3000
+    // units to the side (out of view, though its sphere at its matrix is in view), one 40,000 away
+    // (0.9 pixels across); WF_DETAIL off: both drawn
+    {
+        Scene s3;
+        s3.p.insts.clear();
+        fm::Anim a = {};
+        a.name = s3.p.strs.add("tree_away"), a.frames = 10, a.loop = 1;
+        a.first_track = (u32)s3.p.tracks.size(), a.n_tracks = 1;
+        s3.p.add_track(fm::TT_NODE_TRANS_X, fm::IP_STEP, 0, s3.model_tree, 0, {{0, 3000, 0}});
+        s3.p.anims.push_back(a);
+        const u16 away = (u16)(s3.p.anims.size() - 1);
+        const f32 at[2][2] = {{0, -500}, {0, -40000}};
+        const u16 anims[2] = {away, 2};
+        for (int i = 0; i < 2; i++) {
+            fm::Instance in = {};
+            in.model = s3.model_tree, in.flags = fm::INST_ANIMATED, in.anim = anims[i];
+            const f32 mtx[3][4] = {{1, 0, 0, at[i][0]}, {0, 1, 0, 0}, {0, 0, 1, at[i][1]}};
+            memcpy(in.mtx, mtx, sizeof(mtx));
+            s3.p.insts.push_back(in);
+        }
+        s3.p.models[s3.model_tree].lod_next = fm::NONE16;
+        g3::Package* q = load_bytes(s3.p.bytes(), &error);
+        expect(q != nullptr, "the props load (%s)", error.c_str());
+        if (q) {
+            g3::World w(*q);
+            g3::Packet p;
+            w.update(0);
+            w.set_camera(cam);
+            w.build_packet(g3::Pass::OPAQUE, &p);
+            const g3::WorldStats on = w.stats();
+            w.set_features(g3::WF_ALL & ~g3::WF_DETAIL);
+            w.build_packet(g3::Pass::OPAQUE, &p);
+            const g3::WorldStats off = w.stats();
+            expect(on.instances_visible == 0 && on.instances_small == 2 && off.instances_visible == 2,
+                   "props by where their meshes are and their size: %u drawn, %u not (%u with the switch off)",
+                   on.instances_visible, on.instances_small, off.instances_visible);
+            delete q;
+        }
+    }
     // the combiners kept: the water (the middle cell, in view from the middle)
     Scene s2;
     pkg = load_bytes(s2.p.bytes(), &error);

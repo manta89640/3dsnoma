@@ -134,6 +134,14 @@ u8 clamp_u8(f32 v) {
     return (u8)(i < 0 ? 0 : i > 255 ? 255 : i);
 }
 
+// the 3DS's top screen: 240 lines (half of them: what a frustum's half height covers)
+constexpr f32 SCREEN_HALF_PX = 120;
+// the animation rate (pose_instance): every second update under ANIM_HALF_PX pixels across, every
+// fourth under ANIM_QUARTER_PX, while the nodes move under ANIM_STEP_PX (a third of it) a frame
+constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
+// an animated prop under a pixel across isn't drawn (WF_DETAIL)
+constexpr f32 SIZE_CULL_PX = 1.0f;
+
 // depth tested and written, neither blended nor a logic op: where it comes among its kind changes
 // nothing but the state the GPU is given (the PICA tests depth after the combiners: no early test
 // that front to back would feed)
@@ -184,6 +192,8 @@ struct World::Impl {
                                  // is: an animation can carry it far from its matrix, along a path
                                  // its sphere spans)
         f32 speed = 0;           // the most a node's place moved an update, between its last two poses
+        Vec3 mesh_centre{0, 0, 0};  // its meshes' bounding sphere as last posed (world)
+        f32 mesh_r = 0;
     };
     std::vector<Inst> insts;
     // node tracks per animation, by (model, node): track indices; and per (animation, model) each
@@ -536,8 +546,6 @@ void World::Impl::billboard(u16 model, u32 base) {
 // ANIM_HALF_PX pixels across on the 3DS's screen and its nodes move under ANIM_STEP_PX a frame there,
 // every fourth under ANIM_QUARTER_PX and a third of ANIM_STEP_PX (what it lags behind stays within a
 // pixel and a half); its billboards turned.
-constexpr f32 SCREEN_HALF_PX = 120;  // the 3DS's top screen: 240 lines
-constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
 void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
     Inst& n = insts[i];
     const fmt::Instance& in = pkg.instances()[i];
@@ -578,6 +586,25 @@ void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
             if (d < nearest)
                 nearest = d, n.at = p;
         }
+        // its meshes' sphere as posed: about their boxes' centres' box, out to the furthest box's corner
+        if (n.animated) {
+            Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+            for (u32 b = m.first_batch; b < m.first_batch + m.n_batches; b++) {
+                const fmt::Batch& bt = pkg.batches()[b];
+                const Vec3 c = transform(finals[n.slot + (bt.node < m.n_nodes ? bt.node : 0)], box_centre(bt.bbox));
+                lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+                hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+            }
+            n.mesh_centre = (lo + hi) * 0.5f;
+            n.mesh_r = 0;
+            for (u32 b = m.first_batch; b < m.first_batch + m.n_batches; b++) {
+                const fmt::Batch& bt = pkg.batches()[b];
+                const Mtx34& w = finals[n.slot + (bt.node < m.n_nodes ? bt.node : 0)];
+                const Vec3 c = transform(w, box_centre(bt.bbox));
+                const Vec3 h = {bt.bbox[3] - bt.bbox[0], bt.bbox[4] - bt.bbox[1], bt.bbox[5] - bt.bbox[2]};
+                n.mesh_r = std::max(n.mesh_r, length(c - n.mesh_centre) + 0.5f * length(h) * max_scale(w));
+            }
+        }
         n.posed_tick = tick;
         n.posed_model = model;
         stats->poses++;
@@ -611,6 +638,7 @@ void World::Impl::cull() {
     stats->cells_total = pkg.cells().count;
     stats->instances_total = pkg.instances().count;
     const Vec3 eye = cam.eye;
+    const f32 tv = std::tan(cam.fovy_deg * 0.5f * 3.14159265f / 180.0f);
     const u8* row = nullptr;
     if (features & WF_VISIBILITY) {
         stats->pvs_cell = eye_cell();
@@ -652,6 +680,15 @@ void World::Impl::cull() {
             model = m.lod_next;
         }
         pose_instance(i, model, d);
+        // an animated one: where its meshes are now (its sphere spans the path they move on), and
+        // whether they are a pixel across there
+        if (n.animated && (features & WF_DETAIL)) {
+            const f32 dm = std::max(length(n.mesh_centre - eye) - n.mesh_r, 1e-3f);
+            if (!sphere_visible(fr, n.mesh_centre, n.mesh_r) || 2 * n.mesh_r * SCREEN_HALF_PX < SIZE_CULL_PX * dm * tv) {
+                stats->instances_small++;
+                continue;
+            }
+        }
         vis_insts.push_back({i, model, d, n.slot});
     }
     stats->instances_visible = (u32)vis_insts.size();
