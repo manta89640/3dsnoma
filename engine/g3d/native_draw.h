@@ -46,6 +46,17 @@ enum : u16 {
     DRAW_SKY = 1,      // the sky dome: follows the camera, no depth test or write, drawn first
 };
 
+// The translucent pass's depth, pulled toward the eye. Its coplanar overlays (the terrain's _blend
+// layers, the sea's Kiwa and Nami strips) lie 0.03-0.4 package units over what they cover, as
+// meshes of their own whose triangles needn't follow a curved ground's, and that is lost at a
+// distance: the 24-bit depth buffer's step is d^2 / (2^24 near) (near 15 Mii units: 0.036 package
+// units 300 away, 3.6 units 3,000 away), and the 3DS GPU's 24-bit floats round a position to
+// 16 bits. Both backends (g3d_pica.cpp, soft_backend.cpp) draw every translucent item but the sky
+// with its view-space position scaled by (1 - this) about the eye: on the screen it stays where
+// it was (x/w, y/w don't change), its depth comes nearer by the same fraction of its distance
+// (0.03 units 30 away, 3 units 3,000 away: less than the pixel it covers).
+constexpr float TRANSLUCENT_DEPTH_PULL = 1.0f / 1024;
+
 // the animated parts of a material, sampled for this frame
 struct MatDynamic {
     u16 material;

@@ -34,6 +34,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "engine/g3d/native_draw.h"
 #include "engine/gx/tev_combiner.h"
 #include "runtime/hw/gx/raster.h"
 #include "runtime/hw/gx/regs.h"
@@ -47,6 +48,11 @@
 extern "C" u32 __ctru_heap_size, __ctru_linear_heap, __ctru_linear_heap_size;
 extern "C" const uint8_t gx_shbin[];
 extern "C" const size_t gx_shbin_size;
+// citro3d's own: what its setters marked goes into the command list (C3D_DrawElements runs it
+// first). A native draw writes the GPU's registers directly and runs it before it starts, so that
+// what citro3d still has to write -- a frame's frame buffer, viewport and scissor, before the
+// frame's first draw -- can't come after the native draw's state and replace it.
+extern "C" void C3Di_UpdateContext(void);
 
 namespace guest {
 
@@ -172,8 +178,17 @@ struct State {
     u32 buf_rgb = 0, buf_a = 0;
     C3D_Tex* tex[3] = {};
     C3D_Tex tex_was[3];  // as they were bound (a texture made again or rewrapped is bound again)
+    // the command list being written has native draws, and draws through citro3d (which marks the
+    // list as drawn to: its end then writes the frame buffer's cache out)
+    bool native_drew = false, c3d_drew = false;
 };
 State P;
+
+// linear memory to free once the GPU has finished the command lists so far (pica_free_after_frame;
+// a package is released on the GPU's thread, or on the CPU's while the GPU's waits)
+LightLock s_free_lock;
+std::vector<void*> s_free_later;
+__attribute__((constructor(103))) void init_free_lock() { LightLock_Init(&s_free_lock); }
 
 // the pixel pipeline's state as last set (see "The pixel pipeline's state written directly")
 struct Direct {
@@ -382,6 +397,7 @@ void upload_uniforms() {
 struct PicaSnap {
     u32 tests[4], blend, logic, fragop, cull, scissor[3], texenv[6][5], texenv_buf, tex_addr[3];
     bool direct;
+    bool native;  // a native draw's (g3d_pica.cpp): its state is the backend's, not compared
 };
 std::vector<PicaSnap> s_snaps;
 int s_check_state = -1;
@@ -400,6 +416,7 @@ void snap_state() {
         memcpy(n.texenv[i], &P.env[i], sizeof(n.texenv[i]));
     n.texenv_buf = D.texenv_buf & 0xFF00;
     n.direct = direct();
+    n.native = false;
     for (int u = 0; u < 3; u++)
         n.tex_addr[u] = P.tex[u] && P.env_valid ? osConvertVirtToPhys(P.tex[u]->data) >> 3 : 0;
     s_snaps.push_back(n);
@@ -420,7 +437,9 @@ void check_state_list() {
             const u32 v = j == 0 ? buf[i] : buf[i + 1 + j];
             if (id < 0x300)
                 reg[id] = (reg[id] & ~mask) | (v & mask);
-            if (id == GPUREG_DRAWELEMENTS && k < s_snaps.size()) {
+            if (id == GPUREG_DRAWELEMENTS && k < s_snaps.size() && s_snaps[k].native) {
+                k++;  // (a native draw)
+            } else if (id == GPUREG_DRAWELEMENTS && k < s_snaps.size()) {
                 const PicaSnap& n = s_snaps[k++];
                 s_state_draws++;
                 u32 bad = 0;
@@ -470,6 +489,7 @@ void draw_elements(u32 count, const u16* indices) {
     if (P.c3d_touched || s_c3d_only) {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
         P.c3d_touched = false;
+        P.c3d_drew = true;
         return;
     }
     // (as C3D_DrawElements writes them for GPU_TRIANGLES)
@@ -791,6 +811,13 @@ void flush_geometry() {
 
 void end_frame() {
     flush_batch();
+    // a list drawn to only by native draws: citro3d doesn't know it was, so its end wouldn't write
+    // the frame buffer's cache out before the display transfer reads it
+    if (P.native_drew && !P.c3d_drew) {
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    }
+    P.native_drew = P.c3d_drew = false;
     if (check_state_on())
         check_state_list();
     flush_geometry();
@@ -971,10 +998,11 @@ u32 texel_bits(GPU_TEXCOLOR f) {
 
 // drop the least recently used texture the frame hasn't drawn with (the previous frame is
 // finished: C3D_FrameBegin waited for it); false when there is none
-bool evict_texture() {
+// (unused_before: only one last drawn with before that frame)
+bool evict_texture(u32 unused_before = ~0u) {
     auto victim = P.textures.end();
     for (auto it = P.textures.begin(); it != P.textures.end(); ++it)
-        if (it->second.tex.data && it->second.last_used != P.frame &&
+        if (it->second.tex.data && it->second.last_used != P.frame && it->second.last_used < unused_before &&
             (victim == P.textures.end() || it->second.last_used < victim->second.last_used))
             victim = it;
     if (victim == P.textures.end())
@@ -1097,6 +1125,11 @@ void collect_textures() {
     for (C3D_Tex& t : P.dead)
         C3D_TexDelete(&t);
     P.dead.clear();
+    LightLock_Lock(&s_free_lock);
+    for (void* p : s_free_later)
+        linearFree(p);
+    s_free_later.clear();
+    LightLock_Unlock(&s_free_lock);
     for (auto it = P.textures.begin(); it != P.textures.end();) {
         if (P.frame - it->second.last_used > 120) {
             C3D_TexDelete(&it->second.tex);
@@ -2056,6 +2089,7 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
     slots_written(P.vused, 6);
     upload_uniforms();
     C3D_DrawArrays(GPU_TRIANGLES, P.vused, 6);
+    P.c3d_drew = true;
     P.c3d_touched = true;  // (the state above is citro3d's, bound by that call; the draws after set their own)
     P.vused += 6;
 }
@@ -2167,6 +2201,80 @@ void PicaRenderer::efb_copy(u32 value) {
         begin_frame();
     if (c.clear && P.in_frame)
         clear_rect(c.sx, c.sy, c.w, c.h);
+}
+
+// ---------------------------------------------------------------- native draws
+// The native g3d's draws land where their command is in the stream (engine/g3d/native_draw.h):
+// what the GX draws before it batched goes to the GPU first, then the backend (g3d_pica.cpp) draws
+// with its own shader and state, written directly, and the GX path takes nothing it kept about the
+// GPU as still true. A prepare or release packet doesn't start a frame.
+void PicaRenderer::native(u32 id) {
+    if (P.ready)
+        flush_batch();
+    engine::g3d::native_draw_execute(id);
+}
+
+void pica_native_begin(f32 clip[4][4]) {
+    begin_frame();
+    flush_batch();
+    set_xform();
+    C3Di_UpdateContext();
+    memcpy(clip, P.clip, sizeof(P.clip));
+}
+
+void pica_native_end(shaderProgram_s* used) {
+    // citro3d: the GX shader program configured again at the next draw (its code too: the native
+    // program's was loaded over it), with its attribute layout and buffers. Its bool uniforms are
+    // the GX path's own, written directly (P.bools_dirty): citro3d's copy, marked by the program's
+    // binding, would follow them and replace them
+    C3D_BindProgram(used);
+    C3D_BindProgram(&P.prog);
+    C3D_BoolUnifsDirty[GPU_VERTEX_SHADER] = false;
+    C3D_GetAttrInfo();
+    bind_vertices();
+    // the GX path's own: its uniforms sent again in full (the native shader's overwrote them; the
+    // palette keeps its slots: P.pal stays), its state worked out again and set through citro3d
+    P.uni_resend = true;
+    P.bools_dirty = P.ints_dirty = true;
+    P.c3d_touched = true;
+    P.all_dirty = true;
+    P.env_valid = false;
+    P.cull = ~0u;
+    P.viewport_serial = ~0u;
+    memset(P.tex, 0, sizeof(P.tex));
+    memset(P.tex_was, 0, sizeof(P.tex_was));
+    memset(D.bound, 0, sizeof(D.bound));
+    P.native_drew = true;
+}
+
+void pica_native_draw_noted() {
+    if (!check_state_on())
+        return;
+    PicaSnap n;
+    memset(&n, 0, sizeof(n));
+    n.native = true;
+    s_snaps.push_back(n);
+}
+
+void pica_make_room(u32 bytes) {
+    const u32 MARGIN = 512 << 10;  // (as tex_init keeps for screenshots and read-backs)
+    const u32 free0 = (u32)linearSpaceFree();
+    u32 n = 0;
+    // a texture last drawn two frames ago or before: that frame's command list has finished (the
+    // one after it began only once it had), whether a frame is open now or the last one still draws
+    while (linearSpaceFree() < bytes + MARGIN && P.frame >= 2 && evict_texture(P.frame - 1))
+        n++;
+    if (n)
+        log("pica: %u textures dropped for %u KB (%u KB of the linear heap free, %u KB before)", (unsigned)n,
+            (unsigned)(bytes >> 10), (unsigned)(linearSpaceFree() >> 10), (unsigned)(free0 >> 10));
+}
+
+void pica_free_after_frame(void* linear) {
+    if (!linear)
+        return;
+    LightLock_Lock(&s_free_lock);
+    s_free_later.push_back(linear);
+    LightLock_Unlock(&s_free_lock);
 }
 
 }  // namespace guest
