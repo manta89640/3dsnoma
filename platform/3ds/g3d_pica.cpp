@@ -351,6 +351,12 @@ void PicaBackend::prepare(g3::Package& pkg) {
     const auto idx = pkg.indices();
     r->vtx_bytes = hi > lo ? (hi - lo + 15) & ~15u : 0;
     r->idx_bytes = (idx.count * 2 + 15) & ~15u;
+    // (room for it all: the GX path's textures no recent frame drew make way -- the room's, while
+    // the island loads)
+    u32 need = r->vtx_bytes + r->idx_bytes;
+    for (u32 i = 0; i < pkg.textures().count; i++)
+        need += (pkg.texture_image(i).size + 127) & ~127u;
+    pica_make_room(need);
     r->vtx = r->vtx_bytes ? linearAlloc(r->vtx_bytes) : nullptr;
     r->idx = r->idx_bytes ? linearAlloc(r->idx_bytes) : nullptr;
     if (!r->vtx || !r->idx) {

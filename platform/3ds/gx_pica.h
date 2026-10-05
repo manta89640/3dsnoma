@@ -38,5 +38,8 @@ void pica_native_draw_noted();
 // linear memory the GPU may still read (a released package's buffers and textures): freed once
 // every command list so far has finished
 void pica_free_after_frame(void* linear);
+// room in the linear heap for `bytes` more (a package's upload): the GX path's textures that no
+// recent frame drew are dropped (made again if drawn again), oldest first, as their own uploads do
+void pica_make_room(u32 bytes);
 
 }  // namespace guest

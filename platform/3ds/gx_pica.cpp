@@ -998,10 +998,11 @@ u32 texel_bits(GPU_TEXCOLOR f) {
 
 // drop the least recently used texture the frame hasn't drawn with (the previous frame is
 // finished: C3D_FrameBegin waited for it); false when there is none
-bool evict_texture() {
+// (unused_before: only one last drawn with before that frame)
+bool evict_texture(u32 unused_before = ~0u) {
     auto victim = P.textures.end();
     for (auto it = P.textures.begin(); it != P.textures.end(); ++it)
-        if (it->second.tex.data && it->second.last_used != P.frame &&
+        if (it->second.tex.data && it->second.last_used != P.frame && it->second.last_used < unused_before &&
             (victim == P.textures.end() || it->second.last_used < victim->second.last_used))
             victim = it;
     if (victim == P.textures.end())
@@ -2253,6 +2254,19 @@ void pica_native_draw_noted() {
     memset(&n, 0, sizeof(n));
     n.native = true;
     s_snaps.push_back(n);
+}
+
+void pica_make_room(u32 bytes) {
+    const u32 MARGIN = 512 << 10;  // (as tex_init keeps for screenshots and read-backs)
+    const u32 free0 = (u32)linearSpaceFree();
+    u32 n = 0;
+    // a texture last drawn two frames ago or before: that frame's command list has finished (the
+    // one after it began only once it had), whether a frame is open now or the last one still draws
+    while (linearSpaceFree() < bytes + MARGIN && P.frame >= 2 && evict_texture(P.frame - 1))
+        n++;
+    if (n)
+        log("pica: %u textures dropped for %u KB (%u KB of the linear heap free, %u KB before)", (unsigned)n,
+            (unsigned)(bytes >> 10), (unsigned)(linearSpaceFree() >> 10), (unsigned)(free0 >> 10));
 }
 
 void pica_free_after_frame(void* linear) {
