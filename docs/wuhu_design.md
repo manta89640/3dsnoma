@@ -290,3 +290,13 @@ theme (Sound Player semantics).
   position) goes into Island::world_frame, or before platform_job_start after take_job. Where there's no
   helper (emulators, the Old 3DS, `NOMA_CORES=single`) the same steps run on the game's thread. The AX
   mixing runs on core 1; the loader worker stops at its pause points when the app quits.
+- **The speed round integrated (2026-10-05):** the runtime reads `DATA/wuhu/island.ng3d` as NG3D
+  version 2 only (version 1 refused: stage again). The ground under the eye for the visibility rows
+  is found on the game's thread in Island::update after take_job and before platform_job_start
+  (the stager's floor rule: facing up, not a fence), handed to the job with the camera; WorldStats
+  are read for the frame line only there too. The World culls each cell batch by its own box, finds
+  the package's sections once at load (Package slots) and sorts 64-bit keys; the PICA backend writes
+  its commands in place (the same words as GPUCMD_Add). The Mii, the camera and the World's
+  animations move by the display's frames since the last update (at most 3), not one 1/60 s a game
+  frame; PACE is per second, 2 x 25/60 of the WSR-scale pace (what the user approved at ~25 fps).
+  `NOMA_WUHU_BY_FRAMES=1` restores frame steps for repeatable host runs.
