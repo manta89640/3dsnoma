@@ -31,7 +31,7 @@
 .fvec ambc                 ; ambient where it comes from the register or the light set (else 0)
 .fvec selamb               ; 1 per component: ambient from the vertex
 .fvec sellit               ; 1 per component: lit (the light sum applies)
-.fvec lcfg                 ; x: diffuse floor (0 clamped, -huge signed); y: 1 if N.L is used; z: 1 - y
+.fvec lcfg                 ; x: diffuse floor (0 clamped, -2 signed); y: 1 if N.L is used; z: 1 - y
 .fvec tsel[3]              ; per unit: the weights of uv0 (x), uv1 (y) and the view normal (z)
 .fvec tmtx[9]              ; per unit three rows: s, t (of the source, or of the position) and q
 .fvec lights[16]           ; per light: the direction toward it (view space, unit), its colour (0-1)

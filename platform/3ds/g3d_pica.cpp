@@ -763,11 +763,12 @@ void PicaBackend::material_uniforms(const g3::Packet& p, const g3::Material& m, 
     uni(R.selamb, av, av, av, av);
     const f32 lc = L.lit ? 1.0f : 0.0f;
     uni(R.sellit, lc, lc, lc, L.alpha_lit ? 1.0f : 0.0f);
-    // N.L clamped (2), signed (1), or none: 1 (0)
+    // N.L clamped (2), signed (1), or none: 1 (0). (Signed: a floor below N.L's -1 that the GPU's
+    // 24-bit floats hold -- their largest is ~2^64, and how it takes a uniform beyond is unknown.)
     if (L.diffuse == 0)
         uni(R.lcfg, 0, 0, 1, 0);
     else
-        uni(R.lcfg, L.diffuse == 1 ? -1e30f : 0.0f, 1, 0, 0);
+        uni(R.lcfg, L.diffuse == 1 ? -2.0f : 0.0f, 1, 0, 0);
     if (L.lit || L.alpha_lit)
         set_lights(p, set);
 }
