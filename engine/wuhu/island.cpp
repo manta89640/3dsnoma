@@ -15,7 +15,13 @@
 // walking Mii comes to a stop and a falling one lands); the camera follows it (the camera stick, L and
 // R, the D-pad and Y: scene.cpp's controls); the World's animations go on and it is seen from that
 // camera; the Mii stands where the player does, times k, its clip from the player's state and its
-// stride from the distance walked. The draw: the clear colour (the sky's haze, for the next frame;
+// stride from the distance walked. The World's part of the frame (its animations, the camera, both
+// passes' culling and draw lists: about a millisecond of the New 3DS's CPU) is a job (platform_job_start:
+// the New 3DS's helper core) from the end of the update on, while the game's thread goes on to the
+// Mii and the rest of its frame; the draws take its packets (waiting for it if it isn't done). Until
+// then the game's thread doesn't touch the World. Where there's no helper the World does it all on
+// the game's thread, as it did: its update and camera in the update, each pass's list at its draw.
+// The draw: the clear colour (the sky's haze, for the next frame;
 // the channel's black again when the island goes), the camera's projection and the viewport into GX
 // (they place the native draws as they place the Mii's), the World's opaque pass (sky, island, props)
 // then the Mii's, the World's translucent pass then the Mii's.
@@ -32,6 +38,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/world.h"
@@ -105,6 +112,9 @@ private:
     void fail(const std::string& why);
     bool place_at(const fmt::Marker& m);
     void log_frame();
+    static void world_frame(void* self);
+    void take_job();
+    void emit(engine::g3d::Pass pass);
 
     std::unique_ptr<PackageLoad> load_;
     std::unique_ptr<IslandMii> mii_;
@@ -120,9 +130,18 @@ private:
     u32 frame_ = 0;  // the World's clock (frames since the island came up)
     u32 log_every_ = 600, log_frames_ = 0;
     u64 log_us_ = 0;
+    // the World's frame as a job (world_frame): what it is given, what it makes, and what it took
+    bool job_ = false;                   // a job is out (the World is the helper's until take_job)
+    engine::g3d::Camera job_camera_;
+    f32 job_frame_ = 0;
+    engine::g3d::Packet built_[2];       // the passes' packets, made by the job
+    bool built_ready_[2] = {false, false};
+    u64 world_us_ = 0, waited_us_ = 0;   // the World's time (wherever it ran), the game's waits for it
+    bool on_helper_ = false;             // (the last frame's World ran on the helper)
 };
 
 Island::~Island() {
+    take_job();  // (the World is the helper's while a job is out)
     // the Mii's guest objects (the content's only ones); then the package's GPU resources, before
     // the package (native_draw.h), and what reads the package and the collision before them
     mii_.reset();
@@ -297,24 +316,85 @@ void Island::update(const Controls& controls, bool frozen) {
     player_->update(move, TICK);
     camera_->update(look, player_->position(), player_->yaw(), player_->speed() / player_->params().run_speed, TICK);
     const engine::g3d::Camera& cam = camera_->camera();
-    world_->update((f32)frame_);
-    world_->set_camera(cam);
-    mii_->update(engine::g3d::scaled(cam, k_), player_->position() * k_, player_->yaw(), player_->state(),
-                 (player_->distance() - walked) * k_);
+    // (the last frame's job, if its draws never came; its stats for the log line)
+    take_job();
     if (++log_frames_ >= log_every_)
         log_frame();
+    built_ready_[0] = built_ready_[1] = false;
+    job_camera_ = cam, job_frame_ = (f32)frame_;
+    job_ = on_helper_ = guest::platform_job_start(&Island::world_frame, this);
+    if (!job_) {
+        const u64 t0 = guest::host_time_us();
+        world_->update((f32)frame_);
+        world_->set_camera(cam);
+        world_us_ += guest::host_time_us() - t0;
+    }
+    mii_->update(engine::g3d::scaled(cam, k_), player_->position() * k_, player_->yaw(), player_->state(),
+                 (player_->distance() - walked) * k_);
+}
+
+// The job (on the helper): the World's frame and both passes' packets, as update() and the two
+// emits would make them (nothing the World reads changes between them).
+void Island::world_frame(void* self) {
+    Island& i = *(Island*)self;
+    const u64 t0 = guest::host_time_us();
+    i.world_->update(i.job_frame_);
+    i.world_->set_camera(i.job_camera_);
+    i.world_->build_packet(engine::g3d::Pass::OPAQUE, &i.built_[0]);
+    i.world_->build_packet(engine::g3d::Pass::TRANSLUCENT, &i.built_[1]);
+    i.world_us_ += guest::host_time_us() - t0;
+}
+
+// the job's packets, once it is done (the game's thread waits for it if it isn't)
+void Island::take_job() {
+    if (!job_)
+        return;
+    const u64 t0 = guest::host_time_us();
+    guest::platform_job_wait();
+    waited_us_ += guest::host_time_us() - t0;
+    job_ = false;
+    built_ready_[0] = built_ready_[1] = true;
+}
+
+// a pass's draws into the GX stream: the job's packet (into a packet of the ring, which keeps its
+// id), else made now
+void Island::emit(engine::g3d::Pass pass) {
+    take_job();
+    const int i = pass == engine::g3d::Pass::TRANSLUCENT;
+    if (built_ready_[i]) {
+        built_ready_[i] = false;
+        engine::g3d::Packet* p = engine::g3d::native_draw_begin();
+        const u32 id = p->id;
+        std::swap(*p, built_[i]);
+        p->id = id;
+        engine::g3d::native_draw_submit(p);
+        return;
+    }
+    // (World::emit's steps, its own time counted without the ring's waits)
+    engine::g3d::Packet* p = engine::g3d::native_draw_begin();
+    const u64 t0 = guest::host_time_us();
+    world_->build_packet(pass, p);
+    world_us_ += guest::host_time_us() - t0;
+    engine::g3d::native_draw_submit(p);
 }
 
 void Island::log_frame() {
     const u64 now = guest::host_time_us();
     const f32 fps = now > log_us_ ? (f32)log_frames_ * 1e6f / (f32)(now - log_us_) : 0.0f;
+    const f32 world_ms = (f32)world_us_ / 1000.0f / (f32)log_frames_, waited_ms = (f32)waited_us_ / 1000.0f / (f32)log_frames_;
+    char world[96];
+    if (on_helper_)
+        std::snprintf(world, sizeof(world), "world %.2f ms a frame on the helper (waited %.2f)", world_ms, waited_ms);
+    else
+        std::snprintf(world, sizeof(world), "world %.2f ms a frame", world_ms);
+    world_us_ = waited_us_ = 0;
     log_us_ = now, log_frames_ = 0;
     const engine::g3d::WorldStats& s = world_->stats();
     const Vec3 p = player_->position();
     static const char* const STATES[] = {"wait", "walk", "run", "fall"};
-    guest::log("wuhu: fps %.1f, cells %u/%u, instances %u, items %u+%u, tris %u, pos (%.1f, %.1f, %.1f) ground 0x%04X; "
-               "yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
-               fps, (unsigned)s.cells_visible, (unsigned)s.cells_total, (unsigned)s.instances_visible,
+    guest::log("wuhu: fps %.1f, %s, cells %u/%u, instances %u, items %u+%u, tris %u, pos (%.1f, %.1f, %.1f) ground "
+               "0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
+               fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, (unsigned)s.instances_visible,
                (unsigned)s.items_opaque, (unsigned)s.items_translucent, (unsigned)s.triangles, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
@@ -327,7 +407,7 @@ void Island::draw_opaque() {
     if (clear_ != CHANNEL_CLEAR)
         set_clear(clear_);
     mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
-    world_->emit(engine::g3d::Pass::OPAQUE);
+    emit(engine::g3d::Pass::OPAQUE);
     mii_->draw_opaque();
 }
 
@@ -336,7 +416,7 @@ void Island::draw_translucent() {
         return;
     // (the projection again: the Mii's opaque pass may have loaded another)
     mii_->view();
-    world_->emit(engine::g3d::Pass::TRANSLUCENT);
+    emit(engine::g3d::Pass::TRANSLUCENT);
     mii_->draw_translucent();
 }
 
