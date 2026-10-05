@@ -20,11 +20,18 @@
 // (they place the native draws as they place the Mii's), the World's opaque pass (sky, island, props)
 // then the Mii's, the World's translucent pass then the Mii's.
 //
+// The package: DATA/wuhu/island_v2.ng3d if there is one, else DATA/wuhu/island.ng3d (for as long as
+// the restaged version 2 island sits beside the old one; a version 1 file is refused, the reason in
+// the log). The World gets the height of the ground under the camera's eye (the collision's first
+// surface below it), which says whether the eye's cell's visibility row applies (world.h).
+//
 // NOMA_WUHU_START=<marker name>: start at another of the package's markers (a landmark, a warp place,
 // or a camera preset view_*, whose target the Mii then stands at, facing away from its eye: the
 // follow camera then sees about what the preset does). NOMA_WUHU_LOG_EVERY=N: the frame line every N
-// frames (600). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the
-// scene's shell without the package).
+// frames (600). NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort: the World's speed-ups named turned off
+// (world.h WorldFeature: the visibility rows, detail culling, the animation rate by size, the opaque
+// items grouped by material), for comparisons on the console. NOMA_WUHU_PLACEHOLDER=1: the stand-in
+// content instead (content_placeholder.cpp: the scene's shell without the package).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -53,6 +60,8 @@ namespace fmt = engine::g3d::fmt;
 using engine::g3d::Package;
 using engine::math::Vec3;
 
+// the restaged island (NG3D version 2) while it sits beside the old one, else the island
+const char* const PACKAGE_V2 = "/wuhu/island_v2.ng3d";
 const char* const PACKAGE = "/wuhu/island.ng3d";
 constexpr f32 TICK = 1.0f / 60.0f;
 constexpr f32 DEG = 3.14159265f / 180.0f;
@@ -74,6 +83,24 @@ const u32 CHANNEL_CLEAR = 0;
 // and run, from the room, are per its size: MII_SCALE of that comes with the size, the rest is added).
 constexpr f32 MII_SCALE = 1.7f;
 constexpr f32 PACE = 2.0f;
+
+// NOMA_WUHU_SPEED_OFF: the World's speed-ups to turn off (WorldFeature bits, from a comma list)
+u32 features_from_env() {
+    u32 f = engine::g3d::WF_ALL;
+    const char* e = std::getenv("NOMA_WUHU_SPEED_OFF");
+    if (!e)
+        return f;
+    static const struct {
+        const char* name;
+        u32 bit;
+    } k_names[] = {{"pvs", engine::g3d::WF_VISIBILITY}, {"detail", engine::g3d::WF_DETAIL},
+                   {"anim", engine::g3d::WF_ANIM_LOD}, {"sort", engine::g3d::WF_MATERIAL_SORT},
+                   {"all", engine::g3d::WF_ALL}};
+    for (const auto& n : k_names)
+        if (std::strstr(e, n.name))
+            f &= ~n.bit;
+    return f;
+}
 
 void set_clear(u32 rgba) {
     GFRAME(0x10);
@@ -142,7 +169,12 @@ void Island::start_loading() {
     start_us_ = guest::host_time_us();
     if (const char* e = std::getenv("NOMA_WUHU_LOG_EVERY"))
         log_every_ = std::max(1, std::atoi(e));
-    load_ = std::make_unique<PackageLoad>(guest::data_dir() + PACKAGE);
+    std::string path = guest::data_dir() + PACKAGE_V2;
+    if (FILE* f = std::fopen(path.c_str(), "rb"))
+        std::fclose(f);
+    else
+        path = guest::data_dir() + PACKAGE;
+    load_ = std::make_unique<PackageLoad>(path);
     load_->start();
     mii_ = std::make_unique<IslandMii>();
 }
@@ -186,6 +218,7 @@ void Island::finish_loading() {
     const u64 t0 = guest::host_time_us();
     world_ = std::make_unique<engine::g3d::World>(*package_);
     world_->set_world_scale(k_);
+    world_->set_features(features_from_env());
     const u64 t1 = guest::host_time_us();
     // (the uploads themselves happen on the renderer's thread when it reaches the command)
     engine::g3d::native_draw_prepare(*package_);
@@ -233,6 +266,14 @@ void Island::finish_loading() {
                (unsigned)package_->size(), ms_between(start_us_, t3), l.read_ms, l.check_ms, l.collision_ms,
                ms_between(t0, t1), ms_between(t1, t2), k_, pp.height, pp.walk_speed, pp.run_speed, pp.step_up,
                std::acos(pp.walkable_ny) / DEG, pp.max_drop);
+    const fmt::Env& env = package_->env();
+    guest::log("wuhu: speed-ups: visibility rows %s (%u cells, up to %.0f units over the ground), detail batches %s "
+               "(beyond %.0f), animation rate by size %s, opaque items by material %s",
+               env.pvs_row_bytes ? (world_->features() & engine::g3d::WF_VISIBILITY ? "on" : "off") : "none",
+               (unsigned)package_->cells().count, env.pvs_max_height,
+               env.detail_distance > 0 ? (world_->features() & engine::g3d::WF_DETAIL ? "on" : "off") : "none",
+               env.detail_distance, world_->features() & engine::g3d::WF_ANIM_LOD ? "on" : "off",
+               world_->features() & engine::g3d::WF_MATERIAL_SORT ? "on" : "off");
     u32 heap_free = 0, linear_free = 0;
     const bool counted = guest::platform_native_memory(&heap_free, &linear_free);
     std::string heap;
@@ -298,7 +339,16 @@ void Island::update(const Controls& controls, bool frozen) {
     camera_->update(look, player_->position(), player_->yaw(), player_->speed() / player_->params().run_speed, TICK);
     const engine::g3d::Camera& cam = camera_->camera();
     world_->update((f32)frame_);
-    world_->set_camera(cam);
+    // the ground under the eye, for the visibility rows (none within their height: below it)
+    f32 ground = NAN;
+    const fmt::Env& env = package_->env();
+    if (env.pvs_row_bytes) {
+        const f32 reach = env.pvs_max_height + 1.0f;
+        engine::collision::Hit hit;
+        ground = collision_->ground(cam.eye.x, cam.eye.z, cam.eye.y, cam.eye.y - reach, &hit) ? hit.point.y
+                                                                                               : cam.eye.y - reach;
+    }
+    world_->set_camera(cam, ground);
     mii_->update(engine::g3d::scaled(cam, k_), player_->position() * k_, player_->yaw(), player_->state(),
                  (player_->distance() - walked) * k_);
     if (++log_frames_ >= log_every_)
@@ -312,10 +362,13 @@ void Island::log_frame() {
     const engine::g3d::WorldStats& s = world_->stats();
     const Vec3 p = player_->position();
     static const char* const STATES[] = {"wait", "walk", "run", "fall"};
-    guest::log("wuhu: fps %.1f, cells %u/%u, instances %u, items %u+%u, tris %u, pos (%.1f, %.1f, %.1f) ground 0x%04X; "
-               "yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
-               fps, (unsigned)s.cells_visible, (unsigned)s.cells_total, (unsigned)s.instances_visible,
-               (unsigned)s.items_opaque, (unsigned)s.items_translucent, (unsigned)s.triangles, p.x, p.y, p.z,
+    guest::log("wuhu: fps %.1f, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed), items %u+%u "
+               "(%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, %.1f, %.1f) ground 0x%04X; yaw %.0f, "
+               "%s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
+               fps, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
+               (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.items_opaque,
+               (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
+               (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
 }
