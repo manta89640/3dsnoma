@@ -395,15 +395,39 @@ void platform_quit(const char* why) {
         log("quit: these didn't stop:%s%s%s%s%s", gpu ? "" : " the GPU's thread", io ? "" : " the I/O thread",
             ax ? "" : " the audio thread", job ? "" : " the helper", workers ? "" : " a worker");
     s_quitting = true;
-    if (s_log)
-        fflush(s_log);
+    // (each step logged as it starts: a quit that hangs says where)
+    auto step = [](const char* what) {
+        log("quit: %s", what);
+        if (s_log)
+            fflush(s_log);
+    };
     if (s_audio)
-        ndspExit();
+        step("the sound"), ndspExit();
     if (s_soc)
-        socExit();
-    gfxExit();
+        step("the network"), socExit();
+    // the graphics, unless the GPU's thread is still in them (waiting for a frame the GPU never
+    // finished): the process's end frees them as well
+    step(gpu ? "the graphics, then the app's end" : "the app's end (the graphics left as they are)");
+    if (gpu)
+        gfxExit();
     exit(0);
 }
+
+// The HOME Menu (and sleep) take the GPU while the app waits in aptMainLoop (on the game's thread):
+// first the GPU's thread finishes what it was given and the frame it is drawing is closed, as for
+// the keyboard (gx_end_frame_for_applet), so that no frame is sent half-made to a GPU that is no
+// longer the app's. One was, after a HOME close on a New 3DS: the GPU's thread then waited for it
+// for good (C3D_FrameBegin), the game's exit waited for the GPU's thread, and the quit hung. The
+// hook goes in after citro3d's (C3D_Init's): libctru calls the hook registered last first, so this
+// runs before citro3d waits for its queued frames.
+static aptHookCookie s_suspend_cookie;
+static void suspend_hook(APT_HookType type, void*) {
+    if (type == APTHOOK_ONSUSPEND || type == APTHOOK_ONSLEEP) {
+        log("apt: %s: the GPU's frame finished first", type == APTHOOK_ONSUSPEND ? "suspended" : "asleep");
+        gx_end_frame_for_applet();
+    }
+}
+void hook_suspend() { aptHook(&s_suspend_cookie, suspend_hook, nullptr); }
 
 void platform_fatal(const char* msg) {
     printf("\x1b[31mfatal: %s\x1b[0m\n", msg);
@@ -1067,6 +1091,7 @@ int main(int argc, char** argv) {
     if (pica.init()) {
         guest::s_gpu = true;
         guest::gx_set_renderer(&pica);
+        guest::hook_suspend();
         // the native g3d draws into the GPU renderer's frame (not with the software renderer, whose
         // native draws have no backend: their packets are only retired)
         if (engine::g3d::Backend* g3d = guest::g3d_pica_backend())
