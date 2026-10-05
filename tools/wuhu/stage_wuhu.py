@@ -109,7 +109,7 @@ TAG_LEVELS = {TAG_ALL: (0, 1, 2), TAG_PROP: (0, 1), TAG_NEAR: (0,), TAG_MID: (1,
               TAG_MID_FAR: (1, 2)}
 # the far island (levels 1-2) is island_R's but for these nodes of the island model, which R lacks
 # (the round stage of Swordplay on the water, the court beside the lighthouse) or has without their
-# grass for no saving (three islets: 26-28 triangles against 31-59): the island's own (its non-detail
+# grass for no saving (three islets: 22-28 triangles against 31-59): the island's own (its non-detail
 # draws) at every level, R's left out
 FAR_FROM_ISLAND = {"Island_21_Model", "Island_3b_Model", "Island_12_Model", "Island_13_Model", "Island_14_Model"}
 R_LEFT_OUT = {"Island_12_Model", "Island_13_Model", "Island_14_Model"}

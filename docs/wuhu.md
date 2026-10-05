@@ -48,7 +48,8 @@ structs with `engine/g3d/ng3d_format.h`; `ng3d.py check FILE` validates a packag
 it), `tools/ng3d_pvs.cpp` computes the cells' visibility rows, and `tools/g3d/preview.py` renders
 an unbaked package to PNG (`--per-vertex` lights as GX does, at the vertices).
 `tools/wuhu/check_views.py` renders a package from its `view_*` cameras and compares the pictures
-with references.
+with references; `tools/g3d/viewstats.py` counts what a frame submits; `tools/wuhu/check_cvis.py`
+checks the visibility rows by pictures.
 
 ## The package
 
@@ -160,7 +161,7 @@ draws mirrored as the island's reflection in the water: the same nodes and frame
 triangles for the whole archipelago (the full island 59,635), one TEV stage a material, the
 island's own textures (no texture memory added), no edge strips, Wedge Island as its light model.
 Three of its nodes are left out and the island's own taken instead at every level: the islets
-Island_12-14, which in R have no grass (26-28 triangles against 31-59). Two of the island's nodes
+Island_12-14, which in R have no grass (22-28 triangles against 31-59). Two of the island's nodes
 that R lacks are added to the far levels: the round stage of Swordplay on the water (Island_21,
 1,568 triangles) and the court by the lighthouse (Island_3b, 554). R folds the town's and the
 hotel's buildings into its Island_3 and Island_8. Its mountain is the cave-less version
@@ -173,7 +174,7 @@ level-0 triangles seen from just past 5,000 units of its box, on the ground, the
 level 0 and at level 1, 800x450) is 34-64 dB, at most 1.4 % of the pixels more than 16 levels
 off: the grass edges along cliff tops and the cliffs' shading. Trees go with level 2: three levels
 are the format's, and a level goes on to any distance, so trees can't be dropped by size within
-one. The measurement round's walking frames had 36 % of their vertices 4,000-12,000 units off.
+one. The speed round's walking frames had 36 % of their vertices 4,000-12,000 units off.
 
 **Detail** (`BATCH_DETAIL`, culled by the batch's own box beyond `Env::detail_distance`, 3,000
 units): the edge-blend strips (`mt_gake_blend`, `mt_kusa_blend`, `mt_suna_blend`, `mt_tuti_blend`),
@@ -235,7 +236,7 @@ Small instances are culled by distance (`Instance::cull_distance`, from the near
 bounding sphere): gulls and hawks (20 units, 377-385 triangles in 5 batches) beyond 2,000 units,
 where they are 3 pixels across; moving cars (55 units) beyond 3,000; whales (600 units, 10
 batches) and moving cruisers beyond 8,000 (22 and 6 pixels). Version 1 had gulls and hawks at
-6,000, cars at 12,000, cruisers at 20,000, whales never. Through the measurement round's 144
+6,000, cars at 12,000, cruisers at 20,000, whales never. Through the speed round's 144
 walking frames this takes the whales from 17.3 draws a frame to 1.4 and the birds from 18.8 to
 4.8. The cars' and cruisers' spheres hold their whole routes (below), so a renderer that culls them
 by where they are now gains most there: they are 19 draws and 6,700 triangles of a walking frame.
@@ -328,9 +329,10 @@ Version 2 of the format makes a vertex cheaper to fetch and to shade:
   colours only where a channel reads them (none on the open sea). 125,811 of the 172,046 vertices
   are 16 bytes (position, colour, one UV), 44,129 20, 547 12, 1,559 28; version 1's were 20-36.
 
-The measurement round (scratchpad perf/) found the PICA's vertex work the larger part of its time
-(town: 7.6 of 8.6 ms) and estimated baked lighting alone at 7.6 -> 4.5 ms there; the renderer's
-version 2 shader decides what it is on hardware.
+The speed round's measurements (a model of the PICA's vertex units from the shader's instruction
+counts, not hardware) put its vertex work at the larger part of a frame's GPU time (the town view:
+7.6 of 8.6 ms) and baked lighting alone at 7.6 -> 4.5 ms there; the renderer's version 2 shader
+decides what it is on hardware.
 
 ## Environment
 
@@ -488,17 +490,17 @@ cell's triangles (every level, translucent and cut-out ones too, a pixel each co
 pixels covered) are tested. Neighbouring cells always see each other; cells without geometry are
 set.
 
-What it hides is little, as the measurement round found for cells this size: from a cell with
+What it hides is little, as the speed round's measurements found for cells this size: from a cell with
 ground and geometry, 95.1 % of the cells with geometry may show on average (72.7 % at the least:
 the northern islets, whose sea-level eyes have the main island's ridges between them and the
 south-east). Through the view cameras and the 144 walking frames it removes nothing (the frames
 look along the island, not past the volcano at sea level); it is there for the places it helps
 and for a finer grid later.
 
-Checked: renders (800x450, preview.py) from 20 random walkable points, the follow camera at rest
-behind the Mii at three yaws, with and without the rows: 60 of 60 identical (the rows hide 1.6 %
-of the cells there); from 20 points in the cells whose rows hide the most, looking toward what they
-hide: 60 of 60 identical (6.7 % hidden).
+Checked by `tools/wuhu/check_cvis.py`: renders (800x450, preview.py) from 20 random walkable
+points, the follow camera at rest behind the Mii at three yaws, with and without the rows: 60 of
+60 identical (the rows hide 1.6 % of the cells there); from 20 points in the cells whose rows hide
+the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 
 ## Left out (fidelity gaps)
 
@@ -554,18 +556,19 @@ hide: 60 of 60 identical (6.7 % hidden).
   | overview | 36 | 21 | 171 + 3 (327 + 115) | 34,372 (84,936) |
   | wedge | 47 | 21 | 94 + 13 (129 + 19) | 36,371 (44,509) |
 
-  Averages, with what a version 2 World does on top (scratchpad perfd/viewstats.py, a Python copy
-  of World's culling that gives the selftest's numbers exactly, with the detail distance and a test
-  of each cell batch's own box added), over the views and the measurement round's 144 walking
-  frames (18 places, 8 yaws, the follow camera at rest):
+  Averages, with what a version 2 World does on top (`tools/g3d/viewstats.py`, a Python copy of
+  World's culling that gives the selftest's numbers exactly, with the detail distance, a test of
+  each cell batch's own box and the visibility rows switchable), over the views and the speed
+  round's 144 walking frames (`tools/wuhu/walk_cams.txt`: 18 places on the main island, 8 yaws each, the
+  follow camera at rest):
 
   | | views: draws | triangles | vertices | walking: draws | triangles | vertices (lit at run time) |
   |---|---|---|---|---|---|---|
-  | version 1 | 247.0 | 53,345 | 68,419 | 242.7 | 54,347 | 69,991 (68,151) |
-  | version 2, World as it is | 148.1 | 37,773 | 48,517 | 180.4 | 52,073 | 66,910 (194) |
-  | + detail distance | 137.7 | 35,113 | | 165.5 | 47,646 | |
-  | + each cell batch by its box | 110.9 | 27,454 | 33,981 | 120.5 | 35,664 | 44,457 (65) |
-  | + visibility rows | 110.9 | 27,454 | | 120.5 | 35,664 | |
+  | version 1 | 247.0 | 53,345 | 68,586 | 242.7 | 54,347 | 70,158 (68,151) |
+  | version 2, World as it is | 148.1 | 37,773 | 48,684 | 180.4 | 52,073 | 67,077 (194) |
+  | + detail distance | 137.7 | 35,113 | 44,729 | 165.5 | 47,646 | 60,560 (103) |
+  | + each cell batch by its box | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (65) |
+  | + visibility rows | 110.9 | 27,454 | 34,148 | 120.5 | 35,664 | 44,624 (65) |
 
   (Vertices: the distinct ones each draw indexes, what the vertex shader runs on.) A walking
   frame's 35,664 triangles and 120.5 draws: the full island near 14,200 (40 draws, its detail
