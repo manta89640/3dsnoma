@@ -66,7 +66,7 @@ Package* Package::load(void* data, u32 size, std::string* error) {
 
 Package::~Package() { free(data_); }
 
-const fmt::Section* Package::section(u32 tag) const {
+const fmt::Section* Package::find_section(u32 tag) const {
     const fmt::Header* h = (const fmt::Header*)data_;
     const fmt::Section* s = (const fmt::Section*)(data_ + sizeof(fmt::Header));
     for (u32 i = 0; i < h->n_sections; i++)
@@ -123,6 +123,10 @@ bool Package::check(std::string* error) {
                 return fail(error, "section %s twice", tag);
         order.push_back(&s);
     }
+    // (each tag once: the slots the accessors read from here on)
+    for (u32 i = 0; i < h.n_sections; i++)
+        if (tag_slot(secs[i].tag) >= 0)
+            slot_[tag_slot(secs[i].tag)] = &secs[i];
     std::sort(order.begin(), order.end(), [](const fmt::Section* a, const fmt::Section* b) { return a->offset < b->offset; });
     for (size_t i = 1; i < order.size(); i++)
         if (order[i - 1]->offset + order[i - 1]->size > order[i]->offset)

@@ -118,7 +118,29 @@ private:
         const fmt::Section* s = section(tag);
         return s ? Span<T>{(const T*)(data_ + s->offset), s->count} : Span<T>{};
     }
-    const fmt::Section* section(u32 tag) const;
+    // The sections the accessors read are found once, when the section table has been checked: each
+    // known tag has a slot (a constant for the accessors' constant tags), so cells(), batches() and the
+    // rest are a load, not a search of the table (they are called in the World's loops: the search was
+    // nearly half of its instructions on the 3DS). Other tags are searched for.
+    static constexpr int tag_slot(u32 tag) {
+        switch (tag) {
+        case fmt::SEC_STRS: return 0;   case fmt::SEC_TEXS: return 1;   case fmt::SEC_TDAT: return 2;
+        case fmt::SEC_MATS: return 3;   case fmt::SEC_TMTX: return 4;   case fmt::SEC_VTXB: return 5;
+        case fmt::SEC_VDAT: return 6;   case fmt::SEC_IDAT: return 7;   case fmt::SEC_BTCH: return 8;
+        case fmt::SEC_NODE: return 9;   case fmt::SEC_MODL: return 10;  case fmt::SEC_CELL: return 11;
+        case fmt::SEC_CBAT: return 12;  case fmt::SEC_INST: return 13;  case fmt::SEC_ANIM: return 14;
+        case fmt::SEC_TRAK: return 15;  case fmt::SEC_KEYS: return 16;  case fmt::SEC_ENVR: return 17;
+        case fmt::SEC_LITE: return 18;  case fmt::SEC_LSET: return 19;  case fmt::SEC_FOGS: return 20;
+        case fmt::SEC_MARK: return 21;  case fmt::SEC_COLL: return 22;  case fmt::SEC_CYLS: return 23;
+        case fmt::SEC_BLOB: return 24;  case fmt::SEC_CVIS: return 25;  default: return -1;
+        }
+    }
+    static constexpr int N_SLOTS = 26;
+    const fmt::Section* section(u32 tag) const {
+        const int i = tag_slot(tag);
+        return i >= 0 ? slot_[i] : find_section(tag);
+    }
+    const fmt::Section* find_section(u32 tag) const;  // (the table searched)
     bool check(std::string* error);
 
     bool check_textures(std::string* error);
@@ -131,6 +153,7 @@ private:
 
     u8* data_ = nullptr;
     u32 size_ = 0;
+    const fmt::Section* slot_[N_SLOTS] = {};  // (tag_slot's sections: nullptr where there's none)
     const fmt::Env* env_ = nullptr;
     // textures converted at load: index -> its image (texels in `converted_`)
     struct Converted {

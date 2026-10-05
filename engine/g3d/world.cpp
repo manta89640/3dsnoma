@@ -271,6 +271,10 @@ struct World::Impl {
     // per vertex buffer: its texture coordinates' scale as an index (buffers that share one share it):
     // a material's items grouped by it want the backend's texture rows made fewer times
     std::vector<u16> coords_of;
+    u32 n_coords = 1;            // (the scales' count)
+    // the sort's keys, and the candidates gathered in their order (sort_pass)
+    std::vector<u64> keys;
+    std::vector<Cand> gathered;
 
     explicit Impl(const Package& p) : pkg(p) {}
 
@@ -283,6 +287,7 @@ struct World::Impl {
     void cull();
     void collect();
     void add_model_items(const VisInst& v, f32 detail);
+    void sort_pass(u32 pi);
     void build(Pass pass, Packet* p);
     void refresh_combiners(Dyn& d);
 };
@@ -451,6 +456,7 @@ void World::Impl::init() {
         if (it == scales.end())
             scales.push_back(sc);
     }
+    n_coords = std::max<u32>(1, (u32)scales.size());
     matrix_of.reserve(slots);
     state_of.reserve(mats.size());
     vis_cells.reserve(pkg.cells().count);
@@ -816,6 +822,82 @@ void World::Impl::refresh_combiners(Dyn& d) {
     stats->translations++;
 }
 
+// A pass's candidates in their order (once a cull): the sky's as they come (the opaque pass's first
+// n_sky); then by priority; opaque: the plain ones by material and their buffers' coordinate scale
+// (WF_MATERIAL_SORT), then front to back; translucent: back to front; then as they came. Sorted as one
+// 64-bit key a candidate (priority, the plain ones' material and scale, the distance's bits -- a
+// non-negative float orders as its bits; back to front: complemented --, the place it came in), the
+// candidates then gathered in the keys' order: the same order as comparing the candidates (the keys
+// are unique and hold every field the comparison reads), for a sort of 8-byte keys instead of the
+// candidates. Where the fields don't fit (more candidates or materials than the bits left) or a
+// distance is negative or NaN, the candidates are sorted by comparing them.
+void World::Impl::sort_pass(u32 pi) {
+    std::vector<Cand>& cs = cands[pi];
+    const u32 first = pi ? 0 : n_sky, n = (u32)cs.size() - first;
+    if (n < 2)
+        return;
+    const bool by_material = !pi && (features & WF_MATERIAL_SORT);
+    auto bits = [](u64 v) {  // (bits that hold 0..v)
+        u32 b = 0;
+        while (v >> b)
+            b++;
+        return b;
+    };
+    const u64 n_groups = (u64)mats.size() * n_coords;  // (the plain ones' (material, scale); the rest after)
+    const u32 order_bits = bits(n - 1), group_bits = by_material ? bits(n_groups) : 0;
+    bool keyed = 8 + group_bits + 32 + order_bits <= 64;
+    if (keyed) {
+        keys.resize(n);
+        for (u32 i = 0; i < n && keyed; i++) {
+            const Cand& c = cs[first + i];
+            const f32 d = c.distance + 0.0f;  // (-0 as 0: they compare equal)
+            u32 db;
+            memcpy(&db, &d, 4);
+            if (db > 0x7F800000u) {  // (negative or NaN)
+                keyed = false;
+                break;
+            }
+            const u64 group = !by_material ? 0 : c.plain ? (u64)c.material * n_coords + c.coords : n_groups;
+            keys[i] = ((u64)(u8)(c.priority + 128) << (group_bits + 32 + order_bits)) |
+                      (group << (32 + order_bits)) | ((u64)(pi ? ~db : db) << order_bits) | i;
+        }
+    }
+    if (keyed) {
+        std::sort(keys.begin(), keys.end());
+        const u64 mask = ((u64)1 << order_bits) - 1;
+        gathered.resize(cs.size());
+        std::copy(cs.begin(), cs.begin() + first, gathered.begin());
+        for (u32 i = 0; i < n; i++)
+            gathered[first + i] = cs[first + (u32)(keys[i] & mask)];
+        cs.swap(gathered);
+        return;
+    }
+    if (pi)
+        std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) {
+            if (a.priority != b.priority)
+                return a.priority < b.priority;
+            if (a.distance != b.distance)
+                return a.distance > b.distance;
+            return a.order < b.order;
+        });
+    else
+        std::sort(cs.begin() + n_sky, cs.end(), [by_material](const Cand& a, const Cand& b) {
+            if (a.priority != b.priority)
+                return a.priority < b.priority;
+            if (by_material) {
+                if (a.plain != b.plain)
+                    return a.plain;
+                if (a.plain && a.material != b.material)
+                    return a.material < b.material;
+                if (a.plain && a.coords != b.coords)
+                    return a.coords < b.coords;
+            }
+            if (a.distance != b.distance)
+                return a.distance < b.distance;
+            return a.order < b.order;
+        });
+}
+
 void World::Impl::build(Pass pass, Packet* p) {
     if (dirty) {
         cull();
@@ -841,38 +923,12 @@ void World::Impl::build(Pass pass, Packet* p) {
     p->light_sets.assign(pkg.light_sets().begin(), pkg.light_sets().end());
     p->fogs.assign(pkg.fogs().begin(), pkg.fogs().end());
 
-    // the order (once a cull): the sky as it comes; then by priority; opaque: the plain batches by
-    // material and their buffers' coordinate scale (WF_MATERIAL_SORT), then front to back;
-    // translucent: back to front; then as they came
+    // the order (once a cull: sort_pass)
     const u32 pi = pass == Pass::TRANSLUCENT;
     std::vector<Cand>& cs = cands[pi];
     if (!sorted[pi]) {
         sorted[pi] = true;
-        const bool by_material = features & WF_MATERIAL_SORT;
-        if (pi)
-            std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) {
-                if (a.priority != b.priority)
-                    return a.priority < b.priority;
-                if (a.distance != b.distance)
-                    return a.distance > b.distance;
-                return a.order < b.order;
-            });
-        else
-            std::sort(cs.begin() + n_sky, cs.end(), [by_material](const Cand& a, const Cand& b) {
-                if (a.priority != b.priority)
-                    return a.priority < b.priority;
-                if (by_material) {
-                    if (a.plain != b.plain)
-                        return a.plain;
-                    if (a.plain && a.material != b.material)
-                        return a.material < b.material;
-                    if (a.plain && a.coords != b.coords)
-                        return a.coords < b.coords;
-                }
-                if (a.distance != b.distance)
-                    return a.distance < b.distance;
-                return a.order < b.order;
-            });
+        sort_pass(pi);
     }
     // the items, with their matrices and material states put in the packet as they are first used
     matrix_of.assign(finals.size(), -1);
