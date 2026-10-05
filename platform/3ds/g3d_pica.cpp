@@ -880,15 +880,18 @@ void PicaBackend::item_matrix(const g3::Packet& p, const PkgRes& r, const g3::Dr
 // plane at 1.5 package units a ramp 27,978-65,527 units away is depth 0.999965-0.999996, the last
 // half-percent of the last entry, whose value and slope (at most 2 an entry) can't make it. And the
 // fogged materials (the sea's) have no combiner stage or texture unit to spare. So the item is drawn
-// a second time over itself: the depth test as its own and no depth or alpha written, its colour
-// the fog's, its alpha the fog amount from the ramp texture -- s, affine in the position,
-// interpolated per pixel with perspective, is the view depth's place between start and end
-// exactly -- blended over what the first pass left: (1 - f) colour + f fog, GX's fog of an opaque
-// surface (of a translucent one, f of what is behind it is fogged too). An item wholly nearer than
-// the fog's start gets none.
+// a second time over itself: no depth or alpha written, its colour the fog's, its alpha the fog
+// amount from the ramp texture -- s, affine in the position, interpolated per pixel with
+// perspective, is the view depth's place between start and end exactly -- blended over what the
+// first pass left: (1 - f) colour + f fog, GX's fog of an opaque surface (of a translucent one, f of
+// what is behind it is fogged too). Its depth test (fog_pass): where the item wrote its depth, equal
+// -- the second pass's depth is the first's, bit for bit, so exactly the pixels the item drew, not
+// those its alpha test cut out (a tree's leaves) or a nearer surface hid; else the item's own test
+// with equality let through (LESS would refuse every pixel). An item wholly nearer than the fog's
+// start, or that writes no colour, gets none.
 bool PicaBackend::fog_rows(const g3::Packet& p, const g3::GxView& view, const g3::Material& m, const fmt::Batch& b,
                            const VbRes& vb, bool pulled, f32 rows[3][4], u32* color) {
-    if (!m.fog || view.orthographic || m.fog_index >= p.fogs.size())
+    if (!m.fog || !m.pixel.color_write || view.orthographic || m.fog_index >= p.fogs.size())
         return false;
     const fmt::Fog& f = p.fogs[m.fog_index];
     if (f.type != fmt::FOG_LINEAR || !(f.end > f.start))
@@ -938,10 +941,18 @@ void PicaBackend::fog_pass(const g3::Material& m, const fmt::Batch& b, const Pkg
     memcpy(units[0].regs, s_fog_regs, sizeof(s_fog_regs));
     set_units(units);
     const g3::PixelState& px = m.pixel;
+    u32 func = GPU_ALWAYS;  // (see fog_rows)
+    if (px.depth_test && px.depth_write)
+        func = GPU_EQUAL;
+    else if (px.depth_test && px.depth_func == GPU_LESS)
+        func = GPU_LEQUAL;
+    else if (px.depth_test && px.depth_func == GPU_GREATER)
+        func = GPU_GEQUAL;
+    else if (px.depth_test)
+        func = px.depth_func & 7u;
     const u32 pixel[6] = {
         0,  // no alpha test
-        1 | (u32)(px.depth_test ? px.depth_func & 7 : GPU_ALWAYS) << 4 |
-            (u32)(GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE) << 8,
+        1 | func << 4 | (u32)(GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE) << 8,
         GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_SRC_ALPHA << 16 | GPU_ONE_MINUS_SRC_ALPHA << 20 | GPU_ZERO << 24 |
             (u32)GPU_ONE << 28,
         0xE40100, GPU_LOGICOP_COPY, (u32)(px.cull & 3)};
