@@ -1209,6 +1209,7 @@ static void selftest_crc() {
 }
 
 void selftest_g3d();  // selftest_g3d.cpp
+void selftest_g3drender();  // selftest_g3drender.cpp (the software backend; a package's views if there is one)
 void selftest_walk();   // selftest_walk.cpp (needs the island's collision files: not in "all")
 void selftest_input();  // selftest_walk.cpp
 
@@ -1246,6 +1247,8 @@ bool run_selftest(const std::string& name) {
         selftest_tex();
     else if (name == "g3d")
         selftest_g3d();
+    else if (name == "g3drender")
+        selftest_g3drender();
     else if (name == "walk")
         selftest_walk();
     else if (name == "input")
@@ -1269,6 +1272,7 @@ bool run_selftest(const std::string& name) {
         selftest_efb();
         selftest_tex();
         selftest_g3d();
+        selftest_g3drender();
     }
     else
         return false;

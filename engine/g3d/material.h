@@ -88,6 +88,35 @@ struct Material {
     u32 approximated = 0;          // what the translation approximated (combiners, texgens, matrix modes)
 };
 
+// Overlays: translucent materials that test depth without writing it, drawn over a surface they lie
+// on (the island's _blend and Kiwa strips, 0.03-0.4 package units above the terrain they colour,
+// over vertices partly shared with it).
+//
+// The native draws share the GX path's 24-bit depth buffer and its mapping (window depth =
+// f (d - n) / (d (f - n)), the Mii's), the camera's near plane at 1.5 package units: a step of the
+// buffer spans d^2 / (1.5 * 2^24) units at view distance d, and a strip's lift is less than one from
+// about 600 units on. That alone doesn't make them fight: depths computed exactly and truncated keep
+// their order, and LEQUAL lets the strip through (the software backend computes vertex depth in
+// double and shows every strip without a bias: NOMA_SELFTEST=g3drender). Rounding does: a float's
+// vertex depth is off by a step or two, the PICA's (z/w in float24, 17 bits) by about a hundred,
+// against a lift of 0.03 steps at 5,000 units.
+//
+// So an overlay is tested OVERLAY_DEPTH_BIAS steps nearer the camera than it is (the PICA backend
+// through its depth offset, the software one in its test; its own depth is never written), but never
+// more than OVERLAY_DEPTH_BIAS_LIMIT package units of view distance nearer: a bias in steps grows as
+// d^2 in distance (256 steps are 0.024 units at 50 and 10 at 1000, 250 at 5000), and from the
+// overview camera an unlimited one lets the volcano's inner blend through its outer wall.
+constexpr u32 OVERLAY_DEPTH_BIAS = 256;
+constexpr float OVERLAY_DEPTH_BIAS_LIMIT = 4.0f;
+inline bool is_overlay(const Material& m) { return m.translucent && m.pixel.depth_test && !m.pixel.depth_write; }
+// The bias in steps at a depth where one package unit of view distance makes `steps_per_unit` steps
+// (GX's perspective: |XF 0x1025 (p23) x the viewport's z scale| x world_scale / w^2, w the view depth
+// in guest units).
+inline float overlay_depth_bias(float steps_per_unit) {
+    const float limit = OVERLAY_DEPTH_BIAS_LIMIT * steps_per_unit;
+    return limit < (float)OVERLAY_DEPTH_BIAS ? limit : (float)OVERLAY_DEPTH_BIAS;
+}
+
 // the TEV register image of a package material (with registers and konst colours as given)
 engine::gx::TevRegs tev_regs(const fmt::Material& m, const s16 (*reg)[4], const s16 (*konst)[4]);
 
