@@ -10,16 +10,19 @@ cord (tools/mii/midoha_parts.py, drawn on his head by engine/wuhu/midoha.cpp). S
 (hair 30: RFL's skull alone, skin-coloured), under the sculpted hair.
 
 What the candidates share (the concept: a young man, light peach skin, blue almond eyes with dark
-eyeliner, straight dark brows, a check-mark nose, a small closed smile; green hanbok): male, face 0
-(the round jaw), skin 1 (#FFBC80, the closest to the concept's #FCC697), hair colour 0 (the brows
-take it: RFL's darkest, #1E1A18), eye colour 4 (blue: no Mii eye colour is as deep as the concept's),
-brow 20 (straight and thick), nose 1 (the line nose) at size 3, mouth 19 (the small closed smile) at
-size 3, favourite colour 4 (green: his body's colour where the outfit's texture isn't drawn), height
-82 and weight 40 (a slim young man). They differ in the eyes:
+eyeliner, straight dark brows, a check-mark nose, a small closed smile; green hanbok): male, skin 1
+(#FFBC80, the closest to the concept's #FCC697), hair colour 0 (the brows take it: RFL's darkest,
+#1E1A18), eye colour 4 (blue: no Mii eye colour is as deep as the concept's), brow 20 (straight and
+thick), nose 1 (the line nose) at size 3, mouth 19 (the small closed smile) at size 3, favourite
+colour 4 (green: his body's colour where the outfit's texture isn't drawn), height 82 and weight 40
+(a slim young man). They differ in the eyes and the face's shape:
 
-  A  eye 30 at size 4: the winged eyeliner of the concept, at the Mii's usual size
-  B  eye 30 at size 5: the same eye, as large as the concept draws it
-  C  eye 27 at size 5: a rounder eye with a heavy upper lid line
+  A  face 0 (a pointed chin), eye 30 at size 4: the winged eyeliner of the concept, the Mii's usual size
+  B  face 1 (a rounder chin, as drawn), eye 30 at size 5: the same eye, as large as the concept draws it
+  C  face 0, eye 27 at size 5: a rounder eye with a heavy upper lid line
+
+(The hair fits faces 0, 1, 3, 4 and 5 as it is: RFL puts their hair at the same height; faces 2, 6
+and 7 raise it by 3 units, which the hair would have to follow.)
 
 His RFLCreateID is his own (Mii ID 0x8D1D0A00 + candidate, console ID "MIDO"): he is in no
 household and in no Mii database; the island gives him to RFL through a middle database of its own.
@@ -31,14 +34,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mii import Mii  # noqa: E402
 
-COMMON = dict(female=0, fav_color=4, height=82, weight=40, face=0, skin=1, hair=30, hair_color=0,
+COMMON = dict(female=0, fav_color=4, height=82, weight=40, skin=1, hair=30, hair_color=0,
               brow=20, brow_size=4, brow_y=10, brow_x=2, eye_color=4, eye_y=12, eye_x=2,
               nose=1, nose_size=3, nose_y=9, mouth=19, mouth_color=0, mouth_size=3, mouth_y=13)
 
 CANDIDATES = {
-    "A": ("eye 30 (winged eyeliner) at size 4", dict(eye=30, eye_size=4)),
-    "B": ("eye 30 (winged eyeliner) at size 5, as large as the concept's", dict(eye=30, eye_size=5)),
-    "C": ("eye 27 (rounder, heavy upper lid) at size 5", dict(eye=27, eye_size=5)),
+    "A": ("face 0, eye 30 (winged eyeliner) at size 4", dict(face=0, eye=30, eye_size=4)),
+    "B": ("face 1 (rounder chin), eye 30 at size 5 (as large as the concept's)",
+          dict(face=1, eye=30, eye_size=5)),
+    "C": ("face 0, eye 27 (rounder, heavy upper lid) at size 5", dict(face=0, eye=27, eye_size=5)),
 }
 MII_ID = 0x8D1D0A00
 SYSTEM_ID = b"MIDO"
