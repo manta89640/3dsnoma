@@ -6,7 +6,7 @@
 // items grouped by material), its visibility rows (the eye's cell and height), detail batches, the
 // animation rate by size and the combiners' translations kept, and the native-draw packet ring (order,
 // wrap-around, a renderer that never runs, release). With NOMA_G3D_PACKAGE=path (default:
-// wuhu/island_v2.ng3d, else wuhu/island.ng3d in the working directory, if there) the real package is
+// wuhu/island.ng3d in the working directory, if there) the real package is
 // loaded and drawn from each of its view_* markers, and its WorldStats and the World's time are
 // logged (a version 1 package is refused: noted, not failed). NOMA_G3D_WRITE_TEST=path writes the
 // test scene's package (for tools/ng3d_bake).
@@ -1815,13 +1815,7 @@ void selftest_g3d() {
     }
     test_world_cost();
     const char* path = getenv("NOMA_G3D_PACKAGE");
-    if (!path) {  // (the restaged island while it sits beside the old one)
-        FILE* f = fopen("wuhu/island_v2.ng3d", "rb");
-        path = f ? "wuhu/island_v2.ng3d" : "wuhu/island.ng3d";
-        if (f)
-            fclose(f);
-    }
-    test_real_package(path);
+    test_real_package(path ? path : "wuhu/island.ng3d");
     log("selftest g3d: %d checks, %d failed: %s", s_checks, s_failures, s_failures ? "MISMATCH" : "ok");
 }
 

@@ -6,7 +6,7 @@
 //    native draw, under the same GX projection and viewport: the two depth buffers must agree (what
 //    lets the island and the Mii share the frame's depth). Again with the native draw's positions
 //    compact (fmt::VA_POS16), the triangles first put on its grid.
-// 2. A real package (NOMA_G3D_PACKAGE, default wuhu/island_v2.ng3d, else wuhu/island.ng3d) drawn
+// 2. A real package (NOMA_G3D_PACKAGE, default wuhu/island.ng3d) drawn
 //    from each of its view_* camera markers: the World's packets (both passes) through the backend
 //    into the host EFB, under the GX state a frame of the game would have (GXSetProjection from the
 //    camera scaled by k, a 640x456 viewport and scissor, the 342 bias) -- PNGs to NOMA_G3D_OUT
@@ -473,14 +473,7 @@ void test_stream(g3::World& w, g3::Package& pkg, g3::SoftBackend& sb, u32 clear,
 
 void test_views() {
     const char* path_env = getenv("NOMA_G3D_PACKAGE");
-    std::string path = path_env ? path_env : "wuhu/island_v2.ng3d";  // (the restaged island, while it
-    if (!path_env) {                                                  // sits beside the old one)
-        FILE* f = fopen(path.c_str(), "rb");
-        if (f)
-            fclose(f);
-        else
-            path = "wuhu/island.ng3d";
-    }
+    const std::string path = path_env ? path_env : "wuhu/island.ng3d";
     const std::string out = getenv("NOMA_G3D_OUT") ? getenv("NOMA_G3D_OUT") : "g3drender";
     const char* ref = getenv("NOMA_G3D_REF");
     const char* views = getenv("NOMA_G3D_VIEWS");

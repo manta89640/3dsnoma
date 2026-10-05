@@ -29,9 +29,8 @@
 // (they place the native draws as they place the Mii's), the World's opaque pass (sky, island, props)
 // then the Mii's, the World's translucent pass then the Mii's.
 //
-// The package: DATA/wuhu/island_v2.ng3d if there is one, else DATA/wuhu/island.ng3d (for as long as
-// the restaged version 2 island sits beside the old one; a version 1 file is refused, the reason in
-// the log). The World gets the height of the ground under the camera's eye (the collision's highest
+// The package: DATA/wuhu/island.ng3d, NG3D version 2 (a version 1 file, from before the speed work,
+// is refused, the reason in the log: the island is staged again). The World gets the height of the ground under the camera's eye (the collision's highest
 // surface below it facing up, not a fence: the stager's floors), which says whether the eye's cell's
 // visibility row applies (world.h).
 //
@@ -73,8 +72,6 @@ namespace fmt = engine::g3d::fmt;
 using engine::g3d::Package;
 using engine::math::Vec3;
 
-// the restaged island (NG3D version 2) while it sits beside the old one, else the island
-const char* const PACKAGE_V2 = "/wuhu/island_v2.ng3d";
 const char* const PACKAGE = "/wuhu/island.ng3d";
 constexpr f32 TICK = 1.0f / 60.0f;
 constexpr f32 DEG = 3.14159265f / 180.0f;
@@ -231,12 +228,7 @@ void Island::start_loading() {
     start_us_ = guest::host_time_us();
     if (const char* e = std::getenv("NOMA_WUHU_LOG_EVERY"))
         log_every_ = std::max(1, std::atoi(e));
-    std::string path = guest::data_dir() + PACKAGE_V2;
-    if (FILE* f = std::fopen(path.c_str(), "rb"))
-        std::fclose(f);
-    else
-        path = guest::data_dir() + PACKAGE;
-    load_ = std::make_unique<PackageLoad>(path);
+    load_ = std::make_unique<PackageLoad>(guest::data_dir() + PACKAGE);
     load_->start();
     mii_ = std::make_unique<IslandMii>();
 }
