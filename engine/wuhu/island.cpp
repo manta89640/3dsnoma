@@ -15,7 +15,10 @@
 // walking Mii comes to a stop and a falling one lands); the camera follows it (the camera stick, L and
 // R, the D-pad and Y: scene.cpp's controls); the World's animations go on and it is seen from that
 // camera; the Mii stands where the player does, times k, its clip from the player's state and its
-// stride from the distance walked. The World's part of the frame (its animations, the camera, both
+// stride from the distance walked. They all go by the time the frame took (FrameClock: the display's
+// frames since the last update, at most three), not a sixtieth of a second a game frame: the Mii's
+// pace a second, the camera's smoothing and the World's animations are the same at 20, 30 or 60
+// frames a second. The World's part of the frame (its animations, the camera, both
 // passes' culling and draw lists: about a millisecond of the New 3DS's CPU) is a job (platform_job_start:
 // the New 3DS's helper core) from the end of the update on, while the game's thread goes on to the
 // Mii and the rest of its frame; the draws take its packets (waiting for it if it isn't done). Until
@@ -37,8 +40,10 @@
 // follow camera then sees about what the preset does). NOMA_WUHU_LOG_EVERY=N: the frame line every N
 // frames (600). NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort: the World's speed-ups named turned off
 // (world.h WorldFeature: the visibility rows, detail culling, the animation rate by size, the opaque
-// items grouped by material), for comparisons on the console. NOMA_WUHU_PLACEHOLDER=1: the stand-in
-// content instead (content_placeholder.cpp: the scene's shell without the package).
+// items grouped by material), for comparisons on the console. NOMA_WUHU_BY_FRAMES=1: the Mii, the
+// camera and the World move a sixtieth of a second a game frame, whatever the time (repeatable host
+// runs). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the scene's
+// shell without the package).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -87,10 +92,45 @@ const u32 CHANNEL_CLEAR = 0;
 // The Mii's size and pace on the island (the user, after the first runs): at WSR's own scale (the
 // package's k: a Mii as tall as WSR's own, research k.md) it was dwarfed by the town, the trees and the
 // cars, so it is drawn MII_SCALE times as big against the island (its body, steps, reach and camera
-// all follow k); and it crosses the island PACE times as fast as it did at WSR's scale (its own walk
-// and run, from the room, are per its size: MII_SCALE of that comes with the size, the rest is added).
+// all follow k); and it crosses the island at PACE times the pace it has at WSR's scale (its own walk
+// and run, from the room, are per its size: MII_SCALE of that comes with the size, PACE / MII_SCALE
+// is applied). The pace is a second's: the user asked for twice the pace they saw at about 25 frames
+// a second, when the Mii moved a sixtieth of a second's worth a frame (41 % of its pace a second),
+// and the Mii now moves by the time a frame takes (FrameClock): 2 x 25 / 60 of its pace a second
+// whatever the frame rate (the per-frame pace of 1276ec5, 2, was that at 25 fps and 2.4 times it at 60).
 constexpr f32 MII_SCALE = 1.7f;
-constexpr f32 PACE = 2.0f;
+constexpr f32 PACE = 2.0f * 25.0f / 60.0f;
+
+// The time an update moves the Mii, the camera and the World's animations by: the display's frames
+// (retraces, 1/59.94 s) since the last update, rounded, so that at 30 frames a second each update is
+// two of them (the guest's frame waits for a retrace: its frames last 1, 2 or 3 of them); at least
+// one, at most MAX_STEP_FRAMES (a longer hitch -- a load, a stall -- doesn't carry the Mii on: the
+// rest is dropped). NOMA_WUHU_BY_FRAMES=1: one a game frame whatever the time, as before this clock
+// (host runs that must repeat: the host's time isn't the game's).
+class FrameClock {
+public:
+    u32 frames() {
+        static const bool by_frames = std::getenv("NOMA_WUHU_BY_FRAMES") && std::atoi(std::getenv("NOMA_WUHU_BY_FRAMES"));
+        const u64 now = guest::host_time_us();
+        if (by_frames || !last_us_) {
+            last_us_ = now;
+            return 1;
+        }
+        const u64 n = now > last_us_ ? (now - last_us_ + RETRACE_US / 2) / RETRACE_US : 0;
+        if (n > MAX_STEP_FRAMES) {
+            last_us_ = now;
+            return MAX_STEP_FRAMES;
+        }
+        // (the remainder carried: the frames counted keep to the time; one at the least)
+        last_us_ += (n ? n : 1) * RETRACE_US;
+        return n ? (u32)n : 1;
+    }
+    static constexpr u64 RETRACE_US = 16683;
+    static constexpr u32 MAX_STEP_FRAMES = 3;
+
+private:
+    u64 last_us_ = 0;
+};
 
 // NOMA_WUHU_SPEED_OFF: the World's speed-ups to turn off (WorldFeature bits, from a comma list)
 u32 features_from_env() {
@@ -155,7 +195,8 @@ private:
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
     u64 start_us_ = 0;
-    u32 frame_ = 0;  // the World's clock (frames since the island came up)
+    u32 frame_ = 0;  // the World's clock (sixtieths of a second since the island came up: FrameClock's)
+    FrameClock clock_;
     u32 log_every_ = 600, log_frames_ = 0;
     u64 log_us_ = 0;
     // the World's frame as a job (world_frame): what it is given, what it makes, and what it took
@@ -344,7 +385,9 @@ void Island::warp(u32 marker) {
 void Island::update(const Controls& controls, bool frozen) {
     if (!world_)
         return;
-    frame_++;
+    const u32 frames = clock_.frames();
+    frame_ += frames;
+    const f32 dt = TICK * (f32)frames;
     PlayerInput move;
     FollowCameraInput look;
     if (!frozen) {
@@ -356,8 +399,8 @@ void Island::update(const Controls& controls, bool frozen) {
         look.behind = controls.behind;
     }
     const f32 walked = player_->distance();
-    player_->update(move, TICK);
-    camera_->update(look, player_->position(), player_->yaw(), player_->speed() / player_->params().run_speed, TICK);
+    player_->update(move, dt);
+    camera_->update(look, player_->position(), player_->yaw(), player_->speed() / player_->params().run_speed, dt);
     const engine::g3d::Camera& cam = camera_->camera();
     // (the last frame's job, if its draws never came; its stats for the log line: read only here,
     // between the job's take and the next one's start)
