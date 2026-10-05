@@ -21,6 +21,7 @@
 
 #include "engine/g3d/world.h"
 #include "engine/wuhu/midoha.h"
+#include "engine/wuhu/midoha_outfit.h"
 #include "engine/wuhu/player.h"
 #include "runtime/runtime.h"
 
@@ -110,6 +111,8 @@ private:
     engine::math::Mtx34 npc_head_view_{}, camera_view_{};
     bool npc_head_ok_ = false, hide_player_ = false;
     std::unique_ptr<MidohaOutfit> outfit_;
+    f32 camera_fovy_ = 45.0f;  // (the outfit's texture level goes by it)
+    u32 npc_clip_file_ = 0, npc_clip_anim_ = 0;  // his clip's names (guest strings)
 };
 
 }  // namespace engine::wuhu

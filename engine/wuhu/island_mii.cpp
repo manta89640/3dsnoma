@@ -119,6 +119,22 @@ bool IslandMii::make_step() {
         std::vector<u32> paths;
         for (const char* p : ANIM_FILES)
             paths.push_back(s.add(p));
+        // the NPC's clip (NOMA_MIDOHA_CLIP=file/clip, e.g. Move/Walk or Sit_Sofa/Sit_Sofa: his outfit's
+        // renders; another file than the four is loaded too), Wait otherwise
+        u32 npc_file = 0, npc_anim = 0;
+        if (const char* c = npc_record_ ? std::getenv("NOMA_MIDOHA_CLIP") : nullptr) {
+            const char* slash = std::strchr(c, '/');
+            if (slash && slash > c && slash[1]) {
+                const std::string file(c, slash), path = "g3d/Mii/Animation/" + file + ".lex";
+                npc_file = s.add(file.c_str()), npc_anim = s.add(slash + 1);
+                bool have = false;
+                for (const char* p : ANIM_FILES)
+                    have |= path == p;
+                if (!have)
+                    paths.push_back(s.add(path.c_str()));
+            }
+        }
+        const u32 n_files = (u32)paths.size();
         u32 wait = s.add("Wait"), move = s.add("Move"), head = s.add("Head_Only");
         u32 walk = s.add("Walk"), run = s.add("Run"), f_walk = s.add("Female_Walk"), f_run = s.add("Female_Run");
         // the block's layout
@@ -130,7 +146,7 @@ bool IslandMii::make_step() {
         };
         u32 o_sound = take(g3d::SOUND3D_SIZE), o_shadow = take(g3d::SHADOW_RES_SIZE);
         u32 o_handles = take(g3d::SOUND_HANDLES_SIZE), o_actors = take(g3d::ACTORS_SIZE), o_root = take(4);
-        u32 o_list = take(8 + 4 * N_ANIM_FILES), o_expr = take(4), o_id = take(8);
+        u32 o_list = take(8 + 4 * n_files), o_expr = take(4), o_id = take(8);
         u32 o_strings = take((u32)s.bytes.size());
         // the NPC's middle database, its buffer (an entry is 0x40 bytes), his record
         const u32 o_db = npc_record_ ? take(0x18) : 0, o_db_buffer = npc_record_ ? take(0x40) : 0;
@@ -152,9 +168,10 @@ bool IslandMii::make_step() {
         guest::write_g(strings_, s.bytes.data(), (u32)s.bytes.size());
         guest::write_g(create_id_, id, 8);
         guest::store32(anim_list_, anim_list_ + 8);
-        guest::store32(anim_list_ + 4, N_ANIM_FILES);
-        for (u32 i = 0; i < N_ANIM_FILES; i++)
+        guest::store32(anim_list_ + 4, n_files);
+        for (u32 i = 0; i < n_files; i++)
             guest::store32(anim_list_ + 8 + 4 * i, strings_ + paths[i]);
+        npc_clip_file_ = strings_ + (npc_file ? npc_file : wait), npc_clip_anim_ = strings_ + (npc_anim ? npc_anim : wait);
         guest::store32(expression_, g3d::FACE_NORMAL);
         // the clips' names, a man's for now (the walking ones are a woman's once she is known)
         clip_file_[WAIT] = strings_ + wait, clip_anim_[WAIT] = strings_ + wait;
@@ -258,8 +275,8 @@ void IslandMii::make_npc() {
     npc_behavior_ = g3d::give_special_anim(npc_actor_);
     {
         g3d::ScopedHeap heap(g3d::actor_heap(npc_actor_));
-        g3d::assign_string(g3d::behavior_file(npc_behavior_), clip_file_[WAIT]);
-        g3d::assign_string(g3d::behavior_anim(npc_behavior_), clip_anim_[WAIT]);
+        g3d::assign_string(g3d::behavior_file(npc_behavior_), npc_clip_file_);
+        g3d::assign_string(g3d::behavior_anim(npc_behavior_), npc_clip_anim_);
     }
     g3d::behavior_set_expression(npc_behavior_, expression_);
     const u32 body = g3d::actor_body(npc_actor_), scn = guest::load32(body + 0x1C);
@@ -349,6 +366,7 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
     if (npc_actor_)
         g3d::actor_place(npc_actor_, npc_at_.x, npc_at_.y, npc_at_.z, npc_yaw_);
     write_camera(camera);
+    camera_fovy_ = camera.fovy_deg;
     g3d::invalidate_gx_state();
     g3d::root_calc(root);
     GFRAME(0x50);
@@ -385,7 +403,7 @@ void IslandMii::draw_opaque() {
     // the NPC's dressed body, under the camera's view again (the root's pass may have loaded another)
     if (outfit_ && npc_actor_) {
         view();
-        outfit_->draw(guest::load32(g3d::actor_body(npc_actor_) + 0x1C));
+        outfit_->draw(guest::load32(g3d::actor_body(npc_actor_) + 0x1C), camera_fovy_);
     }
 }
 

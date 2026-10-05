@@ -100,6 +100,19 @@ const Shot SHOTS[] = {
     {"plaza_wide", true, -30, 14, 7.5f, 0.5f, 45},
 };
 const u32 N_SHOTS = sizeof(SHOTS) / sizeof(SHOTS[0]);
+// NOMA_MIDOHA_SHOTS=2: his outfit's (engine/wuhu/midoha_outfit.h): the turnaround, the torso as the
+// concept frames it (its crop's 52 Mii units tall over the frame's height: the concept's scale), from
+// the front, 3/4 and behind, and from below the hem
+const Shot OUTFIT_SHOTS[] = {
+    {"o_front", false, 0, 4, 2.4f, 0.53f, 30},       {"o_34", false, 45, 4, 2.4f, 0.53f, 30},
+    {"o_side", false, 90, 4, 2.4f, 0.53f, 30},       {"o_back34", false, 135, 4, 2.4f, 0.53f, 30},
+    {"o_back", false, 180, 4, 2.4f, 0.53f, 30},      {"o_side_r", false, 270, 4, 2.4f, 0.53f, 30},
+    {"o_torso", false, 0, 0, 0.616f, 0.54f, 30},     {"o_torso_34", false, 35, 3, 0.66f, 0.54f, 30},
+    {"o_torso_side", false, 90, 3, 0.66f, 0.54f, 30}, {"o_torso_back", false, 180, 3, 0.66f, 0.54f, 30},
+    {"o_skirt_34", false, -40, 2, 0.9f, 0.25f, 30},  {"o_low", false, 20, -8, 1.6f, 0.3f, 30},
+    {"o_plaza", true, 25, 9, 3.6f, 0.55f, 45},
+};
+const u32 N_OUTFIT_SHOTS = sizeof(OUTFIT_SHOTS) / sizeof(OUTFIT_SHOTS[0]);
 // (from 6 s after the island shows: its caption has gone)
 const u32 SHOT_START = 360, SHOT_HOLD = 50, SHOT_SETTLE = 28;
 const u32 SHOT_GREY = 0xA8ACB0FF;
@@ -144,6 +157,8 @@ private:
     std::unique_ptr<Player> npc_body_;
     std::unique_ptr<MidohaLook> look_;
     bool shots_ = false, island_shown_ = true;
+    const Shot* shot_list_ = SHOTS;
+    u32 n_shots_ = N_SHOTS;
     bool ready_ = false, prepared_ = false;
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
@@ -181,6 +196,8 @@ void Island::start_loading() {
     if (npc_) {
         const char* e = std::getenv("NOMA_MIDOHA_SHOTS");
         shots_ = e && *e && std::strcmp(e, "0");
+        if (shots_ && !std::strcmp(e, "2"))
+            shot_list_ = OUTFIT_SHOTS, n_shots_ = N_OUTFIT_SHOTS;
         guest::log("midoha: candidate %c (%s)%s", npc_->letter, npc_->summary, shots_ ? ", design shots" : "");
     }
 }
@@ -341,12 +358,12 @@ bool Island::shot_camera(engine::g3d::Camera* cam, bool* island) {
     if (!shots_ || !npc_body_ || frame_ < SHOT_START)
         return false;
     const u32 f = frame_ - SHOT_START, i = f / SHOT_HOLD, in = f % SHOT_HOLD;
-    if (i >= N_SHOTS) {
-        if (in == 0 && i == N_SHOTS)
+    if (i >= n_shots_) {
+        if (in == 0 && i == n_shots_)
             guest::log("midoha: all shots done");
         return false;
     }
-    const Shot& s = SHOTS[i];
+    const Shot& s = shot_list_[i];
     if (in == SHOT_SETTLE)
         guest::log("midoha: shot %s begin", s.name);
     if (in == SHOT_HOLD - 1)
