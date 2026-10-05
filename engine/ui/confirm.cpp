@@ -55,8 +55,11 @@ Confirm::Confirm(u32 cursor, u32 group, const std::u16string& text) : cursor_(cu
         lyt::set_active(b, false);
     }
 
+    veil_ = lyt::find_pane(window_, "Pic_Bg");
     window_in_ = lyt::find_anim(window_, "FadeIn");
     window_out_ = lyt::find_anim(window_, "FadeOut");
+    page_in_ = lyt::find_anim(window_, "PageIn");
+    page_out_ = lyt::find_anim(window_, "PageOut");
     lyt::show(lyt::root_pane(scene_), false);
 }
 
@@ -69,13 +72,16 @@ Confirm::~Confirm() {
     lyt::layout_delete(scene_);
 }
 
-void Confirm::open() {
+void Confirm::open(bool over_window) {
     if (state_ != State::HIDDEN)
         return;
     state_ = State::OPEN;
     choice_ = Choice::NONE;
+    over_window_ = over_window;
     lyt::show(lyt::root_pane(scene_), true);
-    lyt::play(window_, window_in_);
+    lyt::show(veil_, true);
+    // PageIn holds the veil as it is when open: it takes over from the other window's at once
+    lyt::play(window_, over_window ? page_in_ : window_in_);
     for (u32 b : {no_, yes_}) {
         show_button(b, true);
         lyt::set_active(b, true);
@@ -87,7 +93,12 @@ void Confirm::open() {
 
 void Confirm::close() {
     state_ = State::CLOSING;
-    lyt::play(window_, window_out_);
+    // いいえ over another window: that window comes back with its own veil (PageIn) as this one
+    // pages out
+    const bool back = over_window_ && choice_ == Choice::NO;
+    lyt::play(window_, back ? page_out_ : window_out_);
+    if (back)
+        lyt::show(veil_, false);
     for (u32 b : {no_, yes_}) {
         lyt::unmark(b, cursor_);
         lyt::set_active(b, false);

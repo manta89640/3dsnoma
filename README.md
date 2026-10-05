@@ -150,6 +150,7 @@ Useful environment variables:
 | `NOMA_SOFT3D_THREADS=N` | host: the threads the software backend draws native draws (the island) with (default: as many as the machine has, at most 8) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
 | `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
+| `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
@@ -220,7 +221,8 @@ what each Mii plays, every frame.
   scenes written in native code), `ui/` (what the native scenes share: the channel's layouts,
   buttons, wipes and 3D pieces as they use them, pictures made at run time), `soundplayer/` (the
   Sound Player), `wuhu/` (walkable Wuhu Island, in progress: `docs/wuhu_design.md`; the bar's 出発
-  button, the scene, the island's loading, the Mii walking it, its collision and camera).
+  button, the scene and its exploration menu, the island's loading, the Mii walking it, its collision
+  and camera).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what

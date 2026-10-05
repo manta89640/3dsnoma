@@ -52,6 +52,14 @@ inline void wipe_in(u32 type) {
     g::layout_parts_Wipe_In(wipe(), type);
     g::layout_parts_Wipe_Play(wipe());
 }
+// Wipe::Out(kind) (fn_80154CE8; runtime/patches/wipes.cpp only changes it on the room's way to the
+// island) and Play: the kind's Out from now, which the application draws over the frame, then its
+// last pose (Fade_Black: black) until the next In. A scene's own fade to black and back, within
+// the scene (wipe_out, then wipe_in once the Out has ended).
+inline void wipe_out(u32 type) {
+    g::fn_80154CE8(wipe(), type);
+    g::layout_parts_Wipe_Play(wipe());
+}
 inline u32 wipe_layout(u32 kind) { return guest::load32(wipe() + 4 * kind); }
 // The application stops drawing the wipe over the frame (+0x20 cleared; its layouts keep their
 // poses): a scene that comes in under a wipe that has ended (a black screen) draws that layout
@@ -82,7 +90,12 @@ inline void cursor_draw(u32 c) {
 // ---- layout::parts::Bottom (0x2460 bytes): the screens' bottom-left way back
 const u32 BOTTOM_SIZE = 0x2460;
 const u32 BOTTOM_HOME_BTN_02 = 0x1DC0;  // the Home tab (chabudai + B): the way back to the room
-enum : u32 { BOTTOM_HIDDEN = 0, BOTTOM_HOME = 4 };
+// the back tab (Common/Return_Btn_03.lex: the return arrow + B, the Home tab's shape): the way back
+// to the screen before
+const u32 BOTTOM_RETURN_BTN_03 = 0x1088;
+// its modes (layout_parts_Bottom_SetMode): 0 nothing, 2 the back tab, 4 the Home tab (both at the
+// bottom left; PressBack presses either)
+enum : u32 { BOTTOM_HIDDEN = 0, BOTTOM_RETURN = 2, BOTTOM_HOME = 4 };
 inline void bottom_ctor(u32 b, u32 cursor) { g::layout_parts_Bottom_ctor(b, BOTTOM_HIDDEN, cursor, 0); }
 inline void bottom_set_mode(u32 b, u32 mode, bool at_once) {
     g::layout_parts_Bottom_SetMode(b, mode, at_once, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
