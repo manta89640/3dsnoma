@@ -72,6 +72,16 @@ bool platform_gpu_thread_start(void (*fn)());
 // The audio thread, which mixes the AX frames (runtime/hw/dsp_hle.cpp) like the Wii's DSP beside
 // its CPU; false where there is no spare core for it (the frames are then mixed inline).
 bool platform_audio_thread_start(void (*fn)());
+// What the AX frames' mixing has cost since the start (the 3DS's status line): its time wherever it
+// ran, the guest's waits for the audio thread (microseconds), and whether the frames go to the thread
+// now (dsp_hle.cpp gives it up when the game waits for it longer than the mixing takes).
+struct AxLoad {
+    u64 mix_us, wait_us;
+    bool threaded;
+};
+AxLoad ax_load();
+// the app ends: the audio thread finishes its frame and sleeps for good (false: not within timeout_us)
+bool dsp_ax_park(u64 timeout_us);
 // The I/O thread, which reads the channel's contents for IOS (runtime/hw/ios/ios.cpp) while the
 // guest runs on; false where it can't start (reads are then done at once).
 bool platform_io_thread_start(void (*fn)());
@@ -81,6 +91,19 @@ bool platform_io_thread_start(void (*fn)());
 // waits; on the 3DS on the GPU thread's core. False where none can start (the caller then does the
 // work itself).
 bool platform_worker_start(void (*fn)(void*), void* arg);
+// A worker's place to stop (fn calls it between pieces of its work): it returns at once, but once
+// the app is ending (platform_quit) the worker sleeps there for good, touching nothing more, so that
+// what the app tears down isn't pulled from under it. (On the guest's thread, where a worker's work
+// runs when no worker could start, it always returns: the app ends from that thread.)
+void platform_worker_pause_point();
+// A job: a short piece of native work a frame hands off and takes back later in the same frame (the
+// island's World, its culling and draw lists made while the guest's thread goes on), run on the
+// platform's helper thread, on a core of its own above the GPU's thread (the 3DS: the New 3DS's
+// third core, platform/3ds/main.cpp's layout). False where there's none to spare (an emulator, the
+// Old 3DS, NOMA_CORES=single): the caller then runs fn itself. One job at a time, from the guest's
+// thread; platform_job_wait returns once the last one started has run (at once if none).
+bool platform_job_start(void (*fn)(void*), void* arg);
+void platform_job_wait();
 // where the program's data is: the host's --data folder, the 3DS's sdmc:/3ds/noma (main.dol,
 // content/, nand/, and the port's own data such as wuhu/island.ng3d)
 const std::string& data_dir();

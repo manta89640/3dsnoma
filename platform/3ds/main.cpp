@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -377,17 +378,22 @@ bool platform_text_input(const TextInput& in, std::string& out) {
     return true;
 }
 
-// back to the HOME Menu, as the Wii channel would go back to the Wii Menu. The GPU's thread and
-// the I/O thread finish their work first and then sleep for good: what follows here (the GPU's and
-// the sound's services closed, exit's destructors, libctru's services ended, the heap unmapped)
-// went on under them, the GPU's thread still drawing the game's last frames (a crash as the app
-// ended: erasing the save, which ends it at once after its fade). One that has crashed or hangs
-// isn't waited for long.
+// back to the HOME Menu, as the Wii channel would go back to the Wii Menu. The GPU's thread, the
+// I/O thread, the audio thread, the helper and the workers finish what they have in hand first (a
+// worker: to its next pause point) and then sleep for good: what follows here (the GPU's and the
+// sound's services closed, exit's destructors, libctru's services ended, the heap unmapped) went on
+// under them, the GPU's thread still drawing the game's last frames (a crash as the app ended:
+// erasing the save, which ends it at once after its fade). One that has crashed or hangs isn't
+// waited for long.
+static bool workers_park(u64 timeout_us);
+static bool job_park(u64 timeout_us);
 void platform_quit(const char* why) {
     log("quit: %s", why);
-    const bool gpu = gx_park(500000), io = ios_async_park(500000);
-    if (!gpu || !io)
-        log("quit: the %s didn't stop", !gpu ? (!io ? "GPU's and I/O threads" : "GPU's thread") : "I/O thread");
+    const bool gpu = gx_park(500000), io = ios_async_park(500000), ax = dsp_ax_park(500000),
+               job = job_park(500000), workers = workers_park(500000);
+    if (!gpu || !io || !ax || !job || !workers)
+        log("quit: these didn't stop:%s%s%s%s%s", gpu ? "" : " the GPU's thread", io ? "" : " the I/O thread",
+            ax ? "" : " the audio thread", job ? "" : " the helper", workers ? "" : " a worker");
     s_quitting = true;
     if (s_log)
         fflush(s_log);
@@ -441,8 +447,85 @@ u64 host_timebase() { return ticks_to<TB_HZ>(svcGetSystemTick() - s_tick0); }
 
 void host_sleep_us(u64 us) { svcSleepThread((s64)us * 1000); }
 
-// ---- the GPU's thread: on the New 3DS's third core (all the app's), else on the system core
-// (the app may take up to 80% of it), just above the main thread's priority
+// ---- where the threads run
+// The cores an application's threads may run on (libctru's threadCreate notes, 3dbrew; Luma3DS's
+// process manager, sysmodules/pm/source/reslimit.c, for how the kernel shares the system core):
+//   core 0, the application core: the main thread's;
+//   core 1, the system core, where the system's modules run. An application gets time on it only
+//     once it has asked for a share (APT_SetAppCpuTimeLimit, refused above its exheader's maximum;
+//     with none, a thread can't even be made there). The CIA's exheader (cia/noma.rsf, MaxCpu 0x9E)
+//     says the "multi" mode with at most 30%: the kernel then alternates the core between the
+//     modules and the app's threads every 2 ms or less, so a thread there waits at most ~1.4 ms
+//     for its turn. A .3dsx runs under another title's exheader, which may say the "single" mode
+//     (one app thread on the core, in 25 ms slices: a wait of up to ~17 ms);
+//   core 2 (New 3DS): all the application's (CanAccessCore2 in the exheader);
+//   core 3 (New 3DS): the system's, never an application's.
+// The New 3DS runs them at 804 MHz with its L2 cache (osSetSpeedupEnable, main()).
+//
+// The layout. On a New 3DS (real hardware: NOMA_CORES=auto, the default; anywhere: NOMA_CORES=multi):
+//   core 0: the game (every guest thread); the I/O thread above it, which mostly waits for the SD
+//           card;
+//   core 1: the audio thread (the AX frames' mixing, runtime/hw/dsp_hle.cpp: a few percent of a core
+//           at 804 MHz, but core 0's otherwise), with a 30% share of the core (a .3dsx: on core 2);
+//   core 2: the GPU's thread; above it the helper's jobs (platform_job_start: the island's World,
+//           short, taken back within the frame); below it the workers (a scene's load).
+// In an emulator (Azahar, Citra: they answer svcGetSystemInfo 0x20000) the cores run one after
+// another on one host thread, so a handoff between cores is a wait: there (and with
+// NOMA_CORES=single) the frames are mixed inline and jobs run on the game's thread, as on the Old
+// 3DS, whose system core has the GPU's thread instead. The GPU's thread stays on its core in every
+// layout (it won Azahar's A/B as well). NOMA_AX_THREAD=0/1/2 puts the mixing inline, on core 1 or 2
+// whatever the layout.
+struct Cores {
+    bool n3ds = false;
+    bool emulator = false;
+    bool multi = false;  // the audio thread and the helper beside the GPU's thread
+    int mhz = 0;         // the clock (Luma3DS says; 0: unknown)
+    s32 prio = 0x30;     // the main thread's priority
+};
+static Cores s_cores;
+
+static void cores_init() {
+    APT_CheckNew3DS(&s_cores.n3ds);
+    // the emulator's id in Citra (1) and Azahar (2); Luma3DS answers 0, a stock kernel an error
+    s64 id = 0, mhz = 0;
+    svcGetSystemInfo(&id, 0x20000, 0);
+    s_cores.emulator = id > 0;
+    if (R_SUCCEEDED(svcGetSystemInfo(&mhz, 0x10001, 0)) && mhz > 0 && mhz < 4000)
+        s_cores.mhz = (int)mhz;  // (Luma3DS's New 3DS clock)
+    svcGetThreadPriority(&s_cores.prio, CUR_THREAD_HANDLE);
+    const char* e = getenv("NOMA_CORES");
+    const bool single = e && !strcmp(e, "single"), multi = e && !strcmp(e, "multi");
+    s_cores.multi = multi || (!single && s_cores.n3ds && !s_cores.emulator);
+    char clock[24] = "";
+    if (s_cores.mhz)
+        snprintf(clock, sizeof(clock), " at %d MHz", s_cores.mhz);
+    log("cores: %s 3DS%s%s, %s: %s", s_cores.n3ds ? "New" : "Old", clock,
+        s_cores.emulator ? " (an emulator)" : "", envIsHomebrew() ? ".3dsx" : "installed",
+        s_cores.multi ? "the GPU's thread, the mixing and the jobs beside the game"
+                      : "the GPU's thread beside the game; mixing and jobs on its core");
+}
+
+// The app's share of the system core, asked for once: `want`, else the most of 30, 25, 20, 15, 10
+// that the exheader allows. 0: none (no thread can run there).
+static u32 syscore_share(u32 want) {
+    static int s_got = -1;
+    if (s_got >= 0)
+        return (u32)s_got;
+    s_got = 0;
+    for (u32 p : {(u32)want, (u32)30, (u32)25, (u32)20, (u32)15, (u32)10})
+        if (p <= want && R_SUCCEEDED(APT_SetAppCpuTimeLimit(p))) {
+            s_got = (int)p;
+            break;
+        }
+    if (s_got)
+        log("cores: %d%% of the system core for the app", s_got);
+    else
+        log("cores: no share of the system core for the app");
+    return (u32)s_got;
+}
+
+// ---- the GPU's thread: on the New 3DS's third core (all the app's), else on the system core,
+// just above the main thread's priority
 struct HostSignal {
     LightEvent e;
 };
@@ -475,24 +558,28 @@ static void catch_arm_exceptions() {
         threadOnException(on_arm_exception, stack + STACK, WRITE_DATA_TO_HANDLER_STACK);
 }
 
+// A thread of ours that runs native code which might name a profiler scope (NOMA_PROF_SCOPE) gets
+// a stack of its own for it (not sampled): the guest's would be written from two threads.
+static void own_profile_stack() {
+#ifdef NOMA_PROFILE_CALLS
+    t_prof = new ProfStack;
+#endif
+}
+
 static void (*s_gpu_fn)();
 bool platform_gpu_thread_start(void (*fn)()) {
     if (getenv("NOMA_GX_INLINE"))
         return false;
-    bool n3ds = false;
-    APT_CheckNew3DS(&n3ds);
-    int core = n3ds ? 2 : 1;
-    if (!n3ds)
-        APT_SetAppCpuTimeLimit(80);
-    s32 prio = 0x30;
-    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    const int core = s_cores.n3ds ? 2 : 1;
+    if (core == 1 && !syscore_share(80))
+        log("gx: no time on the system core for the GPU's thread");
     s_gpu_fn = fn;
     Thread t = threadCreate(
         [](void*) {
             catch_arm_exceptions();
             s_gpu_fn();
         },
-        nullptr, 128 * 1024, prio - 1, core, true);
+        nullptr, 128 * 1024, s_cores.prio - 1, core, true);
     if (!t) {
         log("gx: no thread on core %d: commands decoded on the main thread", core);
         return false;
@@ -501,31 +588,35 @@ bool platform_gpu_thread_start(void (*fn)()) {
     return true;
 }
 
-// ---- the audio thread (NOMA_AX_THREAD=1, New 3DS only): on the system core (the GPU's thread has
-// core 2; the app may take up to 80% of the system core), just above the main thread's priority.
-// Not by default: in Azahar, which runs the cores one after another on one host thread, every
-// frame's handoff became a wait (boot screens at 1-2.5 fps instead of 50-59, the room ~10%
-// slower); whether it pays off on hardware is still to measure. The frames are mixed inline.
+// ---- the audio thread: where the layout puts it (above), above the main thread's priority (on
+// core 2 above the GPU's thread and the helper too: a frame is short, and the game wants it by the
+// next audio block, 3 ms on). Where the system core can't be had, core 2.
 static void (*s_audio_fn)();
+static std::atomic<int> s_audio_core{-1};  // where the thread found itself running
 bool platform_audio_thread_start(void (*fn)()) {
-    bool n3ds = false;
-    APT_CheckNew3DS(&n3ds);
     const char* e = getenv("NOMA_AX_THREAD");
-    const int core = e ? atoi(e) : 0;
-    if (!n3ds || (core != 1 && core != 2))
+    int core = e ? atoi(e) : !s_cores.multi ? 0 : envIsHomebrew() ? 2 : 1;
+    if (!s_cores.n3ds || (core != 1 && core != 2))
         return false;
-    if (core == 1)
-        APT_SetAppCpuTimeLimit(80);
-    s32 prio = 0x30;
-    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (core == 1 && !syscore_share(30))
+        core = 2;
     s_audio_fn = fn;
-    // (on core 2 above the GPU's thread: a frame is short and the next one waits for it)
-    Thread t = threadCreate([](void*) { s_audio_fn(); }, nullptr, 64 * 1024, prio - 2, core, true);
+    auto body = [](void*) {
+        catch_arm_exceptions();
+        s_audio_core.store(svcGetProcessorID(), std::memory_order_relaxed);
+        log("ax: the frames are mixed on core %d", (int)svcGetProcessorID());
+        s_audio_fn();
+    };
+    Thread t = threadCreate(body, nullptr, 64 * 1024, s_cores.prio - (core == 2 ? 3 : 2), core, true);
+    if (!t && core == 1) {
+        log("ax: no thread on the system core: on core 2");
+        core = 2;
+        t = threadCreate(body, nullptr, 64 * 1024, s_cores.prio - 3, core, true);
+    }
     if (!t) {
         log("ax: no thread on core %d: the frames are mixed inline", core);
         return false;
     }
-    log("ax: the frames are mixed on core %d", core);
     return true;
 }
 
@@ -535,15 +626,13 @@ static void (*s_io_fn)();
 bool platform_io_thread_start(void (*fn)()) {
     if (getenv("NOMA_IO_INLINE"))
         return false;
-    s32 prio = 0x30;
-    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     s_io_fn = fn;
     Thread t = threadCreate(
         [](void*) {
             catch_arm_exceptions();
             s_io_fn();
         },
-        nullptr, 32 * 1024, prio - 1, -2, true);
+        nullptr, 32 * 1024, s_cores.prio - 1, -2, true);
     if (!t) {
         log("ios: no I/O thread: reads are done at once");
         return false;
@@ -554,33 +643,126 @@ bool platform_io_thread_start(void (*fn)()) {
 // ---- workers (platform_worker_start): below the main thread in priority, on the GPU thread's core
 // (the New 3DS's third, else the system core), which is mostly idle while a scene loads under a
 // black screen; on the main thread's core, in its waits, where that can't be had. Each has its own
-// stack for the exception handler, freed with it.
+// stack for the exception handler, freed with it. platform_quit stops them at their next pause
+// point (workers_park).
 struct Worker {
     void (*fn)(void*);
     void* arg;
     alignas(8) u8 exception_stack[16 << 10];
 };
+static std::atomic<int> s_workers{0}, s_workers_paused{0};  // running; asleep at a pause point for good
+static std::atomic<bool> s_workers_park{false};
+
 bool platform_worker_start(void (*fn)(void*), void* arg) {
-    s32 prio = 0x30;
-    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-    bool n3ds = false;
-    APT_CheckNew3DS(&n3ds);
     Worker* w = new Worker;
     w->fn = fn, w->arg = arg;
     auto body = [](void* p) {
         Worker* w = (Worker*)p;
         threadOnException(on_arm_exception, w->exception_stack + sizeof(w->exception_stack),
                           WRITE_DATA_TO_HANDLER_STACK);
+        own_profile_stack();
         w->fn(w->arg);
         delete w;
+        s_workers.fetch_sub(1, std::memory_order_release);
     };
-    const int below = prio < 0x3F ? prio + 1 : prio;
-    Thread t = threadCreate(body, w, 64 * 1024, below, n3ds ? 2 : 1, true);
+    const int below = s_cores.prio < 0x3F ? s_cores.prio + 1 : s_cores.prio;
+    s_workers.fetch_add(1, std::memory_order_acq_rel);
+    Thread t = threadCreate(body, w, 64 * 1024, below, s_cores.n3ds ? 2 : 1, true);
     if (!t)
         t = threadCreate(body, w, 64 * 1024, below, -2, true);
     if (!t) {
+        s_workers.fetch_sub(1, std::memory_order_release);
         delete w;
         return false;
+    }
+    return true;
+}
+
+void platform_worker_pause_point() {
+    if (!s_workers_park.load(std::memory_order_acquire))
+        return;
+    s_workers_paused.fetch_add(1, std::memory_order_release);
+    for (;;)
+        svcSleepThread(1000000000000000000ll);
+}
+
+// every worker asleep at a pause point, or ended (false: not within timeout_us)
+static bool workers_park(u64 timeout_us) {
+    s_workers_park.store(true, std::memory_order_seq_cst);
+    const u64 t0 = host_time_us();
+    while (s_workers.load(std::memory_order_acquire) != s_workers_paused.load(std::memory_order_acquire)) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        svcSleepThread(100000);
+    }
+    return true;
+}
+
+// ---- the helper (platform_job_start): one thread on the New 3DS's third core, above the GPU's
+// thread (a job is short, and the game's thread will wait for it within the frame); made at the
+// first job, only in the layout that has it
+static HostSignal *s_job_go, *s_job_done;
+static void (*s_job_fn)(void*);
+static void* s_job_arg;
+static int s_job_thread;  // 0: not made yet; 1: running; -1: none
+static std::atomic<bool> s_job_busy{false}, s_job_park{false}, s_job_parked{false};
+
+static void job_thread(void*) {
+    catch_arm_exceptions();
+    own_profile_stack();
+    for (;;) {
+        if (s_job_park.load(std::memory_order_acquire) && !s_job_busy.load(std::memory_order_acquire)) {
+            s_job_parked.store(true, std::memory_order_release);
+            for (;;)
+                svcSleepThread(1000000000000000000ll);
+        }
+        platform_wait(s_job_go, 1000000);
+        if (!s_job_busy.load(std::memory_order_acquire))
+            continue;
+        s_job_fn(s_job_arg);
+        s_job_busy.store(false, std::memory_order_release);
+        platform_signal(s_job_done);
+    }
+}
+
+bool platform_job_start(void (*fn)(void*), void* arg) {
+    if (s_job_thread == 0) {
+        s_job_thread = -1;
+        if (s_cores.multi && s_cores.n3ds && !getenv("NOMA_JOB_INLINE")) {
+            s_job_go = platform_signal_new(), s_job_done = platform_signal_new();
+            if (threadCreate(job_thread, nullptr, 64 * 1024, s_cores.prio - 2, 2, true))
+                s_job_thread = 1;
+            log("jobs: %s", s_job_thread > 0 ? "on core 2" : "no thread on core 2: on the game's thread");
+        }
+    }
+    if (s_job_thread < 0 || s_job_park.load(std::memory_order_acquire))
+        return false;
+    platform_job_wait();
+    s_job_fn = fn, s_job_arg = arg;
+    s_job_busy.store(true, std::memory_order_release);
+    platform_signal(s_job_go);
+    return true;
+}
+
+void platform_job_wait() {
+    if (!s_job_busy.load(std::memory_order_acquire))
+        return;
+    NOMA_PROF_SCOPE("(job wait)");
+    while (s_job_busy.load(std::memory_order_acquire))
+        platform_wait(s_job_done, 2000);
+}
+
+// the job in hand finished, then the helper asleep for good (false: not within timeout_us)
+static bool job_park(u64 timeout_us) {
+    if (s_job_thread <= 0)
+        return true;
+    s_job_park.store(true, std::memory_order_release);
+    platform_signal(s_job_go);
+    const u64 t0 = host_time_us();
+    while (!s_job_parked.load(std::memory_order_acquire)) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        svcSleepThread(100000);
     }
     return true;
 }
@@ -706,7 +888,7 @@ static void status_row(int y, const char* text) {
 // CPU's (the game's thread: the game and its sound) less its waits, the waits (every guest thread
 // waiting: for the next retrace, the GPU, a read), the GPU's last frame; the heap in use.
 static void status_update(u64 now) {
-    static u64 s_t0;
+    static u64 s_t0, s_mix0, s_wait0;
     static u32 s_frames0, s_idle0;
     if (!s_status_on || (s_t0 && now - s_t0 < SYSCLOCK_ARM11))
         return;
@@ -722,11 +904,26 @@ static void status_update(u64 now) {
         else
             snprintf(row1, sizeof(row1), " 0.0 fps");
     }
-    // (the heap under malloc's lock; not the linear heap's free space: libctru walks its free list
-    // unlocked, and the GPU's thread allocates textures from it meanwhile)
-    snprintf(row2, sizeof(row2), "ms a frame   heap %lu of %lu MB", (unsigned long)(mallinfo().uordblks >> 20),
+    // Row 2 labels row 1's numbers, then the AX frames' mixing in ms a frame and the core it ran on
+    // (a thread's: "w", how long the game waited for it), then the heap in use of its size in MB
+    // (under malloc's lock; not the linear heap's free space: libctru walks its free list unlocked,
+    // and the GPU's thread allocates textures from it meanwhile).
+    const AxLoad ax = ax_load();
+    char axs[24];
+    if (s_t0 && frames != s_frames0) {
+        const u32 n = frames - s_frames0;
+        const double mix = (double)(ax.mix_us - s_mix0) / 1000.0 / n, wait = (double)(ax.wait_us - s_wait0) / 1000.0 / n;
+        const int core = ax.threaded ? s_audio_core.load(std::memory_order_relaxed) : 0;
+        if (ax.threaded)
+            snprintf(axs, sizeof(axs), "AX %.*f c%d w%.2f", mix < 10 ? 2 : 1, mix, core, wait);
+        else
+            snprintf(axs, sizeof(axs), "AX %.*f c0", mix < 10 ? 2 : 1, mix);
+    } else {
+        snprintf(axs, sizeof(axs), "AX --");
+    }
+    snprintf(row2, sizeof(row2), "ms a frame  %s  heap %lu/%lu", axs, (unsigned long)(mallinfo().uordblks >> 20),
              (unsigned long)(__ctru_heap_size >> 20));
-    s_t0 = now, s_frames0 = frames, s_idle0 = idle;
+    s_t0 = now, s_frames0 = frames, s_idle0 = idle, s_mix0 = ax.mix_us, s_wait0 = ax.wait_us;
     LightLock_Lock(&s_log_lock);
     PrintConsole* prev = consoleSelect(&s_status_con);
     fputs("\x1b[36m", stdout);  // (cyan)
@@ -841,6 +1038,7 @@ int main(int argc, char** argv) {
     if (guest::s_log)
         setvbuf(guest::s_log, nullptr, _IOFBF, 16 << 10);
     printf("Wii no Ma 3DS\n");
+    guest::cores_init();
     std::vector<u8> dol = read_file(data + "/main.dol");
     if (dol.empty()) {
         printf("no %s/main.dol\n(see README: tools/stage_data.py)\n", data.c_str());
