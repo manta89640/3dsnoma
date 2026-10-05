@@ -9,19 +9,9 @@
 //
 // Its guest objects are made a step a frame while the island loads (make_step) and freed in the
 // reverse order by the destructor: the channel's heaps are stacks.
-//
-// An NPC may stand beside it (ミドハ, engine/wuhu/midoha.h): a second actor of the same manager, made
-// from an RFLCharData record of our own through a middle database (no Mii database holds him), a
-// frame after the player's (RFL makes a face's textures from its parts in one heap block: two faces
-// made in one frame would both get the first one's parts, runtime/hw/gx/texture.cpp's cache checking
-// a texture once a frame), playing Wait where the scene puts him, his dress drawn by MidohaOutfit.
 #pragma once
 
-#include <memory>
-
 #include "engine/g3d/world.h"
-#include "engine/wuhu/midoha.h"
-#include "engine/wuhu/midoha_outfit.h"
 #include "engine/wuhu/player.h"
 #include "runtime/runtime.h"
 
@@ -29,8 +19,7 @@ namespace engine::wuhu {
 
 class IslandMii {
 public:
-    // npc_record: the NPC's RFLCharData (0x4A bytes, kept by the caller), nullptr for none
-    explicit IslandMii(const u8* npc_record = nullptr);
+    IslandMii();
     ~IslandMii();
     IslandMii(const IslandMii&) = delete;
     IslandMii& operator=(const IslandMii&) = delete;
@@ -50,22 +39,6 @@ public:
     // the TV's width over height (16:9 or 4:3), the camera's aspect
     f32 aspect() const { return aspect_; }
 
-    // the NPC: there (spawned); his height scale; where he stands (guest units, facing yaw degrees,
-    // his height in guest units), from the next update on
-    bool npc_present() const { return npc_actor_ != 0; }
-    f32 npc_height_scale() const { return npc_height_scale_; }
-    void place_npc(engine::math::Vec3 at, f32 yaw, f32 height) { npc_at_ = at, npc_yaw_ = yaw, npc_tall_ = height; }
-    // the matrix RFL draws his face with this frame (RFL head units -> world, guest units; his
-    // Head_Only node's view matrix, the head's scale in it, back from the camera's view, times RFL's
-    // axes), after update; false while he isn't there
-    bool npc_head(engine::math::Mtx34* world) const;
-    // whether he is in the camera's view this frame and over a few pixels tall (after update): his
-    // dress and head pieces are drawn only then (they cost the most of anything on the island: his
-    // dress goes through the GX path, a few thousand vertices made on the CPU)
-    bool npc_visible() const { return npc_visible_; }
-    // the player's Mii out of sight (moved far below the island) while true: design renders
-    void set_hide_player(bool hide) { hide_player_ = hide; }
-
     // The frame: the camera (guest units: engine::g3d::scaled), the body where the player stands
     // (guest units) facing yaw (nw4r degrees), the clip its state asks for, `walked` guest units on
     // (this frame's walking: the walking clips' frames go by it); then the actor manager's update and
@@ -79,12 +52,10 @@ public:
     void draw_translucent();
 
 private:
-    static constexpr u32 STEPS = 6;
-    void make_npc();
+    static constexpr u32 STEPS = 5;
     enum Clip { WAIT, WALK, RUN, N_CLIPS };
     void set_clip(Clip c);
     void write_camera(const engine::g3d::Camera& c);
-    bool npc_in_view(const engine::g3d::Camera& camera) const;
 
     u32 step_ = 0;
     u32 block_ = 0;
@@ -106,21 +77,6 @@ private:
     f32 height_scale_ = 1, aspect_ = 16.0f / 9.0f;
     u32 frame_count_ = 0;
     u32 heap_before_ = 0;
-    // the NPC: his record (host), in the block his middle database (RFLMiddleDB 0x18 bytes), its
-    // buffer and his record; his actor, behaviour, Head_Only node, where he stands, his dress
-    const u8* npc_record_ = nullptr;
-    u32 npc_db_ = 0, npc_db_buffer_ = 0, npc_data_ = 0, head_name_ = 0;
-    u32 npc_actor_ = 0, npc_behavior_ = 0, npc_head_node_ = 0;
-    f32 npc_height_scale_ = 1, npc_yaw_ = 0, npc_tall_ = 0;
-    engine::math::Vec3 npc_at_{0, 0, 0};
-    engine::math::Mtx34 npc_head_view_{}, camera_view_{};
-    bool npc_head_ok_ = false, hide_player_ = false, npc_visible_ = false;
-    std::unique_ptr<MidohaOutfit> outfit_;
-    // his face's own parts (midoha.h), written over RFL's face textures; frames since he was made
-    std::unique_ptr<MidohaFace> face_;
-    u32 npc_frames_ = 0;
-    f32 camera_fovy_ = 45.0f;  // (the outfit's texture level goes by it)
-    u32 npc_clip_file_ = 0, npc_clip_anim_ = 0;  // his clip's names (guest strings)
 };
 
 }  // namespace engine::wuhu

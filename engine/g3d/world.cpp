@@ -1001,19 +1001,6 @@ void World::set_draw_distance(f32 cells, f32 instances) {
     impl_->dirty = true;
 }
 
-void World::set_instance_matrix(u32 instance, const Mtx34& mtx) {
-    Impl& w = *impl_;
-    if (instance >= w.insts.size())
-        return;
-    const fmt::Model& m = package_.models()[package_.instances()[instance].model];
-    Impl::Inst& n = w.insts[instance];
-    n.mtx = mtx;
-    n.scale = max_scale(mtx);
-    n.centre = transform(mtx, box_centre(m.bbox));
-    n.radius = m.radius * n.scale;
-    w.dirty = true;
-}
-
 void World::set_lod_scale(f32 scale) {
     impl_->lod_scale = scale;
     impl_->dirty = true;

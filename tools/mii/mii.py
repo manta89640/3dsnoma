@@ -2,7 +2,7 @@
 """Wii Miis (RFLCharData) authored by named parameters.
 
     from mii import Mii
-    m = Mii(name="ミドハ", hair=30, eye=30, eye_color=4, ...)   # every field has the Mii Channel's default
+    m = Mii(name="Mii", hair=30, eye=30, eye_color=4, ...)      # every field has the Mii Channel's default
     record = m.to_bytes(mii_id, system_id)                       # the 0x4A bytes RFL reads
     Mii.from_bytes(record).params()                              # and back
 
@@ -30,7 +30,7 @@ RFLiCheckValidInfo 0x804CEA80 gives the ranges below; a Mii out of range is refu
 
 Part numbers are the indices of RFL's resource file (RFL_Res.dat): hair 30 is the bald head (no
 hair shape, the skin-coloured skull alone), what a Mii with a hairstyle of its own made outside
-RFL (tools/mii/midoha_parts.py) wears under it.
+RFL would wear under it.
 
 Rotations. RFL draws an eye at 11.25 degrees x ((eye_rot + EYE_ROT_OFFSET[eye]) mod 32) and a
 brow at 11.25 x ((brow_rot + BROW_ROT_OFFSET[brow]) mod 32) (the face texture's layout,

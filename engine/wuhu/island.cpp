@@ -43,14 +43,6 @@
 // camera and the World move a sixtieth of a second a game frame, whatever the time (repeatable host
 // runs). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the scene's
 // shell without the package).
-//
-// ミドハ (engine/wuhu/midoha.h) stands before the player's start, off to one side, facing it
-// (NOMA_WUHU_MIDOHA_AT=<marker>: at that marker instead), his head pieces drawn after the Mii's opaque
-// pass; NOMA_WUHU_MIDOHA=A|B|C|D another candidate face, =0 not there. NOMA_MIDOHA_SHOTS=1: the
-// design renders: the camera goes round him through a list of shots (turnarounds on a plain grey
-// ground, his face close, him on the plaza), the player's Mii out of sight, each shot logged
-// ("midoha: shot NAME begin" once it has settled, "... end" on its last frame: the frame dumps between
-// are of it).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -67,7 +59,6 @@
 #include "engine/wuhu/follow_camera.h"
 #include "engine/wuhu/island_load.h"
 #include "engine/wuhu/island_mii.h"
-#include "engine/wuhu/midoha.h"
 #include "engine/wuhu/player.h"
 #include "noma_decomp.h"
 
@@ -161,42 +152,6 @@ void set_clear(u32 rgba) {
     GS(u32, 0x8) = rgba;
     g::GXSetCopyClear((u32)&GS(u32, 0x8), 0xFFFFFF);
 }
-// The design renders' shots (NOMA_MIDOHA_SHOTS): the camera about the NPC, `yaw` degrees round from
-// his front (90: from his left), `pitch` degrees above, `distance` and `look` (the point it looks at,
-// above his feet) in his heights, the field of view; the island drawn or a grey ground. Each is
-// held SHOT_HOLD frames, logged from SHOT_SETTLE on.
-struct Shot {
-    const char* name;
-    bool island;
-    f32 yaw, pitch, distance, look, fovy;
-};
-const Shot SHOTS[] = {
-    {"turn_front", false, 0, 4, 2.4f, 0.56f, 30},    {"turn_34", false, 45, 4, 2.4f, 0.56f, 30},
-    {"turn_side", false, 90, 4, 2.4f, 0.56f, 30},    {"turn_back34", false, 135, 4, 2.4f, 0.56f, 30},
-    {"turn_back", false, 180, 4, 2.4f, 0.56f, 30},   {"turn_side_r", false, 270, 4, 2.4f, 0.56f, 30},
-    {"face_front", false, 0, 2, 1.15f, 0.88f, 30},    {"face_34", false, 35, 6, 1.15f, 0.88f, 30},
-    {"face_side", false, 90, 4, 1.15f, 0.88f, 30},    {"face_back34", false, 145, 10, 1.15f, 0.88f, 30},
-    {"face_top", false, 20, 55, 1.2f, 0.84f, 30},    {"plaza", true, 25, 9, 3.6f, 0.55f, 45},
-    {"plaza_wide", true, -30, 14, 7.5f, 0.5f, 45},
-};
-const u32 N_SHOTS = sizeof(SHOTS) / sizeof(SHOTS[0]);
-// NOMA_MIDOHA_SHOTS=2: his outfit's (engine/wuhu/midoha_outfit.h): the turnaround, the torso as the
-// concept frames it (its crop's 52 Mii units tall over the frame's height: the concept's scale), from
-// the front, 3/4 and behind, and from below the hem
-const Shot OUTFIT_SHOTS[] = {
-    {"o_front", false, 0, 4, 2.4f, 0.53f, 30},       {"o_34", false, 45, 4, 2.4f, 0.53f, 30},
-    {"o_side", false, 90, 4, 2.4f, 0.53f, 30},       {"o_back34", false, 135, 4, 2.4f, 0.53f, 30},
-    {"o_back", false, 180, 4, 2.4f, 0.53f, 30},      {"o_side_r", false, 270, 4, 2.4f, 0.53f, 30},
-    {"o_torso", false, 0, 0, 0.616f, 0.54f, 30},     {"o_torso_34", false, 35, 3, 0.66f, 0.54f, 30},
-    {"o_torso_side", false, 90, 3, 0.66f, 0.54f, 30}, {"o_torso_back", false, 180, 3, 0.66f, 0.54f, 30},
-    {"o_skirt_34", false, -40, 2, 0.9f, 0.25f, 30},  {"o_low", false, 20, -8, 1.6f, 0.3f, 30},
-    {"o_plaza", true, 25, 9, 3.6f, 0.55f, 45},
-};
-const u32 N_OUTFIT_SHOTS = sizeof(OUTFIT_SHOTS) / sizeof(OUTFIT_SHOTS[0]);
-// (from 6 s after the island shows: its caption has gone)
-const u32 SHOT_START = 360, SHOT_HOLD = 50, SHOT_SETTLE = 28;
-const u32 SHOT_GREY = 0xA8ACB0FF;
-
 // (0 if no fog is in use: the channel's black stays)
 u32 clear_of(const Package& p) {
     for (const fmt::Fog& f : p.fogs())
@@ -221,8 +176,6 @@ private:
     void finish_loading();
     void fail(const std::string& why);
     bool place_at(const fmt::Marker& m);
-    void place_npc();
-    bool shot_camera(engine::g3d::Camera* cam, bool* island);
     void log_frame();
     static void world_frame(void* self);
     void take_job();
@@ -235,13 +188,6 @@ private:
     std::unique_ptr<engine::g3d::World> world_;
     std::unique_ptr<Player> player_;
     std::unique_ptr<FollowCamera> camera_;
-    // ミドハ: his candidate, his place (a Player of his own: the ground under him), his head
-    const midoha::Candidate* npc_ = nullptr;
-    std::unique_ptr<Player> npc_body_;
-    std::unique_ptr<MidohaLook> look_;
-    bool shots_ = false, island_shown_ = true;
-    const Shot* shot_list_ = SHOTS;
-    u32 n_shots_ = N_SHOTS;
     bool ready_ = false, prepared_ = false;
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
@@ -249,7 +195,6 @@ private:
     u32 frame_ = 0;  // the World's clock (sixtieths of a second since the island came up: FrameClock's)
     FrameClock clock_;
     u32 log_every_ = 600, log_frames_ = 0;
-    u32 npc_seen_ = 0;  // frames ミドハ was in view and drawn, since the last frame line
     u64 log_us_ = 0;
     // the World's frame as a job (world_frame): what it is given, what it makes, and what it took
     bool job_ = false;                   // a job is out (the World is the helper's until take_job)
@@ -267,7 +212,6 @@ Island::~Island() {
     // the Mii's guest objects (the content's only ones); then the package's GPU resources, before
     // the package (native_draw.h), and what reads the package and the collision before them
     mii_.reset();
-    look_.reset();
     if (clear_ != CHANNEL_CLEAR)
         set_clear(CHANNEL_CLEAR);
     if (prepared_)
@@ -286,15 +230,7 @@ void Island::start_loading() {
         log_every_ = std::max(1, std::atoi(e));
     load_ = std::make_unique<PackageLoad>(guest::data_dir() + PACKAGE);
     load_->start();
-    npc_ = midoha_candidate();
-    mii_ = std::make_unique<IslandMii>(npc_ ? npc_->record : nullptr);
-    if (npc_) {
-        const char* e = std::getenv("NOMA_MIDOHA_SHOTS");
-        shots_ = e && *e && std::strcmp(e, "0");
-        if (shots_ && !std::strcmp(e, "2"))
-            shot_list_ = OUTFIT_SHOTS, n_shots_ = N_OUTFIT_SHOTS;
-        guest::log("midoha: candidate %c (%s)%s", npc_->letter, npc_->summary, shots_ ? ", design shots" : "");
-    }
+    mii_ = std::make_unique<IslandMii>();
 }
 
 // One step a frame of the Mii's (each a few guest calls; the actor manager's reads its files, which
@@ -377,14 +313,6 @@ void Island::finish_loading() {
         guest::log("wuhu: no spawn point with ground under it: the Mii stands at the island's middle");
     }
 
-    if (mii_->npc_present()) {
-        place_npc();
-        // his head pieces (their uploads a command in the GX stream after the island's)
-        look_ = std::make_unique<MidohaLook>();
-        if (!look_->load())
-            look_.reset();
-    }
-
     const u64 t3 = guest::host_time_us();
     guest::log("wuhu: load: %u bytes in %.0f ms (read %.0f, check %.0f, collision %.0f, world %.1f, prepare %.1f "
                "ms); k %.3f, the Mii %.2f units tall (walks %.3f, runs %.3f a frame, step %.2f, slope limit %.0f "
@@ -440,60 +368,6 @@ bool Island::place_at(const fmt::Marker& m) {
     return true;
 }
 
-// ミドハ where NOMA_WUHU_MIDOHA_AT says, or before the player's start and off to one side (30 units
-// ahead, 18 across: the follow camera sees past the player to him), facing it; his feet on the ground
-// there (a Player's placing, with his own height)
-void Island::place_npc() {
-    npc_body_ = std::make_unique<Player>(*collision_, PlayerParams::make(k_, mii_->npc_height_scale()));
-    const f32 a = player_->yaw() * DEG;
-    const Vec3 start = player_->position(), ahead{std::sin(a), 0, std::cos(a)}, across{-ahead.z, 0, ahead.x};
-    Vec3 at = start + ahead * 30.0f + across * 18.0f;
-    f32 yaw = std::atan2(start.x - at.x, start.z - at.z) / DEG;
-    if (const char* e = std::getenv("NOMA_WUHU_MIDOHA_AT")) {
-        if (const fmt::Marker* m = package_->find_marker(e)) {
-            at = Vec3{m->position[0], m->position[1], m->position[2]};
-            yaw = std::atan2(m->dir[0], m->dir[2]) / DEG;
-        } else {
-            guest::log("midoha: NOMA_WUHU_MIDOHA_AT: no marker %s", e);
-        }
-    }
-    if (!npc_body_->place(at + Vec3{0, 5, 0}, yaw))
-        npc_body_->place(at, yaw);
-    const Vec3 p = npc_body_->position();
-    guest::log("midoha: stands at (%.1f, %.1f, %.1f) facing %.0f, %.2f units tall", p.x, p.y, p.z, npc_body_->yaw(),
-               npc_body_->params().height);
-}
-
-// The design renders' camera this frame (false: the shots are over, or not started)
-bool Island::shot_camera(engine::g3d::Camera* cam, bool* island) {
-    if (!shots_ || !npc_body_ || frame_ < SHOT_START)
-        return false;
-    const u32 f = frame_ - SHOT_START, i = f / SHOT_HOLD, in = f % SHOT_HOLD;
-    if (i >= n_shots_) {
-        if (in == 0 && i == n_shots_)
-            guest::log("midoha: all shots done");
-        return false;
-    }
-    const Shot& s = shot_list_[i];
-    if (in == SHOT_SETTLE)
-        guest::log("midoha: shot %s begin", s.name);
-    if (in == SHOT_HOLD - 1)
-        guest::log("midoha: shot %s end", s.name);
-    const f32 h = npc_body_->params().height;
-    const Vec3 feet = npc_body_->position();
-    const f32 yaw = (npc_body_->yaw() + s.yaw) * DEG, pitch = s.pitch * DEG, d = s.distance * h;
-    cam->target = feet + Vec3{0, s.look * h, 0};
-    const Vec3 back = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-    cam->eye = cam->target + back * d;
-    cam->up = Vec3{0, 1, 0};
-    cam->fovy_deg = s.fovy;
-    cam->aspect = mii_->aspect();
-    cam->near_ = std::max(0.2f, d * 0.2f);
-    cam->far_ = 80000.0f;
-    *island = s.island;
-    return true;
-}
-
 void Island::warp(u32 marker) {
     if (!world_ || marker >= package_->markers().count)
         return;
@@ -519,14 +393,10 @@ void Island::update(const Controls& controls, bool frozen) {
     const f32 walked = player_->distance();
     player_->update(move, dt);
     camera_->update(look, player_->position(), player_->yaw(), player_->speed() / player_->params().run_speed, dt);
-    engine::g3d::Camera cam = camera_->camera();
-    island_shown_ = true;
-    const bool shot = shot_camera(&cam, &island_shown_);
-    mii_->set_hide_player(shot);
+    const engine::g3d::Camera& cam = camera_->camera();
     // (the last frame's job, if its draws never came; its stats for the log line: read only here,
     // between the job's take and the next one's start)
     take_job();
-    npc_seen_ += mii_->npc_visible();
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -552,13 +422,8 @@ void Island::update(const Controls& controls, bool frozen) {
         world_->set_camera(cam, ground);
         world_us_ += guest::host_time_us() - t0;
     }
-    if (npc_body_)
-        mii_->place_npc(npc_body_->position() * k_, npc_body_->yaw(), npc_body_->params().height * k_);
     mii_->update(engine::g3d::scaled(cam, k_), player_->position() * k_, player_->yaw(), player_->state(),
                  (player_->distance() - walked) * k_);
-    engine::math::Mtx34 head;
-    if (look_ && mii_->npc_visible() && mii_->npc_head(&head))
-        look_->update(head, engine::g3d::scaled(cam, k_), (f32)frame_);
 }
 
 // The job (on the helper): the World's frame and both passes' packets, as update() and the two
@@ -615,41 +480,31 @@ void Island::log_frame() {
         std::snprintf(world, sizeof(world), "world %.2f ms a frame on the helper (waited %.2f)", world_ms, waited_ms);
     else
         std::snprintf(world, sizeof(world), "world %.2f ms a frame", world_ms);
-    char npc[48] = "";
-    if (npc_body_)
-        std::snprintf(npc, sizeof(npc), ", ミドハ drawn %u of %u frames", (unsigned)npc_seen_, (unsigned)log_frames_);
     world_us_ = waited_us_ = 0;
-    log_us_ = now, log_frames_ = 0, npc_seen_ = 0;
+    log_us_ = now, log_frames_ = 0;
     const engine::g3d::WorldStats& s = world_->stats();
     const Vec3 p = player_->position();
     static const char* const STATES[] = {"wait", "walk", "run", "fall"};
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
                "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, "
-               "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f%s",
+               "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
                fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
                (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
                (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
-               player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance(), npc);
+               player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
 }
 
 void Island::draw_opaque() {
     if (!world_)
         return;
     // (every frame: the channel's texture copies may set a clear colour of their own)
-    if (!island_shown_)
-        set_clear(SHOT_GREY);
-    else if (clear_ != CHANNEL_CLEAR)
+    if (clear_ != CHANNEL_CLEAR)
         set_clear(clear_);
     mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
-    if (island_shown_)
-        emit(engine::g3d::Pass::OPAQUE);
+    emit(engine::g3d::Pass::OPAQUE);
     mii_->draw_opaque();
-    if (look_ && mii_->npc_visible()) {
-        mii_->view();
-        look_->emit(engine::g3d::Pass::OPAQUE);
-    }
 }
 
 void Island::draw_translucent() {
@@ -657,10 +512,7 @@ void Island::draw_translucent() {
         return;
     // (the projection again: the Mii's opaque pass may have loaded another)
     mii_->view();
-    if (island_shown_)
-        emit(engine::g3d::Pass::TRANSLUCENT);
-    if (look_ && mii_->npc_visible())
-        look_->emit(engine::g3d::Pass::TRANSLUCENT);
+    emit(engine::g3d::Pass::TRANSLUCENT);
     mii_->draw_translucent();
 }
 
