@@ -89,6 +89,7 @@ __attribute__((constructor(102))) static void init_log_lock() { LightLock_Init(&
 static const u64 LOG_FLUSH_TICKS = SYSCLOCK_ARM11 / 2;
 static u64 s_log_flushed;  // (ticks)
 static bool s_log_dirty;
+static volatile bool s_quitting;  // platform_quit: the I/O thread, if it didn't stop, leaves the screen and the log alone
 
 // The bottom screen: a status area of STATUS_ROWS rows at the top, drawn once a second (frames a
 // second and where a frame's time goes, as the Jak 1 port shows them), and the log below it.
@@ -106,6 +107,8 @@ static void log_flush_due(u64 now) {  // (with s_log_lock)
 }
 
 void platform_log_idle() {
+    if (s_quitting)
+        return;
     pica_watchdog();
     status_update(svcGetSystemTick());
     if (!s_log_dirty)
@@ -374,9 +377,18 @@ bool platform_text_input(const TextInput& in, std::string& out) {
     return true;
 }
 
-// back to the HOME Menu, as the Wii channel would go back to the Wii Menu
+// back to the HOME Menu, as the Wii channel would go back to the Wii Menu. The GPU's thread and
+// the I/O thread finish their work first and then sleep for good: what follows here (the GPU's and
+// the sound's services closed, exit's destructors, libctru's services ended, the heap unmapped)
+// went on under them, the GPU's thread still drawing the game's last frames (a crash as the app
+// ended: erasing the save, which ends it at once after its fade). One that has crashed or hangs
+// isn't waited for long.
 void platform_quit(const char* why) {
     log("quit: %s", why);
+    const bool gpu = gx_park(500000), io = ios_async_park(500000);
+    if (!gpu || !io)
+        log("quit: the %s didn't stop", !gpu ? (!io ? "GPU's and I/O threads" : "GPU's thread") : "I/O thread");
+    s_quitting = true;
     if (s_log)
         fflush(s_log);
     if (s_audio)

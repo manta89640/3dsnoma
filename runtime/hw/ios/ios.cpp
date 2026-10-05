@@ -218,10 +218,17 @@ bool whole_read(IoJob& j) {
     return true;
 }
 
+std::atomic<bool> s_io_park{false}, s_io_parked{false};  // (ios_async_park)
+
 void io_thread() {
     for (;;) {
         u32 d = s_job_done.load(std::memory_order_relaxed);
         if (d == s_job_put.load(std::memory_order_acquire)) {
+            if (s_io_park.load(std::memory_order_acquire) && d == s_job_put.load(std::memory_order_acquire)) {
+                s_io_parked.store(true, std::memory_order_release);
+                for (;;)
+                    host_sleep_us(1000000000ull);
+            }
             platform_wait(s_io_wake, 100000);
             platform_log_idle();
             continue;
@@ -320,6 +327,25 @@ void ios_async_wait(u64 us) { platform_wait(s_io_done, us); }
 void ios_async_drain() {
     while (ios_async_busy())
         ios_async_wait(1000), ios_async_poll();
+}
+
+bool ios_async_park(u64 timeout_us) {
+    if (s_io_state <= 0)
+        return true;
+    const u64 t0 = host_time_us();
+    while (ios_async_busy()) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        ios_async_wait(1000), ios_async_poll();
+    }
+    s_io_park.store(true, std::memory_order_release);
+    platform_signal(s_io_wake);
+    while (!s_io_parked.load(std::memory_order_acquire)) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        host_sleep_us(100);
+    }
+    return true;
 }
 
 // a handle's command (read, write, seek, ioctl, ioctlv; close is the caller's), with its arguments

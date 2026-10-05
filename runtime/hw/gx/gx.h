@@ -121,6 +121,9 @@ u32 gx_pi_fifo_read(u32 off);
 void gx_run();  // execute whatever the GPU's FIFO holds now (also called from device polls)
 // let the GPU's thread finish what it was given (no-op where the decoder runs inline)
 void gx_sync();
+// the app ends: the GPU's thread finishes what it was given and then sleeps for good; false if it
+// didn't within timeout_us (true where the decoder runs inline)
+bool gx_park(u64 timeout_us);
 
 // cp.cpp: decode the commands in [p, p+n) in a row; returns bytes used (less than n when the
 // last command is cut off: the rest waits for its tail)

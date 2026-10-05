@@ -1001,7 +1001,11 @@ u32 texel_bits(GPU_TEXCOLOR f) {
 // A texture about to be freed: no unit may keep pointing at it. Its C3D_Tex lives in P.textures'
 // node, so a pointer kept after the erase would read freed memory, and citro3d (which binds the
 // units it holds again at its next context update) or the GPU's own registers would keep the
-// texture's freed address: on hardware, whatever that memory holds next (black).
+// texture's freed address: on hardware, whatever that memory holds next (black). citro3d takes no
+// texture for unit 0 only: for units 1 and 2 C3D_TexBind asks the texture its type first (a data
+// abort at 0xC with none, on the island as the native g3d made room). Those get the white texture,
+// which is never freed; without one (no memory at the start) citro3d keeps what it had.
+extern C3D_Tex s_white;
 void forget_texture(const C3D_Tex* t) {
     for (int u = 0; u < 3; u++) {
         if (P.tex[u] == t)
@@ -1009,8 +1013,10 @@ void forget_texture(const C3D_Tex* t) {
         if (D.bound[u] == t)
             D.bound[u] = nullptr, P.env_valid = false;
         if (D.c3d_bound[u] == t) {
-            C3D_TexBind(u, nullptr);
-            D.c3d_bound[u] = nullptr;
+            if (u == 0)
+                C3D_TexBind(0, nullptr), D.c3d_bound[0] = nullptr;
+            else if (s_white.data)
+                C3D_TexBind(u, &s_white), D.c3d_bound[u] = &s_white;
         }
     }
 }

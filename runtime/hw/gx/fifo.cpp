@@ -60,6 +60,7 @@ static u32 s_put;
 static std::atomic<bool> s_gpu_busy{false};  // decoding what it took
 static std::atomic<bool> s_reset{false};     // drop the undecoded tail before the next bytes
 static std::atomic<bool> s_cpu_waiting{false};
+static std::atomic<bool> s_park{false}, s_parked{false};  // (gx_park)
 static HostSignal *s_gpu_wake, *s_cpu_wake;
 static void ring_put(const u8* p, u32 n);
 static void ring_put_guest(u32 addr, u32 n);
@@ -241,6 +242,12 @@ static void gpu_thread() {
             s_gpu_busy.store(false, std::memory_order_release);
             if (s_cpu_waiting.load(std::memory_order_seq_cst))
                 platform_signal(s_cpu_wake);
+            // (s_park is set after the last bytes were published: seen, they are seen too)
+            if (s_park.load(std::memory_order_acquire) && s_ring_head.load(std::memory_order_acquire) == tail) {
+                s_parked.store(true, std::memory_order_release);
+                for (;;)
+                    host_sleep_us(1000000000ull);
+            }
             platform_wait(s_gpu_wake, 4000);
             continue;
         }
@@ -271,6 +278,24 @@ void gx_sync() {
         NOMA_PROF_SCOPE("(gx sync)");
         host_sleep_us(100);
     }
+}
+
+// The app ends: the GPU's thread draws what it was given, then sleeps for good, touching nothing
+// (what follows on the 3DS closes the GPU's services, runs exit's destructors and unmaps the heap
+// its wait reads). False if it hadn't within timeout_us: it crashed or hangs, and stays as it is.
+bool gx_park(u64 timeout_us) {
+    if (!s_gpu_thread)
+        return true;
+    ring_publish();
+    s_park.store(true, std::memory_order_release);
+    platform_signal(s_gpu_wake);
+    const u64 t0 = host_time_us();
+    while (!s_parked.load(std::memory_order_acquire)) {
+        if (host_time_us() - t0 > timeout_us)
+            return false;
+        host_sleep_us(100);
+    }
+    return true;
 }
 
 // the PE's events from the decoder, as the CPU's thread sees them

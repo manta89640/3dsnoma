@@ -82,6 +82,9 @@ size_t ios_read_at(FILE* f, u64 off, void* dst, u32 n);  // the read itself (eit
 bool ios_async_call(u32 request_phys, std::function<s32()> work, std::function<s32(s32)> finish = nullptr,
                     const std::string& what = std::string());  // what: (NOMA_LOAD_STATS) for a slow job's line
 void ios_async_drain();  // wait for every job in flight and send its reply
+// the app ends: the I/O thread's jobs done and replied, then it sleeps for good, touching nothing
+// (it writes the log and the 3DS's status line when idle); false if not within timeout_us
+bool ios_async_park(u64 timeout_us);
 void ios_async_poll();   // (poll_devices) replies for the jobs done
 bool ios_async_busy();   // jobs not yet answered
 void ios_async_wait(u64 us);  // until a job is done, or at most us
