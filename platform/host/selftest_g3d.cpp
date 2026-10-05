@@ -1707,8 +1707,9 @@ void test_real_package(const std::string& path) {
         "(culled beyond %g), visibility rows %s (%u bytes a cell, up to %g over the ground)",
         prelit, (u32)w.materials().size(), compact, pkg->vertex_buffers().count, detail, (double)env.detail_distance,
         env.pvs_row_bytes ? "present" : "none", env.pvs_row_bytes, (double)env.pvs_max_height);
-    // the ground under an eye, as the island scene finds it (its collision's first surface below, within
-    // the visibility rows' height; none: below that), for the rows
+    // the ground under an eye, as the island scene finds it (its collision's highest surface below facing
+    // up, not a fence: the stager's floors, within the visibility rows' height; none: below that), for
+    // the rows
     engine::collision::World col;
     for (const fm::Collision& c : pkg->collisions())
         col.add_kcl(pkg->at(c.data), c.size, pkg->str(c.name));
@@ -1720,7 +1721,8 @@ void test_real_package(const std::string& path) {
             return (f32)NAN;
         const f32 reach = env.pvs_max_height + 1.0f;
         engine::collision::Hit hit;
-        return col.ground(eye.x, eye.z, eye.y, eye.y - reach, &hit) ? hit.point.y : eye.y - reach;
+        auto floor = [](u16 a, Vec3 n) { return n.y > 0.05f && !engine::collision::kcl_is_fence(a); };
+        return col.ground(eye.x, eye.z, eye.y, eye.y - reach, floor, &hit) ? hit.point.y : eye.y - reach;
     };
     // each view: the frame (its stats), then the World's time a frame (update, cull, both packets:
     // the mean of 200, the animations running) with the speed-ups and without; the material changes in

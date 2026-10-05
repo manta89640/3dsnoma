@@ -28,8 +28,9 @@
 //
 // The package: DATA/wuhu/island_v2.ng3d if there is one, else DATA/wuhu/island.ng3d (for as long as
 // the restaged version 2 island sits beside the old one; a version 1 file is refused, the reason in
-// the log). The World gets the height of the ground under the camera's eye (the collision's first
-// surface below it), which says whether the eye's cell's visibility row applies (world.h).
+// the log). The World gets the height of the ground under the camera's eye (the collision's highest
+// surface below it facing up, not a fence: the stager's floors), which says whether the eye's cell's
+// visibility row applies (world.h).
 //
 // NOMA_WUHU_START=<marker name>: start at another of the package's markers (a landmark, a warp place,
 // or a camera preset view_*, whose target the Mii then stands at, facing away from its eye: the
@@ -363,15 +364,19 @@ void Island::update(const Controls& controls, bool frozen) {
     take_job();
     if (++log_frames_ >= log_every_)
         log_frame();
-    // the ground under the eye, for the visibility rows (none within their height: below it); here on
-    // the game's thread (the collision is its), never while a job is out
+    // the ground under the eye, for the visibility rows (none within their height: below it), by the
+    // rule the stager placed the rows' eyes by (tools/wuhu/stage_wuhu.py): the highest surface facing
+    // up that isn't an invisible fence or plain wall (water counts); here on the game's thread (the
+    // collision is its), never while a job is out
     f32 ground = NAN;
     const fmt::Env& env = package_->env();
     if (env.pvs_row_bytes) {
         const f32 reach = env.pvs_max_height + 1.0f;
         engine::collision::Hit hit;
-        ground = collision_->ground(cam.eye.x, cam.eye.z, cam.eye.y, cam.eye.y - reach, &hit) ? hit.point.y
-                                                                                               : cam.eye.y - reach;
+        auto floor = [](u16 a, Vec3 n) { return n.y > 0.05f && !engine::collision::kcl_is_fence(a); };
+        ground = collision_->ground(cam.eye.x, cam.eye.z, cam.eye.y, cam.eye.y - reach, floor, &hit)
+                     ? hit.point.y
+                     : cam.eye.y - reach;
     }
     built_ready_[0] = built_ready_[1] = false;
     job_camera_ = cam, job_ground_ = ground, job_frame_ = (f32)frame_;
