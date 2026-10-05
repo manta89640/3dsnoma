@@ -32,6 +32,7 @@
 #include "engine/g3d/live_shape.h"
 #include "noma_decomp.h"
 #include "runtime/hw/gx/gx.h"
+#include "runtime/hw/hw.h"
 #include "runtime/hw/gx/vertex.h"
 #include "runtime/runtime.h"
 
@@ -46,15 +47,26 @@ using ::guest::gp;
 
 namespace {
 
-enum class Mode { ORIG, CHECK };
+// NOMA_CHECK_G3D_LIVE=1: the game's own draw, the derivation checked against it; =native: the native
+// draw, checked against the derivation (what it sends, as the GPU's decoder takes it)
+// =ab: the native draw in even game frames, the game's in odd ones (frames dumped two in a row show
+// the same scene drawn both ways)
+enum class Mode { NATIVE, CHECK_GAME, CHECK_NATIVE, AB };
 Mode mode() {
     static const Mode m = [] {
         const char* e = getenv("NOMA_CHECK_G3D_LIVE");
-        if (e && strcmp(e, "0")) {
-            ::guest::log("g3d live: checking the native derivation of every model draw against the game's");
-            return Mode::CHECK;
+        if (!e || !strcmp(e, "0"))
+            return Mode::NATIVE;
+        if (!strcmp(e, "ab")) {
+            ::guest::log("g3d live: the native model draws in even game frames, the game's in odd ones");
+            return Mode::AB;
         }
-        return Mode::ORIG;
+        if (!strcmp(e, "native")) {
+            ::guest::log("g3d live: checking the native model draws against their derivation");
+            return Mode::CHECK_NATIVE;
+        }
+        ::guest::log("g3d live: checking the native derivation of every model draw against the game's");
+        return Mode::CHECK_GAME;
     }();
     return m;
 }
@@ -173,6 +185,201 @@ void model_draws(u32 r3, u32 vpos, u32 opa, u32 xlu, u32 repl, u32 draw_mode, st
     }
 }
 
+// ---- the native draw: each draw's registers (the derivation's writes) and its shape's display
+// lists into the GX FIFO, in the order the game's Draw1Mat1ShpDirectly sends them. A register this
+// model draw has already sent with the same value is left out (other GX code may run between model
+// draws: nothing is taken as sent from one to the next).
+
+struct Sent {
+    u32 bp[256], cp[256], xf_mem[0x700], xf_reg[0x60];
+    bool bp_ok[256], cp_ok[256], xf_mem_ok[0x700], xf_reg_ok[0x60];
+    u32 vcd[3];
+    bool vcd_ok;
+    void clear() {
+        memset(bp_ok, 0, sizeof(bp_ok)), memset(cp_ok, 0, sizeof(cp_ok));
+        memset(xf_mem_ok, 0, sizeof(xf_mem_ok)), memset(xf_reg_ok, 0, sizeof(xf_reg_ok));
+        vcd_ok = false;
+    }
+};
+
+void put_bp(u32 cmd) {
+    ::guest::gather_put<1>(0x61);
+    ::guest::gather_put<4>(cmd);
+}
+void put_cp(u32 reg, u32 v, Sent& s) {
+    if (s.cp_ok[reg] && s.cp[reg] == v)
+        return;
+    s.cp[reg] = v, s.cp_ok[reg] = true;
+    ::guest::gather_put<1>(0x08);
+    ::guest::gather_put<1>(reg);
+    ::guest::gather_put<4>(v);
+}
+void put_xf(u32 addr, const u32* v, u32 n) {
+    ::guest::gather_put<1>(0x10);
+    ::guest::gather_put<4>((n - 1) << 16 | addr);
+    for (u32 i = 0; i < n; i++)
+        ::guest::gather_put<4>(v[i]);
+}
+// LOAD_INDX_A/B (op 0x20 / 0x28): `n` words of matrix `index` of the CP's array into XF `addr`
+void put_indexed(u32 op, u32 index, u32 addr, u32 n) {
+    ::guest::gather_put<1>(op);
+    ::guest::gather_put<4>(index << 16 | (n - 1) << 12 | addr);
+}
+void put_call(u32 list, u32 size) {
+    ::guest::gather_put<1>(0x40);
+    ::guest::gather_put<4>(list);
+    ::guest::gather_put<4>(size);
+}
+
+// The derivation's writes into the GX FIFO: BP and XF loads (XF words in runs of up to 16), a
+// register already sent with the same value in this model draw left out, a display list called
+// (what it sets is then not known as sent)
+struct FifoSink : GxSink {
+    Sent& s;
+    u32 run[16], run_addr = 0, run_n = 0;
+    bool masked = false;  // the next BP write has a mask
+    explicit FifoSink(Sent& sent) : s(sent) {}
+    void flush() {
+        if (run_n)
+            put_xf(run_addr, run, run_n), run_n = 0;
+    }
+    void bp_write(u32 cmd) override {
+        flush();
+        const u32 reg = cmd >> 24, v = cmd & 0xFFFFFF;
+        if (reg == 0xFE) {
+            put_bp(cmd);
+            masked = true;
+            return;
+        }
+        if (masked) {
+            // (the register is then only partly known)
+            put_bp(cmd);
+            s.bp_ok[reg] = masked = false;
+            return;
+        }
+        if (s.bp_ok[reg] && s.bp[reg] == v)
+            return;
+        s.bp[reg] = v, s.bp_ok[reg] = true;
+        put_bp(cmd);
+    }
+    void xf_write(u32 addr, u32 v) override {
+        u32* slot = addr >= 0x1000 ? &s.xf_reg[addr - 0x1000] : &s.xf_mem[addr];
+        bool* ok = addr >= 0x1000 ? &s.xf_reg_ok[addr - 0x1000] : &s.xf_mem_ok[addr];
+        if (*ok && *slot == v) {
+            flush();
+            return;
+        }
+        *slot = v, *ok = true;
+        if (run_n && (addr != run_addr + run_n || run_n == 16))
+            flush();
+        if (!run_n)
+            run_addr = addr;
+        run[run_n++] = v;
+    }
+    bool apply_dl(u32 addr, u32 size) override {
+        flush();
+        put_call(addr, size);
+        memset(s.bp_ok, 0, sizeof(s.bp_ok));
+        memset(s.xf_reg_ok, 0, sizeof(s.xf_reg_ok));
+        return true;
+    }
+};
+
+// the shape: its vertex format (the pre-primitive list; from its arrays on when the format is
+// the last shape's, as nw4r skips it), the arrays the draw reads instead of its own, a
+// single-matrix shape's matrices (slot 0, from the view arrays), the matrix index registers'
+// defaults in CP too when they are the defaults, the primitive list
+void emit_shape(const Draw& d, bool mtx_defaults, Sent& s) {
+    const u32 shp = d.shp;
+    const u32 vcd[3] = {load32(shp + 0xC), load32(shp + 0x10), load32(shp + 0x14)};
+    const u32 pre = shp::dl_addr(shp, shp::PRE_PRIM), pre_n = shp::dl_size(shp, shp::PRE_PRIM);
+    if (s.vcd_ok && !memcmp(vcd, s.vcd, sizeof(vcd)))
+        put_call(pre + 0x20, pre_n - 0x20);
+    else
+        put_call(pre, pre_n);
+    memcpy(s.vcd, vcd, sizeof(vcd)), s.vcd_ok = true;
+    for (u32 r = 0x50; r < 0xAC; r++)  // (what the list set: the vertex format, the attribute arrays)
+        s.cp_ok[r] = false;
+    for (u32 r = 0xB0; r < 0xBC; r++)
+        s.cp_ok[r] = false;
+    for (u32 a = 0; a < 4; a++)
+        if (d.arrays[a].base)
+            put_cp(0xA0 + a, d.arrays[a].base & 0x3FFFFFFF, s), put_cp(0xB0 + a, d.arrays[a].stride, s);
+    const s32 cur = shp::cur_mtx(shp);
+    if (cur >= 0) {
+        put_indexed(0x20, (u32)cur, 0, 12);
+        if (shp::attrs(shp) & 0x400)
+            put_indexed(0x28, (u32)cur, 0x400, 9);
+    }
+    if (mtx_defaults)
+        put_cp(0x30, 0x3CF3CF00u, s), put_cp(0x40, 0x00F3CF3Cu, s);
+    put_call(shp::dl_addr(shp, shp::PRIM), shp::dl_size(shp, shp::PRIM));
+}
+
+// (for now) a draw the derivation can't do, drawn by the game's own Draw1Mat1ShpDirectly, which
+// trusts G3DState's caches: they are emptied first, and the view arrays given to it
+void draw_by_game(const Draw& d, u32 vpos, u32 vnrm, u32 venv, u32 repl, Sent& s) {
+    g::nw4r_g3d_G3DState_Invalidate(0x7FF);
+    g::nw4r_g3d_G3DState_SetViewPosNrmMtxArray(vpos, vnrm, venv);
+    GFRAME(0x60);
+    const u32 mat = (u32)&GS(u32, 0x8), shpv = (u32)&GS(u32, 0xC), node = (u32)&GS(u32, 0x10);
+    const u32 swap = (u32)&GS(u8, 0x18);  // Draw1Mat1ShpSwap, 0x38 bytes
+    GS(u32, 0x8) = d.mat, GS(u32, 0xC) = d.shp, GS(u32, 0x10) = d.node;
+    if (repl)
+        g::nw4r_g3d_MakeDraw1Mat1ShpSwap(swap, repl, mat::id(d.mat));
+    const u32 op = g::nw4r_g3d_SetupIndTexMtxOp(mat, node, shpv);
+    g::nw4r_g3d_Draw1Mat1ShpDirectly(mat, shpv, 0, 0, d.ctrl & ~0x10u, repl ? swap : 0, op);
+    g::nw4r_g3d_G3DState_SetViewPosNrmMtxArray(0, 0, 0);
+    s.clear();
+}
+
+// the model draw: its draws' registers and shapes
+struct Frame {
+    std::vector<Draw> draws;
+    Sent sent;
+};
+Frame s_frame;
+
+void draw_native(u32 r3, u32 vpos, u32 vnrm, u32 venv, u32 opa, u32 xlu, u32 repl, u32 draw_mode) {
+    Frame& f = s_frame;
+    f.draws.clear();
+    model_draws(r3, vpos, opa, xlu, repl, draw_mode, f.draws);
+    Sent& s = f.sent;
+    s.clear();
+    // the view matrix arrays (GXSetArray 0x15-0x17: the indexed loads' arrays), their DMA from the
+    // locked cache done
+    auto view_arrays = [&] {
+        put_cp(0xAC, vpos & 0x3FFFFFFF, s), put_cp(0xBC, 0x30, s);
+        put_cp(0xAD, vnrm & 0x3FFFFFFF, s), put_cp(0xBD, 0x24, s);
+        put_cp(0xAE, venv & 0x3FFFFFFF, s), put_cp(0xBE, 0x30, s);
+    };
+    view_arrays();
+    if (!(draw_mode & 0x10))
+        g::LCQueueWait(0);
+    FifoSink out(s);
+    LightCache lc = light_cache_now();
+    MatShared sh = mat_shared_now();
+    for (const Draw& d : f.draws) {
+        if (derive_material(d.mat, mat_sources(d.mat, repl), d.ctrl, lc, sh, out)) {
+            const bool defaults = derive_shape(d.shp, vpos, vnrm, sh, out);
+            out.flush();
+            emit_shape(d, defaults, s);
+        } else {
+            out.flush();
+            draw_by_game(d, vpos, vnrm, venv, repl, s);
+            view_arrays();
+            lc = light_cache_now();
+            sh = mat_shared_now();
+        }
+    }
+    out.flush();
+    put_cp(0xAC, 0, s), put_cp(0xBC, 0, s), put_cp(0xAD, 0, s), put_cp(0xBD, 0, s), put_cp(0xAE, 0, s), put_cp(0xBE, 0, s);
+    // G3DState as the draws left the GPU: the light cache moved on as they moved it; nothing else
+    // it keeps (textures, TEV, gen mode...) is still true
+    g::nw4r_g3d_G3DState_Invalidate(0x5FF);
+    light_cache_store(lc);
+}
+
 // ---- NOMA_CHECK_G3D_LIVE
 
 const u32 CHECK_MARK = 0xC4EC0000u;  // the check's own 0x50 ids: CHECK_MARK | (call & 0x7FFF) << 1 | end
@@ -180,6 +387,7 @@ const u32 CHECK_MARK = 0xC4EC0000u;  // the check's own 0x50 ids: CHECK_MARK | (
 struct CheckCall {
     u32 serial;
     u32 mdl;
+    std::string name;  // (taken at the call: a scene change frees the model)
     u32 vpos, vnrm, venv;
     std::vector<Draw> draws;
     // the derivation's register writes, draw by draw (draw k's end at writes_end[k]), and whether
@@ -209,7 +417,7 @@ struct Check {
     // totals
     u64 calls = 0, draws = 0, prims = 0, vertices = 0, mismatches = 0, undecoded = 0;
     std::unordered_map<std::string, u64> by_model;
-    std::unordered_map<u32, u64> models_seen;  // ResMdl -> calls (listed once)
+    std::unordered_map<std::string, u64> models_seen;  // model -> calls (listed once)
     bool listed = false;
     u32 logged = 0;
     u64 last_report = 0;
@@ -230,7 +438,7 @@ void mismatch(const char* what, const char* fmt, ...) __attribute__((format(prin
 void mismatch(const char* what, const char* fmt, ...) {
     Check& c = s_check;
     c.mismatches++;
-    c.by_model[model_name(c.call.mdl)]++;
+    c.by_model[c.call.name]++;
     if (c.logged >= 40)
         return;
     c.logged++;
@@ -241,8 +449,7 @@ void mismatch(const char* what, const char* fmt, ...) {
     va_end(ap);
     const Draw* d = c.draw < c.call.draws.size() ? &c.call.draws[c.draw] : nullptr;
     ::guest::log("g3d live check: %s: model %s, draw %zu (shape %u, material %u), layer %u, primitive %zu: %s", what,
-                 model_name(c.call.mdl).c_str(), c.draw, d ? shp::id(d->shp) : 0, d ? mat::id(d->mat) : 0, c.layer,
-                 c.prim, detail);
+                 c.call.name.c_str(), c.draw, d ? shp::id(d->shp) : 0, d ? mat::id(d->mat) : 0, c.layer, c.prim, detail);
 }
 
 void report(bool force) {
@@ -262,8 +469,8 @@ void report(bool force) {
     if (!c.listed && c.calls > 1000) {
         c.listed = true;
         std::string list;
-        for (const auto& [m, n] : c.models_seen)
-            list += model_name(m) + " " + std::to_string(n) + ", ";
+        for (const auto& [name, n] : c.models_seen)
+            list += name + " " + std::to_string(n) + ", ";
         ::guest::log("g3d live check: models drawn so far: %s", list.c_str());
     }
 }
@@ -513,7 +720,12 @@ namespace g {
 // DrawResMdlReplacement*, drawMode)
 void nw4r_g3d_DrawResMdlDirectly(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10) {
     using namespace engine::g3d::live;
-    if (mode() != Mode::CHECK) {
+    const Mode md = mode();
+    if (md == Mode::NATIVE || (md == Mode::AB && !(::guest::vi_game_frames() & 1))) {
+        draw_native(r3, r4, r5, r6, r7, r8, r9, r10);
+        return;
+    }
+    if (md == Mode::AB) {
         nw4r_g3d_DrawResMdlDirectly_orig(r3, r4, r5, r6, r7, r8, r9, r10);
         return;
     }
@@ -521,7 +733,13 @@ void nw4r_g3d_DrawResMdlDirectly(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8,
     CheckCall call;
     call.serial = ++c.serial;
     call.mdl = load32(r3);
+    call.name = model_name(call.mdl);
     call.vpos = r4, call.vnrm = r5, call.venv = r6;
+    c.calls++;
+    c.models_seen[call.name]++;
+    const u32 id = CHECK_MARK | (call.serial & 0x7FFF) << 1;
+    // the derivation, queued before anything goes into the FIFO (on a host the decoder may run as
+    // soon as a command is written)
     model_draws(r3, r4, r7, r8, r9, r10, call.draws);
     {
         GxRegs regs;
@@ -536,12 +754,12 @@ void nw4r_g3d_DrawResMdlDirectly(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8,
             call.writes_end.push_back((u32)call.writes.size());
         }
     }
-    c.calls++;
-    c.models_seen[call.mdl]++;
-    const u32 id = CHECK_MARK | (call.serial & 0x7FFF) << 1;
     c.pending.push_back(std::move(call));
     write_marker(id);
-    nw4r_g3d_DrawResMdlDirectly_orig(r3, r4, r5, r6, r7, r8, r9, r10);
+    if (md == Mode::CHECK_NATIVE)
+        draw_native(r3, r4, r5, r6, r7, r8, r9, r10);
+    else
+        nw4r_g3d_DrawResMdlDirectly_orig(r3, r4, r5, r6, r7, r8, r9, r10);
     write_marker(id | 1);
 }
 

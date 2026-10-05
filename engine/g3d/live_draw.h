@@ -1,7 +1,9 @@
 // The channel's own 3D models drawn natively: nw4r::g3d's DrawResMdlDirectly (every ScnMdl and
 // ScnMdlSimple draw of every ScnRoot pass: the room, the sky, the theater, the Miis' bodies) in
-// C++, drawn by the native g3d's backends in place of the emulated GX path (see live_draw.cpp;
-// until the backends take live models, the game's own function still draws).
+// C++ (see live_draw.cpp). For now its draws go to the GPU through the GX path: each draw's state
+// as the native derivation has it, the shapes' and materials' display lists called as the game
+// calls them; next, the native g3d's backends draw them past the GX path. (A fur material is still
+// drawn by the game's own Draw1Mat1ShpDirectly.)
 // NOMA_CHECK_G3D_LIVE=1 (host): the game's own function draws, and the native derivation is
 // compared draw by draw with what its GX commands leave in the GPU's registers.
 #pragma once

@@ -195,7 +195,7 @@ PATCHED_NAMES = {
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
     "g3d_living_Poster_ctor",  # the room's poster: hidden with none to show (engine/system/room_accessories.cpp)
     # nw4r::g3d's model draw, natively (engine/g3d/live_draw.cpp; the game's own stays for the
-    # NOMA_CHECK_G3D_LIVE check, and draws until the backends take live models)
+    # NOMA_CHECK_G3D_LIVE check)
     "nw4r_g3d_DrawResMdlDirectly",
     # the options' save-data button: its push asks through the system prompt (runtime/patches/menus.cpp)
     "scene_OptionScene_StateTop_OnButton", "app_SystemPrompt_OpenPending",

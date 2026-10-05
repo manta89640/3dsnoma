@@ -11,11 +11,22 @@
 
 namespace engine::g3d::live {
 
+// Where the derivation's register writes go: a register file (the check's expectations, the
+// native backends' state), or the GX FIFO (the native draw through the GX path: a display list
+// called as the game calls it, not taken apart).
+struct GxSink {
+    virtual ~GxSink() {}
+    virtual void bp_write(u32 cmd) = 0;  // a BP load's word: register << 24 | value (0xFE: the next write's mask)
+    virtual void xf_write(u32 addr, u32 v) = 0;
+    // a display list's BP and XF loads (CP loads and NOPs pass; anything else ends it: false)
+    virtual bool apply_dl(u32 addr, u32 size) = 0;
+};
+
 // GX's register file as far as writes made it known: BP registers (with the bits a write set: a
 // masked write sets only its mask's), the TEV colour and konst registers, XF registers
 // (0x1000-0x105F) and XF memory (matrices 0x000-0x0FF, normal matrices 0x400-0x45F, post-transform
 // matrices 0x500-0x5FF, lights 0x600-0x67F). Writes can also be logged (the check replays them).
-struct GxRegs {
+struct GxRegs : GxSink {
     u32 bp[256], bp_known[256];
     s32 tev_reg[4][4], tev_konst[4][4];
     u8 tev_reg_known[4], tev_konst_known[4];  // a bit per component (R G B A)
@@ -33,11 +44,10 @@ struct GxRegs {
     std::vector<Write>* log = nullptr;
 
     void clear();
-    void bp_write(u32 cmd);  // a BP load's word: register << 24 | value (0xFE: the next write's mask)
-    void xf_write(u32 addr, u32 v);
+    void bp_write(u32 cmd) override;
+    void xf_write(u32 addr, u32 v) override;
+    bool apply_dl(u32 addr, u32 size) override;
     void apply(const Write& w) { w.kind == 0 ? bp_write(w.value) : xf_write(w.addr, w.value); }
-    // a display list's BP and XF loads (CP loads and NOPs pass; anything else ends it: false)
-    bool apply_dl(u32 addr, u32 size);
 };
 
 // where a material's parts come from: the resource's own, or a ScnMdl's per-instance copies (its
@@ -71,10 +81,10 @@ MatShared mat_shared_now();  // as G3DState holds it now
 // Draw1Mat1ShpDirectly's material setup for material `m` (its sources), as `ctrl` asks (8:
 // lighting forced off; 0x10, no material: nothing): into `r`, the light cache and `sh` moved on.
 // False where it can't (fur, an indirect normal map: logged once).
-bool derive_material(u32 mat, const MatSources& m, u32 ctrl, LightCache& lc, MatShared& sh, GxRegs& r);
+bool derive_material(u32 mat, const MatSources& m, u32 ctrl, LightCache& lc, MatShared& sh, GxSink& r);
 // ... and its shape setup's matrix registers for shape `shp` drawn with the view arrays: a
 // single-matrix shape's matrix index registers and the texture matrices made from its normal
-// matrix; a skinned shape's defaults
-void derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxRegs& r);
+// matrix; a skinned shape's defaults (true: the defaults, which the game sends to CP too)
+bool derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxSink& r);
 
 }  // namespace engine::g3d::live

@@ -55,7 +55,7 @@ void warn_once(const char* what) {
 }
 
 // GXLoadLightObjImm(obj, 1 << slot): the light's colour and 12 floats into its slot (words 3-15)
-void load_light(u32 gx_obj, u32 slot, GxRegs& r) {
+void load_light(u32 gx_obj, u32 slot, GxSink& r) {
     const u32 at = 0x600 + slot * 0x10;
     r.xf_write(at + 0, 0), r.xf_write(at + 1, 0), r.xf_write(at + 2, 0);
     r.xf_write(at + 3, load32(gx_obj + 0xC));
@@ -64,7 +64,7 @@ void load_light(u32 gx_obj, u32 slot, GxRegs& r) {
 }
 
 // G3DState::LoadLightSet(index): masks (colour 0, alpha 0, colour 1, alpha 1) and the ambient
-void load_light_set(u32 index, LightCache& lc, u32 masks[4], u8 amb[4], GxRegs& r) {
+void load_light_set(u32 index, LightCache& lc, u32 masks[4], u8 amb[4], GxSink& r) {
     if (index > 0x7F) {
         memset(masks, 0, 4 * sizeof(u32));
         memset(amb, 0xFF, 4);
@@ -140,7 +140,7 @@ u32 chan_ctrl(u32 ctrl, u32 mask, bool off) {
 }
 
 // ResMatChan
-void set_channels(u32 chan, const MatShared& sh, const u32 masks[4], const u8 amb[4], bool off, GxRegs& r) {
+void set_channels(u32 chan, const MatShared& sh, const u32 masks[4], const u8 amb[4], bool off, GxSink& r) {
     if (!chan)
         return;
     const u32 f0 = load32(chan);
@@ -176,7 +176,7 @@ void set_channels(u32 chan, const MatShared& sh, const u32 masks[4], const u8 am
 }
 
 // the gen mode's registers
-void flush_genmode(const MatShared& sh, GxRegs& r) {
+void flush_genmode(const MatShared& sh, GxSink& r) {
     r.bp_write(0xFE07FC3Fu);
     r.bp_write(((u32)sh.ind << 16 & 0xFF0000) | (u32)load8(CULL + sh.cull) << 14 | ((u32)sh.stages - 1) << 10 |
                sh.texgens | ((u32)sh.chans * 16 & 0xFF0));
@@ -185,7 +185,7 @@ void flush_genmode(const MatShared& sh, GxRegs& r) {
 }
 
 // ResTexSrt: the post-transform matrices (and which texcoords the shape gives normal matrices)
-void set_tex_srt(u32 srt, MatShared& sh, GxRegs& r) {
+void set_tex_srt(u32 srt, MatShared& sh, GxSink& r) {
     GFRAME(0xD0);
     const u32 m = (u32)&GS(u8, 0x68), tmp = (u32)&GS(u8, 0x38), ident = (u32)&GS(u8, 0x8);
     const u32 flags = srt ? load32(srt) : 0;
@@ -243,10 +243,12 @@ void set_tex_srt(u32 srt, MatShared& sh, GxRegs& r) {
 // ---- the register file
 
 void GxRegs::clear() {
-    std::vector<Write>* keep = log;
-    memset(this, 0, sizeof(*this));
+    memset(bp, 0, sizeof(bp)), memset(bp_known, 0, sizeof(bp_known));
+    memset(tev_reg, 0, sizeof(tev_reg)), memset(tev_konst, 0, sizeof(tev_konst));
+    memset(tev_reg_known, 0, sizeof(tev_reg_known)), memset(tev_konst_known, 0, sizeof(tev_konst_known));
+    memset(xf, 0, sizeof(xf)), memset(xf_known, 0, sizeof(xf_known));
+    memset(xf_mem, 0, sizeof(xf_mem)), memset(xf_mem_known, 0, sizeof(xf_mem_known));
     bp_mask = 0xFFFFFF;
-    log = keep;
 }
 
 void GxRegs::bp_write(u32 cmd) {
@@ -361,7 +363,7 @@ MatShared mat_shared_now() {
 
 // ---- Draw1Mat1ShpDirectly's material setup
 
-bool derive_material(u32 mt, const MatSources& s, u32 ctrl, LightCache& lc, MatShared& sh, GxRegs& r) {
+bool derive_material(u32 mt, const MatSources& s, u32 ctrl, LightCache& lc, MatShared& sh, GxSink& r) {
     if (mat::fur(mt)) {
         warn_once("a fur material: drawn by the game's own code");
         return false;
@@ -434,7 +436,7 @@ bool derive_material(u32 mt, const MatSources& s, u32 ctrl, LightCache& lc, MatS
 
 // ---- the shape's matrix registers
 
-void derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxRegs& r) {
+bool derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxSink& r) {
     const s32 cur = shp::cur_mtx(shp);
     u32 t[8];
     bool any = false;
@@ -467,10 +469,11 @@ void derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxRegs& r) {
     if (any) {
         r.xf_write(0x1018, t[3] << 24 | t[2] << 18 | t[1] << 12 | t[0] << 6);
         r.xf_write(0x1019, t[7] << 18 | t[6] << 12 | t[5] << 6 | t[4]);
-    } else {
-        r.xf_write(0x1018, 0x3CF3CF00u);
-        r.xf_write(0x1019, 0x00F3CF3Cu);
+        return false;
     }
+    r.xf_write(0x1018, 0x3CF3CF00u);
+    r.xf_write(0x1019, 0x00F3CF3Cu);
+    return true;
 }
 
 }  // namespace engine::g3d::live
