@@ -282,3 +282,11 @@ theme (Sound Player semantics).
 - **Hardware rules for PICA shaders (85):** every .out written whole (xyzw) on every path, outside
   ifu/ifc/for; tools/check_shader_outputs.py must pass (package.sh refuses otherwise); GX_MemoryFill only
   into VRAM; any new syscall must be in the RSF's SystemCallAccess list.
+- **Cores (speed round, 2026-10-05):** on a real New 3DS (`NOMA_CORES`, the layout in platform/3ds/main.cpp)
+  the island's World makes its frame (update, camera, both passes' packets) as a job on the helper
+  thread (core 2, above the GPU's thread) from the end of Island::update until the draws take the packets
+  (Island::emit swaps the built packet into a ring packet, which keeps its id); the game's thread touches
+  nothing of the World meanwhile. Per-frame World state set from the island (a camera, a visibility
+  position) goes into Island::world_frame, or before platform_job_start after take_job. Where there's no
+  helper (emulators, the Old 3DS, `NOMA_CORES=single`) the same steps run on the game's thread. The AX
+  mixing runs on core 1; the loader worker stops at its pause points when the app quits.

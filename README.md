@@ -60,7 +60,13 @@ decompiled sources, assembly, extracted files) stays out of git.
   (`NOMA_AUDIO_GUARD=0` turns this off); with the voices on the 3DS's DSP, frames the CPU took late
   are made up for (up to 100 ms), as they set the music's tempo. On the 3DS the GPU has a thread
   of its own on another core (`runtime/hw/gx/fifo.cpp`): it decodes the command stream and draws
-  while the main thread runs the guest. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
+  while the main thread runs the guest. On a real New 3DS the AX frames are also mixed on a core
+  of their own (the system core), and Wuhu Island's World makes its frame on the third core beside
+  the GPU's thread (`platform/3ds/main.cpp` has the layout; `NOMA_CORES` below). The bottom screen's
+  status area shows, once a second, the game's frames a second, then milliseconds a frame: the
+  game's CPU time (its thread, less its waits), its waits, the GPU's drawing time; below it the AX
+  mixing's milliseconds a frame and its core (`c0`: the game's own; on a thread, `w`: the game's
+  waits for it) and the heap in use of its size in MB. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
   where the time goes every `NOMA_PROFILE=seconds`: per guest thread, and per function (self
   and total), with the runtime's own work as `(gx)`, `(ax)`, `(ios)`, `(devices)`, `(idle)`.
 - Not yet: the speed work itself
@@ -156,6 +162,8 @@ Useful environment variables:
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
+| `NOMA_CORES=single`, `=multi` | 3DS: where the work beside the game runs. Unset, on a real New 3DS the AX mixing has a thread on the system core (a `.3dsx`: on the third core) and Wuhu Island's World makes its frame on the third core (`NOMA_JOB_INLINE=1`: not that); in an emulator (Azahar, Citra: recognised) and on an Old 3DS both stay on the game's thread, as Azahar runs the cores one after another. `single`: on the game's thread anywhere; `multi`: on their threads on any New 3DS, an emulator's too (an Old 3DS has no third core for them), and on the host (to test those paths). The GPU's thread is the same in all |
+| `NOMA_AX_THREAD=0`, `=1`, `=2` | 3DS: the AX mixing on the game's thread, or on a thread of its own on core 1 (the system core) or 2, whatever `NOMA_CORES` says; with a thread the program doesn't give it up for mixing on the game's thread when the game waits for it longer than the mixing takes (unset, it does) (host: any value but 0 gives it a thread) |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
 
 On the 3DS, the same switches go in `sdmc:/3ds/noma/env.txt` as `KEY=VALUE` lines (including

@@ -69,7 +69,9 @@ void PackageLoad::start() {
 
 void PackageLoad::run(void* self) { ((PackageLoad*)self)->work(); }
 
+// (guest::platform_worker_pause_point between pieces: the app ending stops the worker there)
 void PackageLoad::work() {
+    guest::platform_worker_pause_point();
     u64 t0 = guest::host_time_us();
     u8* data = nullptr;
     u32 size = 0;
@@ -93,6 +95,7 @@ void PackageLoad::work() {
                 read_.store(at, std::memory_order_relaxed);
                 if (got != want)
                     break;
+                guest::platform_worker_pause_point();
             }
             if (at != size)
                 error = path_ + ": read " + std::to_string(at) + " of " + std::to_string(size) + " bytes";
@@ -101,6 +104,7 @@ void PackageLoad::work() {
     }
     read_ms = ms_since(t0);
 
+    guest::platform_worker_pause_point();
     u64 t1 = guest::host_time_us();
     if (error.empty()) {
         if (u32 raw = gx_raw_textures(data, size)) {
@@ -122,6 +126,7 @@ void PackageLoad::work() {
     }
     check_ms = ms_since(t1);
 
+    guest::platform_worker_pause_point();
     u64 t2 = guest::host_time_us();
     if (package) {
         auto w = std::make_unique<engine::collision::World>();
