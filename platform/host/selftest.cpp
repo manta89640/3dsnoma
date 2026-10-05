@@ -1231,6 +1231,11 @@ static void selftest_crc() {
     log("selftest crc: %d blocks, %s", cases, bad ? "MISMATCH" : "ok");
 }
 
+void selftest_g3d();  // selftest_g3d.cpp
+void selftest_g3drender();  // selftest_g3drender.cpp (the software backend; a package's views if there is one)
+void selftest_walk();   // selftest_walk.cpp (needs the island's collision files: not in "all")
+void selftest_input();  // selftest_walk.cpp
+
 bool run_selftest(const std::string& name) {
     g_sp = 0x81710000;
     if (name == "aes")
@@ -1263,7 +1268,16 @@ bool run_selftest(const std::string& name) {
         selftest_efb();
     else if (name == "tex")
         selftest_tex();
+    else if (name == "g3d")
+        selftest_g3d();
+    else if (name == "g3drender")
+        selftest_g3drender();
+    else if (name == "walk")
+        selftest_walk();
+    else if (name == "input")
+        selftest_input();
     else if (name == "all") {
+        selftest_input();  // (first: NOMA_INPUT is read once, at the first retrace, which a later test can reach)
         selftest_rfl();
         selftest_time();
         selftest_int64();
@@ -1280,6 +1294,8 @@ bool run_selftest(const std::string& name) {
         selftest_stack();
         selftest_efb();
         selftest_tex();
+        selftest_g3d();
+        selftest_g3drender();
     }
     else
         return false;

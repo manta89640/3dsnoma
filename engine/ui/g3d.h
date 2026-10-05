@@ -1,17 +1,19 @@
-// The channel's 3D pieces the Sound Player's stage is made of, with their arguments spelt out: the
-// studio set (g3d::Stage), the Miis (the room's actor manager, behaviours, bodies, faces), the
-// camera, and the guest memory and GX helpers the native amp needs.
+// The channel's 3D pieces the native scenes' stages are made of (first the Sound Player's), with
+// their arguments spelt out: the studio set (g3d::Stage), the Miis (the room's actor manager,
+// behaviours, bodies, faces), the camera, and the guest memory and GX helpers the native amp needs.
 //
 // Built as the channel's TV programme screen (scene::TvScene, ctor scene_TvScene_ctor, Update scene_TvScene_Update,
 // Draw scene_TvScene_Draw, dtor scene_TvScene_dtor) builds its studio and its caster, without its camera manager
 // (the stage's camera is written directly every frame).
 #pragma once
 
+#include <string>
+
 #include "engine/math/vecmath.h"
 #include "noma_decomp.h"
 #include "runtime/runtime.h"
 
-namespace engine::soundplayer::g3d {
+namespace engine::ui::g3d {
 
 // ---- guest memory
 
@@ -42,6 +44,18 @@ inline u32 new_aligned(u32 size) {
     u32 p = g::operator_new((size + 31) & ~31u);
     g::lib_allocator_ScopedAlignment_dtor(scope, (u32)-1);
     return p;
+}
+
+// The current heap's name and free bytes, when it is a lib::allocator::HeapStd (vtable
+// lib_allocator_HeapStd_HeapStdImpl_vtable at +0x8: blocks taken from both ends, +0x24 the low
+// end's top, +0x28 the high end's; +0x14 its name): for the logs of what a scene's parts cost and
+// give back (the heaps are stacks: a scene gone, the free bytes are what they were before it).
+inline u32 heap_free(std::string* name) {
+    u32 heap = guest::load32(guest::load32(GA_lib_allocator_HeapBase_sRoot) + 0x1C);
+    *name = guest::read_string(guest::load32(heap + 0x14), 16);
+    if (guest::load32(heap + 0x8) != GA_lib_allocator_HeapStd_HeapStdImpl_vtable)
+        return 0;
+    return guest::load32(heap + 0x28) - guest::load32(heap + 0x24);
 }
 
 // ---- g3d::Stage (0x118 bytes): a set from a .lex (BRRES) file in its own nw4r::g3d::ScnRoot.
@@ -79,25 +93,103 @@ inline void camera_set_frustum(u32 cam_word, f32 t, f32 b, f32 l, f32 r, f32 n, 
     g::nw4r_g3d_Camera_SetFrustum(cam_word, 0, t, b, l, r, n, f);
 }
 inline void camera_load_projection(u32 cam_word) { g::nw4r_g3d_Camera_GXSetProjection(cam_word); }  // GXSetProjection
+// The camera's whole view into GX, as nw4r::g3d's ScnRoot sets it before it draws (its frame setup
+// before DrawOpa): viewport (Camera::GXSetViewport), projection, scissor and the scissor's offset
+// (Camera::GXSetScissor, GXSetScissorBoxOffset). Native draws (engine/g3d native_draw.h) take the GX
+// viewport and scissor current at their command: emitted before the channel's g3d has drawn
+// anything in the frame, they would get the last 2D draw's (the island was cut away whole).
+inline void camera_load_view(u32 cam_word) {
+    g::nw4r_g3d_Camera_GXSetViewport(cam_word);
+    g::nw4r_g3d_Camera_GXSetProjection(cam_word);
+    g::nw4r_g3d_Camera_GXSetScissor(cam_word);
+    g::nw4r_g3d_Camera_GXSetScissorBoxOffset(cam_word);
+}
 inline void camera_view_matrix(u32 cam_word, u32 mtx) { g::nw4r_g3d_Camera_GetCameraMtx(cam_word, mtx); }
+// Camera::SetPerspective (nw4r_g3d_Camera_SetPerspective): a perspective about the picture's centre (vertical field of
+// view in degrees, width over height, near, far); also what ScnRoot's gather culls by
+inline void camera_set_perspective(u32 cam_word, f32 fovy, f32 aspect, f32 n, f32 f) {
+    g::nw4r_g3d_Camera_SetPerspective(cam_word, fovy, aspect, n, f);
+}
 
 // G3DState::Invalidate: g3d sends all its GX state again before its next draw
 inline void invalidate_gx_state() { g::nw4r_g3d_G3DState_Invalidate(); }
-// The stage's draw (g3d::Stage::Draw g3d_Stage_Draw), split around the opaque and the translucent
-// passes so that native drawing can go between them: dither on, the current camera's viewport set
-// to the whole screen by app::Renderer (app_Renderer_SetCameraViewport, app_Renderer_sInstance), ScnRoot::DrawOpa (nw4r_g3d_ScnRoot_DrawOpa)
-// ... ScnRoot::DrawXlu (nw4r_g3d_ScnRoot_DrawXlu).
-inline void stage_draw_opaque(u32 s) {
+// A root's draw as g3d::Stage::Draw (g3d_Stage_Draw) does it, split around the opaque and the
+// translucent passes so that native drawing can go between them: dither on, the current camera's
+// viewport set to the whole screen by app::Renderer (app_Renderer_SetCameraViewport,
+// app_Renderer_sInstance), ScnRoot::DrawOpa (nw4r_g3d_ScnRoot_DrawOpa) ... ScnRoot::DrawXlu
+// (nw4r_g3d_ScnRoot_DrawXlu). The viewport alone (root_viewport) is what a native draw before the
+// opaque pass needs.
+inline void root_viewport(u32 root) {
     GFRAME(0x10);
     g::GXSetDither(1);
-    GS(u32, 0x8) = current_camera(stage_root(s));
+    GS(u32, 0x8) = current_camera(root);
     g::app_Renderer_SetCameraViewport(guest::load32(GA_app_Renderer_sInstance), (u32)&GS(u32, 0x8));
-    invalidate_gx_state();
-    g::nw4r_g3d_ScnRoot_DrawOpa(stage_root(s));
 }
-inline void stage_draw_translucent(u32 s) {
+inline void root_draw_opaque(u32 root) {
+    root_viewport(root);
     invalidate_gx_state();
-    g::nw4r_g3d_ScnRoot_DrawXlu(stage_root(s));
+    g::nw4r_g3d_ScnRoot_DrawOpa(root);
+}
+inline void root_draw_translucent(u32 root) {
+    invalidate_gx_state();
+    g::nw4r_g3d_ScnRoot_DrawXlu(root);
+}
+inline void stage_draw_opaque(u32 s) { root_draw_opaque(stage_root(s)); }
+inline void stage_draw_translucent(u32 s) { root_draw_translucent(stage_root(s)); }
+
+// ---- a ScnRoot of one's own, with no set: what g3d::Stage makes for its set (g3d_Stage_Build, the
+// stage's build) less the set's model and animations, for a scene whose 3D the channel's g3d draws
+// only some of (the island: its Mii; the island itself is drawn natively).
+// ScnRoot::Construct (nw4r_g3d_ScnRoot_Construct) with a stage's sizes (0x80 children, 0x100 scene objects, 0x80
+// lights and light sets), through the MEMAllocator of the current heap (lib_allocator_GetCurrentMEMAllocator), as the stage.
+inline u32 root_construct() { return g::nw4r_g3d_ScnRoot_Construct(g::lib_allocator_GetCurrentMEMAllocator(), 0, 0x80, 0x100, 0x80, 0x80); }
+// The application's list of roots (g3d_RootList_sInstance, up to 8: it gives each a pass before every frame,
+// g3d_RootList_PreDraw): g3d_RootList_Add adds one, g3d_RootList_Remove takes it out.
+inline void root_register(u32 root) { g::g3d_RootList_Add(guest::load32(GA_g3d_RootList_sInstance), root); }
+inline void root_unregister(u32 root) { g::g3d_RootList_Remove(guest::load32(GA_g3d_RootList_sInstance), root); }
+// The g3d object a guest word points at destroyed once the GPU has drawn the frame that may still
+// use it (g3d_SafeDestroy: the application's draw waited for, then G3dObj::Destroy), the word cleared.
+inline void g3d_destroy(u32 word) { g::g3d_SafeDestroy(word); }
+// Its current camera 1, set up as the stage's: ScnRoot::SetCurrentCamera (nw4r_g3d_ScnRoot_SetCurrentCamera), the viewport
+// the whole frame buffer (Camera::SetViewport nw4r_g3d_Camera_SetViewport: the render mode's width and height,
+// app_VideoMode_sInstance's +0 +4 and +8; SetViewportZRange nw4r_g3d_Camera_SetViewportZRange 0..1), the TV's aspect (app_VideoMode_sInstance
+// +8: wide), near 1 and far 3588 until the scene sets its own.
+inline void root_camera_setup(u32 root) {
+    GFRAME(0x10);
+    g::nw4r_g3d_ScnRoot_SetCurrentCamera(root, 1);
+    u32 video = guest::load32(GA_app_VideoMode_sInstance), mode = guest::load32(video);
+    GS(u32, 0x8) = current_camera(root);
+    u32 cam = (u32)&GS(u32, 0x8);
+    g::nw4r_g3d_Camera_SetViewport(cam, 0.0, 0.0, (f64)guest::load16(mode + 0x4), (f64)guest::load16(mode + 0x8));
+    g::nw4r_g3d_Camera_SetViewportZRange(cam, 0.0, 1.0);
+    store_f32(GS(u32, 0x8) + 0xB0, guest::load8(video + 0x8) ? 16.0f / 9.0f : 4.0f / 3.0f);
+    store_f32(GS(u32, 0x8) + 0xB4, 1.0f);
+    store_f32(GS(u32, 0x8) + 0xB8, 3588.0f);
+}
+// The root's frame, as g3d::Stage's calc (g3d_Stage_Calc) less the stage's parts: ScnRoot::UpdateFrame
+// (nw4r_g3d_ScnRoot_UpdateFrame: animations a frame on), CalcWorld (nw4r_g3d_ScnRoot_CalcWorld), CalcView (nw4r_g3d_ScnRoot_CalcView),
+// GatherDrawScnObj (nw4r_g3d_ScnRoot_GatherDrawScnObj: what the camera sees, culled by its perspective), ZSort (nw4r_g3d_ScnRoot_ZSort).
+inline void root_calc(u32 root) {
+    g::nw4r_g3d_ScnRoot_UpdateFrame(root, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    g::nw4r_g3d_ScnRoot_CalcWorld(root, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    g::nw4r_g3d_ScnRoot_CalcView(root);
+    g::nw4r_g3d_ScnRoot_GatherDrawScnObj(root, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    g::nw4r_g3d_ScnRoot_ZSort(root, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+// ---- the 3D sound (0xDC bytes, what g3d::Stage keeps at +0x3C): nw4r's Sound3DManager (+0x0) and
+// Sound3DListener (+0x2C, its matrix kept at +0x98). The ctor (sound_Sound3D_ctor) makes it the one every
+// Sound3DActor is made with (sound_Sound3D_sInstance: a Mii's BodyController makes one for its sounds), the
+// dtor (sound_Sound3D_dtor) clears that again. The ctor takes the stage's path for its distances (none: the
+// room's and the TV studio's: interior 8, full volume within 400, unit 200).
+const u32 SOUND3D_SIZE = 0xDC;
+inline void sound3d_ctor(u32 s) { g::sound_Sound3D_ctor(s, 0); }
+inline void sound3d_dtor(u32 s) { g::sound_Sound3D_dtor(s, (u32)-1); }
+// the listener where the camera is (the stage's calc does it, sound_Sound3D_Update: Sound3DListener::SetMatrix
+// nw4r_snd_Sound3DListener_SetMatrix with the camera's view matrix)
+inline void sound3d_listen(u32 s, u32 cam_word) {
+    camera_view_matrix(cam_word, s + 0x98);
+    g::nw4r_snd_Sound3DListener_SetMatrix(s + 0x2C, s + 0x98);
 }
 
 // ResMdl::GetResNode(name) (nw4r_g3d_ResMdl_GetResNode): the MDL0 node's data, 0 if none. ResNodeData: +0x0C
@@ -152,13 +244,17 @@ inline u32 actor_heap(u32 a) { return guest::load32(a + 0x8); }
 inline u32 actor_face(u32 a) { return a + 0x44; }
 inline u32 actor_body(u32 a) { return a + 0x118; }
 inline u32 actor_age(u32 a) { return guest::load32(a + 0x210 + 0x10 + 0x8); }
-inline void actor_place(u32 a, f32 x, f32 z, f32 yaw) {
+inline void actor_place(u32 a, f32 x, f32 y, f32 z, f32 yaw) {
     u32 body = actor_body(a);
     store_f32(body + 0x4, x);
-    store_f32(body + 0x8, 0.0f);
+    store_f32(body + 0x8, y);
     store_f32(body + 0xC, z);
     store_f32(body + 0x10, yaw);
 }
+inline void actor_place(u32 a, f32 x, f32 z, f32 yaw) { actor_place(a, x, 0.0f, z, yaw); }
+// the actor's sex: its face's bit 31 (what room_BodyController's Move state picks its speeds by,
+// room_BodyController_IsMale, and the room its walks by)
+inline bool actor_female(u32 a) { return guest::load32(actor_face(a) + 0xC8) >> 31; }
 // mii_BodyCallback_GetHeightScale: the body's height scale (0.70 + 0.40 * height / 127), asked of its mii::BodyCallback
 // (body +0x4C, whose +0x4 is the body)
 inline f32 body_height_scale(u32 body) { return (f32)g::mii_BodyCallback_GetHeightScale(guest::load32(body + 0x4C)); }
@@ -188,4 +284,4 @@ inline void anim_set_rate(u32 obj, f32 rate) {
     gcall<u32>(guest::load32(guest::load32(obj) + 0x28), obj, (f64)rate);
 }
 
-}  // namespace engine::soundplayer::g3d
+}  // namespace engine::ui::g3d

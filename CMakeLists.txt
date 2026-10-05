@@ -58,14 +58,22 @@ endif()
 set(ENGINE_SOURCES
   engine/audio/aux.cpp
   engine/audio/ax_render.cpp
+  engine/collision/kcl.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
+  engine/g3d/anim.cpp
   engine/g3d/g3d.cpp
+  engine/g3d/material.cpp
+  engine/g3d/native_draw.cpp
+  engine/g3d/package.cpp
+  engine/g3d/texture.cpp
+  engine/g3d/world.cpp
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
   engine/lyt/quad.cpp
   engine/lyt/material.cpp
   engine/gx/gx_sdk.cpp
+  engine/gx/tev_combiner.cpp
   engine/lyt/textbox.cpp
   engine/math/libm.cpp
   engine/math/mtx.cpp
@@ -95,7 +103,22 @@ set(ENGINE_SOURCES
   engine/system/room_accessories.cpp
   engine/system/save.cpp
   engine/system/thread.cpp
+  engine/ui/bar_button.cpp
+  engine/ui/caption.cpp
+  engine/ui/confirm.cpp
+  engine/ui/list_window.cpp
+  engine/ui/menu.cpp
   engine/ut/font.cpp
+  engine/wuhu/bar_button.cpp
+  engine/wuhu/content_placeholder.cpp
+  engine/wuhu/follow_camera.cpp
+  engine/wuhu/island.cpp
+  engine/wuhu/island_load.cpp
+  engine/wuhu/island_mii.cpp
+  engine/wuhu/music.cpp
+  engine/wuhu/places.cpp
+  engine/wuhu/player.cpp
+  engine/wuhu/scene.cpp
 )
 
 # ---- the Wii runtime (memory, threads, interrupts, hardware and IOS emulation) ----
@@ -118,6 +141,7 @@ set(RUNTIME_SOURCES
   runtime/patches/vf.cpp
   runtime/patches/wii_parts.cpp
   runtime/patches/wiilink.cpp
+  runtime/patches/wipes.cpp
   runtime/hle/report.cpp
   runtime/trace.cpp
   runtime/profile.cpp
@@ -152,6 +176,7 @@ set(RUNTIME_SOURCES
 # the GPU emulation does per-pixel work: optimise it even in debug builds
 set_source_files_properties(runtime/hw/gx/raster.cpp runtime/hw/gx/texture.cpp
   runtime/hw/gx/vertex.cpp runtime/hw/gx/xform.cpp runtime/hw/gx/cp.cpp runtime/hw/gx/tnl.cpp
+  engine/g3d/soft_backend.cpp
   PROPERTIES COMPILE_OPTIONS -O2)
 
 if(NINTENDO_3DS)
@@ -167,16 +192,33 @@ if(NINTENDO_3DS)
     DEPENDS ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/gx.v.pica ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
     COMMENT "Assembling gx.v.pica"
     VERBATIM)
+  # the native g3d's (platform/3ds/g3d_pica.cpp)
+  set(G3D_SHBIN ${CMAKE_CURRENT_BINARY_DIR}/g3d.shbin)
+  set(G3D_SHBIN_C ${CMAKE_CURRENT_BINARY_DIR}/g3d_shbin.c)
+  add_custom_command(
+    OUTPUT ${G3D_SHBIN_C}
+    COMMAND ${PICASSO} -o ${G3D_SHBIN} ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/g3d.v.pica
+    COMMAND ${CMAKE_COMMAND} -DIN=${G3D_SHBIN} -DOUT=${G3D_SHBIN_C} -DNAME=g3d_shbin
+            -P ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
+    DEPENDS ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/g3d.v.pica ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
+    COMMENT "Assembling g3d.v.pica"
+    VERBATIM)
   # memcpy/memmove/memset for the ARM11 (LDM/STM, PLD): devkitARM's newlib has the generic C ones
   enable_language(ASM)
   add_executable(noma ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/3ds/main.cpp platform/3ds/gx_pica.cpp
-                 platform/3ds/mem_arm11.S ${GX_SHBIN_C})
+                 platform/3ds/g3d_pica.cpp platform/3ds/mem_arm11.S ${GX_SHBIN_C} ${G3D_SHBIN_C})
   target_include_directories(noma PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/platform/3ds ${DECOMP_DIR}/include ${CTRULIB}/include)
   target_link_libraries(noma noma_decomp citro3d ctru m)
 else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
-                           platform/host/selftest.cpp)
+                           platform/host/selftest.cpp platform/host/selftest_g3d.cpp platform/host/selftest_walk.cpp
+                           engine/g3d/package_writer.cpp
+                           engine/g3d/soft_backend.cpp platform/host/selftest_g3drender.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
   target_link_libraries(noma-host noma_decomp)
+  # ng3d-bake: a package's GX textures in their PICA formats, offline (tools/ng3d_bake.cpp)
+  add_executable(ng3d-bake tools/ng3d_bake.cpp engine/g3d/package.cpp engine/g3d/texture.cpp
+                           engine/g3d/package_writer.cpp)
+  target_include_directories(ng3d-bake PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime)
 endif()

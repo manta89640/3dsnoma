@@ -113,6 +113,10 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    Optionally `--rfl-db RFL_DB.dat` with the Mii database from your Wii's NAND
    (`/shared2/menu/FaceLib`); on the 3DS the Mii Selector makes one at the first start.
    For sound on the 3DS, ndsp needs `sdmc:/3ds/dspfirm.cdc` (dumped with DSP1).
+   Wuhu Island (work in progress) is made from your own Wii Sports Resort disc's files:
+   `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d`, baked with
+   the host build's `ng3d-bake` (build the host target first); [docs/wuhu.md](docs/wuhu.md) says
+   what goes into it.
 
 ## Running on the host
 
@@ -124,7 +128,7 @@ Useful environment variables:
 | --- | --- |
 | `NOMA_DUMP_FRAMES=N` | write every Nth displayed frame to `frames/NNNNN.png` |
 | `NOMA_DUMP_FROM=F` | draw nothing before displayed frame F (with `NOMA_DUMP_FRAMES`: a later screen reached at the game's own speed) |
-| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does) |
+| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does); buttons are `A B 1 2 + - H` and the D-pad's `U D L R`, and the 3DS's own `[L] [R] [ZL] [ZR]` (`5:[L]:2`); for native scenes (the island), `S(x;y)` tilts the stick (the circle pad in stick mode; -1..1, y up) and `C(x;y)` the camera stick (the C-stick), for the event's seconds when given (`4:S(0;1):2.5` walks forward 2.5 s), else until the next `S` (`C`); `S(0;0)` lets go |
 | `NOMA_DEBUG_MSG=1` | log each text (BMG message) the game asks for, the first time, with its id and the game time: the screens a run went through, without frames |
 | `NOMA_OFFLINE=0` | go online (the default is offline: no network, online steps skipped) |
 | `NOMA_PROFILE=seconds` | profiling builds (`-DNOMA_PROFILE_CALLS=ON`): where the time goes; `NOMA_PROFILE_TOP=N` lines per list, `NOMA_PROFILE_UNDER=name` also ranks what runs below that function |
@@ -141,8 +145,14 @@ Useful environment variables:
 | `NOMA_TRACE_BT=name,addr` | trace builds: the host stack (the guest's call chain) whenever those functions are entered |
 | `NOMA_TRACE_OPEN=/dev/...` | print the last traced calls when the guest opens that IOS path (trace builds) |
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
-| `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
+| `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
+| `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, the edge of a drop too deep to take, a ledge low enough to drop from, a slope too steep to stand on from above and from on it, the suspension bridge) and 20 minutes of random walking at two Mii sizes, every tick checked (on the ground, in no wall, no deep water, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale (10 and 9), `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
+| `NOMA_SELFTEST=g3drender` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | the host's software backend for native draws (`engine/g3d/soft_backend`): its depth against the GX path's on random triangles, then each `view_*` camera of the package drawn (both passes, under the GX state of a 640x456 frame) to `NOMA_G3D_OUT` (PNGs; default `g3drender`), timed, checked through the GX stream, compared with `tools/g3d/preview_views.py`'s renders of the same cameras when `NOMA_G3D_REF` names their directory (PSNR, pixels off, a difference picture), and the overlays drawn again under a range of depth biases (`NOMA_G3D_FOV`, `NOMA_G3D_FRAME`, `NOMA_G3D_VIEWS`) (host) |
+| `NOMA_SOFT3D_THREADS=N` | host: the threads the software backend draws native draws (the island) with (default: as many as the machine has, at most 8) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
+| `NOMA_WUHU_START=name`, `NOMA_WUHU_LOG_EVERY=N`, `NOMA_WUHU_PLACEHOLDER=1` | Wuhu Island: start at another of the package's markers (a landmark, a warp place, or a view preset such as `view_town`, the Mii then standing where it looks, the camera behind); the frame's line (fps, what was drawn, where the Mii is) every N frames instead of 600; the scene's shell over a sky-blue stand-in, without the island's package (`NOMA_WUHU_LOAD_MS` its loading time) |
+| `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
+| `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |
 | `NOMA_SLOWDOWN=us`, `NOMA_FS_WRITE_DELAY_US=us`, `NOMA_READ_MBPS=N` | slow guest code / file writes / content reads (to N MB/s) down to reproduce 3DS timing on the host |
 | `NOMA_IO_INLINE=1` | read the channel's contents and do the file system's requests on the CPU's thread instead of the I/O thread |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
@@ -164,6 +174,10 @@ The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button su
 `engine/system/home_button.cpp` keeps it from loading or opening. Closing the app from the HOME
 Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
 progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
+On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs), the
+C-stick (New 3DS) or L and R turn the camera round it, the D-pad's up and down tilt the camera and
+its left and right bring it in and out, Y brings it round behind the Mii; touch, START and B work
+the Home tab and the window that asks about going back.
 
 ## The Sound Player
 
@@ -185,7 +199,8 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
 - The household's Miis dance at a table in the TV programme's white studio, an amp beside them,
   every family member (one to eight) placed so that none hides another. The dances are the
   channel's own (the TV caster's, the DSi relay's, the messages' cheers), their frames set from
-  the music's sequencer every frame, so the moves land on the beat at any frame rate; paused or
+  the music's sequencer every frame, so the moves land on the beat at any frame rate, and change
+  every 8 bars (of 3 beats in the island's waltz, of 4 in the channel's pieces); paused or
   stopped, the Miis wait calmly. The amp is drawn by the port (no such model exists in the
   channel), its speaker and light pulsing on the beat.
 - Buttons: the pointer and A as everywhere; the D-pad's up and down move the list's highlight
@@ -204,7 +219,11 @@ what each Mii plays, every frame.
 - `engine/` — native 3DS code in place of the program's SDK functions (the base of the engine
   the port is becoming): `os/` (interrupts, clock), `cw/` (compiler runtime helpers), `input/`
   (the controls), `audio/` (the AX voices), `system/` (threads, the HOME Button Menu left out,
-  scenes written in native code), `soundplayer/` (the Sound Player).
+  scenes written in native code), `ui/` (what the native scenes share: the channel's layouts,
+  buttons, wipes and 3D pieces as they use them, pictures made at run time), `soundplayer/` (the
+  Sound Player), `wuhu/` (walkable Wuhu Island, in progress: `docs/wuhu_design.md`; the bar's 出発
+  button, the scene and its exploration menu, the island's loading, the Mii walking it, its collision
+  and camera).
 - `runtime/` — the Wii below the program: memory, threads, interrupts, CPU intrinsics,
   devices (`hw/`: PI, VI, DSP, AI, EXI, SI, IPC, GX in `hw/gx/`), IOS (`hw/ios/`: file system,
   ES, USB HID with nothing plugged in, ...); `patches/` changes what
@@ -214,4 +233,11 @@ what each Mii plays, every frame.
 - `platform/host`, `platform/3ds` — entry points, presentation, input; `gx_pica.cpp` is the GX
   renderer on the 3DS GPU.
 - `tools/` — WAD extraction, signature inference, the decompilation driver.
+- `tools/music/` — the port's own music: the island's score (`hiroi_sekai.py`: 「広い世界へ」, a
+  stately 3/4 at 108 bpm on the channel's orchestral instruments, D major rising to E), an RSEQ
+  assembler, disassembler and score compiler (`rseq.py`; `rseq.py header` makes
+  `engine/wuhu/hiroi_sekai_seq.h`), a reader of the channel's sound archive and a model of its
+  sequencer (`brsar.py`), a preview renderer with the channel's own instruments (`sndrender.py`),
+  checks of a score and of a recording of the port playing it (`check.py`, `dump_check.py`). They
+  read the channel's `snd/douga.brsar` from your own extraction.
 - `config/HCIJ` — dtk configuration and symbols.

@@ -20,6 +20,8 @@
 #include <sys/stat.h>
 
 #include "runtime/hw/gx/raster.h"
+#include "engine/g3d/native_draw.h"
+#include "engine/g3d/soft_backend.h"
 #include "engine/input/remote.h"
 #include "runtime/runtime.h"
 
@@ -154,14 +156,25 @@ bool platform_audio_thread_start(void (*fn)()) {
     std::thread(fn).detach();
     return true;
 }
+// (the host's cores are many: the OS's own priority is fine)
+bool platform_worker_start(void (*fn)(void*), void* arg) {
+    std::thread(fn, arg).detach();
+    return true;
+}
+
+static std::string s_data_dir = "data";
+const std::string& data_dir() { return s_data_dir; }
+
+bool platform_native_memory(u32*, u32*) { return false; }
 
 // NOMA_INPUT (runtime/hw/ios/input_script.cpp): scripted Wii Remote input
 static void scripted_input() {
     if (!input_script_active())
         return;
     static WiimoteInput in;
-    in.buttons = 0;
+    in.buttons = in.pad = 0;
     in.pointing = true;
+    in.stick_x = in.stick_y = in.cam_x = in.cam_y = 0;
     input_script_apply(in);
     wiimote_set_input(in);
 }
@@ -206,6 +219,8 @@ struct HostRenderer : SoftRenderer {
         if (drawing)
             SoftRenderer::draw(prim, vat, count, data);
     }
+    // (a native draw in a frame not drawn is only retired)
+    void native(u32 id) override { engine::g3d::native_draw_execute(id, drawing); }
     void efb_copy(u32 value) override {
         if (!(value & 0x4000) && !texture_copies) {  // (bit 14: a copy to the frame buffer)
             texture_copies = true;
@@ -217,6 +232,8 @@ struct HostRenderer : SoftRenderer {
     }
 };
 static HostRenderer s_renderer;
+// native draws (the native g3d's World) into the same EFB, at their place in the GX stream
+static engine::g3d::SoftBackend s_native_backend;
 
 // NOMA_DUMP_FRAMES=N: every Nth displayed frame goes to frames/NNNNN.png; NOMA_DUMP_FROM=F: none
 // drawn before displayed frame F (a run that only needs a later screen gets there at the game's
@@ -288,6 +305,7 @@ int main(int argc, char** argv) {
         if (a == "--data" && i + 1 < argc)
             data = argv[++i];
     }
+    guest::s_data_dir = data;
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");
     std::vector<u8> dol = read_file(data + "/main.dol");
     if (dol.empty()) {
@@ -305,8 +323,10 @@ int main(int argc, char** argv) {
         return guest::run_selftest(t) ? 0 : 2;
     guest::ios_init(data + "/nand", data + "/content");
     guest::hw_init();
-    if (!getenv("NOMA_NO_RENDER"))
+    if (!getenv("NOMA_NO_RENDER")) {
         guest::gx_set_renderer(&guest::s_renderer);
+        engine::g3d::native_draw_set_backend(&guest::s_native_backend);
+    }
     guest::threads_init();
     guest::profile_start();
     noma_start_guest();

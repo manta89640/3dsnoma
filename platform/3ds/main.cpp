@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "g3d_pica.h"
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
@@ -538,8 +539,71 @@ bool platform_io_thread_start(void (*fn)()) {
     return true;
 }
 
+// ---- workers (platform_worker_start): below the main thread in priority, on the GPU thread's core
+// (the New 3DS's third, else the system core), which is mostly idle while a scene loads under a
+// black screen; on the main thread's core, in its waits, where that can't be had. Each has its own
+// stack for the exception handler, freed with it.
+struct Worker {
+    void (*fn)(void*);
+    void* arg;
+    alignas(8) u8 exception_stack[16 << 10];
+};
+bool platform_worker_start(void (*fn)(void*), void* arg) {
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    bool n3ds = false;
+    APT_CheckNew3DS(&n3ds);
+    Worker* w = new Worker;
+    w->fn = fn, w->arg = arg;
+    auto body = [](void* p) {
+        Worker* w = (Worker*)p;
+        threadOnException(on_arm_exception, w->exception_stack + sizeof(w->exception_stack),
+                          WRITE_DATA_TO_HANDLER_STACK);
+        w->fn(w->arg);
+        delete w;
+    };
+    const int below = prio < 0x3F ? prio + 1 : prio;
+    Thread t = threadCreate(body, w, 64 * 1024, below, n3ds ? 2 : 1, true);
+    if (!t)
+        t = threadCreate(body, w, 64 * 1024, below, -2, true);
+    if (!t) {
+        delete w;
+        return false;
+    }
+    return true;
+}
+
+const std::string& data_dir() {
+    static const std::string s_dir = DATA_DIR;
+    return s_dir;
+}
+
+bool platform_native_memory(u32* heap_free, u32* linear_free) {
+    *heap_free = __ctru_heap_size - (u32)mallinfo().uordblks;
+    *linear_free = (u32)linearSpaceFree();
+    return true;
+}
+
 // ---- input: the 3DS controls as a Wii Remote
 static WiimoteInput s_in;
+
+// A stick (the circle pad, the C-stick: about 156 from the centre at the rim) as -1..1, y up: nothing
+// within `dead` of the centre (a pad at rest isn't quite centred), and from there out to the rim
+// the whole range, so a slight tilt is a slow walk rather than a jump to a fifth of full speed.
+// A real circle pad doesn't come back to its centre exactly: let go after a push to the top left,
+// it can rest 20 or so off it (with a dead zone of 20 the pointer crept on, and never left the
+// screen), so it has 40; the C-stick 20. (The emulator's pads come back to 0.)
+static const float CPAD_DEAD = 40.0f, CSTICK_DEAD = 20.0f;
+static void read_stick(const circlePosition& c, float dead, float* x, float* y) {
+    const float rim = 156.0f;
+    float m = sqrtf((float)c.dx * c.dx + (float)c.dy * c.dy);
+    if (m <= dead) {
+        *x = *y = 0;
+        return;
+    }
+    float s = std::min((m - dead) / (rim - dead), 1.0f) / m;
+    *x = (float)c.dx * s, *y = (float)c.dy * s;
+}
 
 static void poll_input() {
     hidScanInput();
@@ -556,28 +620,43 @@ static void poll_input() {
     if (held & KEY_DLEFT) b |= WM_LEFT;
     if (held & KEY_DRIGHT) b |= WM_RIGHT;
     s_in.buttons = b;
+    // L, R and (New 3DS) ZL, ZR for native scenes: libctru's hidInit starts the New 3DS's irrst
+    // service, and hidScanInput merges its ZL, ZR and C-stick into the keys
+    u16 pad = 0;
+    if (held & KEY_L) pad |= PAD_L;
+    if (held & KEY_R) pad |= PAD_R;
+    if (held & KEY_ZL) pad |= PAD_ZL;
+    if (held & KEY_ZR) pad |= PAD_ZR;
+    s_in.pad = pad;
     if (held & KEY_TOUCH) {
         touchPosition t;
         hidTouchRead(&t);
         s_in.x = (float)t.px / 160.0f - 1.0f;
         s_in.y = (float)t.py / 120.0f - 1.0f;
     }
-    // The circle pad moves the pointer too, from the edge of a dead zone on (speed 0 there, the
-    // same as before at full tilt). A real circle pad doesn't come back to its centre exactly: let
-    // go after a push to the top left, it can rest 20 or so off it, and the old dead zone of 20 let
-    // the pointer creep on (and never leave the screen). The emulator's pad comes back to 0.
-    const float CPAD_MAX = 156.0f, CPAD_DEAD = 40.0f;
+    // the circle pad: the stick in stick mode, else it moves the pointer (at full tilt 0.03 of the
+    // screen a frame, as before; slower from the dead zone's edge in)
     circlePosition c;
     hidCircleRead(&c);
-    const float mag = std::sqrt((float)(c.dx * c.dx + c.dy * c.dy));
-    bool nudged = mag > CPAD_DEAD;
+    float cx, cy;
+    read_stick(c, CPAD_DEAD, &cx, &cy);
+    bool nudged = false;
+    if (input_stick_mode()) {
+        s_in.stick_x = cx, s_in.stick_y = cy;
+    } else {
+        s_in.stick_x = s_in.stick_y = 0;
+        nudged = cx != 0 || cy != 0;
+    }
     if (nudged) {
-        const float k = (std::min(mag, CPAD_MAX) - CPAD_DEAD) / (CPAD_MAX - CPAD_DEAD) * 0.03f / mag;
-        s_in.x += (float)c.dx * k;
-        s_in.y -= (float)c.dy * k;
+        s_in.x += cx * 0.03f;
+        s_in.y -= cy * 0.03f;
         s_in.x = s_in.x < -1 ? -1 : s_in.x > 1 ? 1 : s_in.x;
         s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
     }
+    // the camera stick: the New 3DS's C-stick (an old 3DS reads it as centred)
+    circlePosition cs;
+    hidCstickRead(&cs);
+    read_stick(cs, CSTICK_DEAD, &s_in.cam_x, &s_in.cam_y);
     // The pointer stays where the stylus left it, so a menu that opens while the pointer is over
     // it (the room's その他 panel) never closed, and buttons stayed highlighted. A Wii Remote put
     // down or pointed away has no pointer, and the room hides its menus: here the pointer leaves
@@ -774,6 +853,10 @@ int main(int argc, char** argv) {
     if (pica.init()) {
         guest::s_gpu = true;
         guest::gx_set_renderer(&pica);
+        // the native g3d draws into the GPU renderer's frame (not with the software renderer, whose
+        // native draws have no backend: their packets are only retired)
+        if (engine::g3d::Backend* g3d = guest::g3d_pica_backend())
+            engine::g3d::native_draw_set_backend(g3d);
     } else {
         printf("GPU renderer unavailable: software rendering\n");
         guest::gx_set_renderer(&soft);

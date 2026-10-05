@@ -35,11 +35,14 @@
 #include <utility>
 #include <vector>
 
-#include "engine/soundplayer/game.h"
-#include "engine/soundplayer/lyt.h"
 #include "engine/system/host_scene.h"
+#include "engine/ui/game.h"
+#include "engine/ui/lyt.h"
 
 namespace engine::soundplayer {
+
+namespace game = engine::ui::game;
+namespace lyt = engine::ui::lyt;
 
 using namespace lyt;
 

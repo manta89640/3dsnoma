@@ -1,0 +1,177 @@
+; The native g3d's vertex shader (platform/3ds/g3d_pica.cpp: the PICA backend of engine/g3d).
+;
+; A vertex arrives as a package's vertex buffer holds it: position (f32, model space, moved at
+; upload to an origin of the buffer's own so that the GPU's 24-bit floats keep their precision),
+; normal (s8, x127; w is padding), colour (u8) and up to two texture coordinates (s16 or f32,
+; unscaled: the scale is folded into the texture matrices). An attribute the buffer lacks comes as a
+; fixed value. The CPU does what is the same for a whole draw, as for gx_pica.cpp's GX shader: the
+; model-view-projection with the GX projection and the 3DS's rotated 240x400 target folded in, the
+; normal matrix, the lights in view space, and the texture matrices with the coordinates' scale, the
+; texture's padding and nw4r's env and projection mappings folded into them. Here:
+;   * clip position = mvp . (position, 1);
+;   * colour channel 0 as GX computes it: the material colour from the register or the vertex
+;     (selmat: 1 where the vertex colour is used), and where the channel is lit (sellit) times
+;     clamp(ambient + the sum over the light set's lights of N.L (clamped, signed, or 1: lcfg) x
+;     the light's colour), the ambient from the register (the light set's) or the vertex;
+;   * per texture unit either a source -- the vertex's uv0 or uv1, or its view-space normal (tsel's
+;     weights) -- as (s, t, 1, 1) through the unit's first two matrix rows, or the position
+;     through all three (s, t, q: projection mapping). Unit 0's q goes out as texcoord0w and the GPU
+;     divides per pixel (the texture's type is GPU_TEX_PROJECTION): exact across the sea's
+;     80,000-unit triangles, where a divide per vertex warps the projected light. Units 1 and 2
+;     have no such output and divide per vertex (none of the island's materials projects there).
+; Every component of every output is written on every path, outside ifu/for: a real PICA never
+; finishes a draw whose shader leaves one unwritten, even one the output map drops
+; (tools/check_shader_outputs.py, run by platform/3ds/package.sh, keeps it so).
+
+; ---- uniforms (the CPU finds them by name)
+.fvec mvp[4]               ; clip-space rows: the PICA's clip space (GX projection, viewport, 3DS target)
+.fvec nmtx[3]              ; model -> view rows for normals (the model-view's 3x3 cofactors)
+.fvec matc                 ; material colour where it comes from the register (else 0), 0-1
+.fvec selmat               ; 1 per component: material colour from the vertex
+.fvec ambc                 ; ambient where it comes from the register or the light set (else 0)
+.fvec selamb               ; 1 per component: ambient from the vertex
+.fvec sellit               ; 1 per component: lit (the light sum applies)
+.fvec lcfg                 ; x: diffuse floor (0 clamped, -2 signed); y: 1 if N.L is used; z: 1 - y
+.fvec tsel[3]              ; per unit: the weights of uv0 (x), uv1 (y) and the view normal (z)
+.fvec tmtx[9]              ; per unit three rows: s, t (of the source, or of the position) and q
+.fvec lights[16]           ; per light: the direction toward it (view space, unit), its colour (0-1)
+; (w: a floor for a squared length before its rsq: the GPU's floats have a 7-bit exponent, the
+; smallest above 0 is 2^-62, and 1e-30 would be 0, rsq of it infinite and a zero normal NaN)
+.constf consts(0.0, 1.0, 0.00392156862745098, 1e-18)
+
+.ivec nlights              ; x: lights - 1; y: 0; z: 2 (the loop steps a light)
+
+.bool lit                  ; b0: the channel is lit
+.bool haslights            ; b1: ... with lights (else ambient only)
+.bool usenrm               ; b2: the view-space normal is needed (lighting, env mapping)
+.bool proj0, proj1, proj2  ; b3-b5: the unit's coordinates from the position (s, t, q)
+.bool tc1on, tc2on         ; b6-b7: units 1 and 2 are used
+
+; ---- inputs
+.alias pos v0              ; model-space position, from the buffer's origin
+.alias nrm v1              ; normal x127 (w: padding)
+.alias clr v2              ; colour 0, 0-255 per component
+.alias uv0 v3              ; texture coordinates, unscaled
+.alias uv1 v4
+
+; ---- outputs
+.out opos position
+.out oclr color
+.out otc0 texcoord0.xy
+.out -    texcoord0w otc0.z
+.out otc1 texcoord1
+.out otc2 texcoord2
+
+; s, t over q (q = 0 counts as 1, as the GX does): r13 in and out
+.proc divide_q
+  cmp consts.xx, eq, eq, r13.zz
+  ifc cmp.x
+    mov r13.z, consts.yyyy
+  .end
+  rcp r14.x, r13.z
+  mul r13.xy, r14.xxxx, r13
+.end
+
+.proc main
+  ; ---- position
+  mov r0.xyz, pos
+  mov r0.w, consts.yyyy
+  dp4 opos.x, mvp[0], r0
+  dp4 opos.y, mvp[1], r0
+  dp4 opos.z, mvp[2], r0
+  dp4 opos.w, mvp[3], r0
+
+  ; ---- the view-space normal, normalised (0 when nothing needs it)
+  mov r1, consts.xxxx
+  ifu usenrm
+    dp3 r1.x, nmtx[0], nrm
+    dp3 r1.y, nmtx[1], nrm
+    dp3 r1.z, nmtx[2], nrm
+    dp3 r2.x, r1, r1
+    max r2.x, consts.wwww, r2.x
+    rsq r2.x, r2.x
+    mul r1.xyz, r2.xxxx, r1
+  .end
+
+  ; ---- colour 0: material (register or vertex), lit where the channel is lit
+  mul r2, consts.zzzz, clr
+  mul r3, selmat, r2
+  add r3, matc, r3
+  ifu lit
+    ; ambient, then the lights
+    mul r4, selamb, r2
+    add r4, ambc, r4
+    ifu haslights
+      for nlights
+        dp3 r5.x, lights[aL], r1
+        max r5.x, lcfg.xxxx, r5.x
+        mul r5.x, lcfg.yyyy, r5.x
+        add r5.x, lcfg.zzzz, r5.x
+        mad r4, r5.xxxx, lights[aL+1], r4
+      .end
+    .end
+    ; clamp, and 1 where the channel is not lit: 1 + (sum - 1) * sellit
+    max r4, consts.xxxx, r4
+    min r4, consts.yyyy, r4
+    add r4, -consts.yyyy, r4
+    mul r4, sellit, r4
+    add r4, consts.yyyy, r4
+    mul r3, r3, r4
+  .end
+  mov oclr, r3
+
+  ; ---- unit 0: the source through rows 0-1 (q = 1), or the position through rows 0-2 (q for
+  ; the GPU's divide)
+  mul r12, tsel[0].xxxx, uv0
+  mad r12, uv1, tsel[0].yyyy, r12
+  mad r12, r1, tsel[0].zzzz, r12
+  mov r12.zw, consts.yyyy
+  dp4 r13.x, tmtx[0], r12
+  dp4 r13.y, tmtx[1], r12
+  mov r13.zw, consts.xxyx
+  ifu proj0
+    dp4 r13.x, tmtx[0], r0
+    dp4 r13.y, tmtx[1], r0
+    dp4 r13.z, tmtx[2], r0
+  .end
+  mov otc0, r13
+
+  ; ---- unit 1 (0 when unused): as unit 0, a projection divided here
+  mov r13, consts.xxxx
+  ifu tc1on
+    mul r12, tsel[1].xxxx, uv0
+    mad r12, uv1, tsel[1].yyyy, r12
+    mad r12, r1, tsel[1].zzzz, r12
+    mov r12.zw, consts.yyyy
+    dp4 r13.x, tmtx[3], r12
+    dp4 r13.y, tmtx[4], r12
+    ifu proj1
+      dp4 r13.x, tmtx[3], r0
+      dp4 r13.y, tmtx[4], r0
+      dp4 r13.z, tmtx[5], r0
+      call divide_q
+    .end
+  .end
+  mov r13.zw, consts.xxxx
+  mov otc1, r13
+
+  ; ---- unit 2 (0 when unused), as unit 1
+  mov r13, consts.xxxx
+  ifu tc2on
+    mul r12, tsel[2].xxxx, uv0
+    mad r12, uv1, tsel[2].yyyy, r12
+    mad r12, r1, tsel[2].zzzz, r12
+    mov r12.zw, consts.yyyy
+    dp4 r13.x, tmtx[6], r12
+    dp4 r13.y, tmtx[7], r12
+    ifu proj2
+      dp4 r13.x, tmtx[6], r0
+      dp4 r13.y, tmtx[7], r0
+      dp4 r13.z, tmtx[8], r0
+      call divide_q
+    .end
+  .end
+  mov r13.zw, consts.xxxx
+  mov otc2, r13
+  end
+.end

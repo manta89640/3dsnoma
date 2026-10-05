@@ -11,13 +11,17 @@
 // The room's bar also gets a sixth button, the Sound Player's (engine/soundplayer), in いろんな間's
 // place, いろんな間 moving into the shop's; the Sound Player's scene factory is made with the
 // application's (app_SceneFactories_ctor), and SceneTransit::Go (controller_living_SceneTransit_Go) opens the Sound Player for the
-// button's own To.
+// button's own To. Offline, a seventh, 出発, takes the hidden TV programmes' place at the bar's right
+// end: the way to Wuhu Island (engine/wuhu), made the same way.
 
 #include "engine/math/vecmath.h"
-#include "engine/soundplayer/lyt.h"
+#include "engine/ui/lyt.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
 #include "engine/system/save.h"
+#include "engine/wuhu/bar_button.h"
+#include "engine/wuhu/music.h"
+#include "engine/wuhu/wuhu.h"
 #include "hw/ios/net.h"
 #include "noma_decomp.h"
 
@@ -134,11 +138,11 @@ void layout_option_Option_ctor(u32 r3, u32 r4, u32 r5) {
     // which kept to the map's right, across the button's picture (Pic_Btn, its parent) less the
     // ends, so the label fits on one line, centred
     if (u32 text = find_pane(r3 + OPTION_AREA, "Text_Btn")) {
-        engine::soundplayer::lyt::text_reserve(text, 16);
-        engine::soundplayer::lyt::set_text(text, u"セーブデータの消去");
+        engine::ui::lyt::text_reserve(text, 16);
+        engine::ui::lyt::set_text(text, u"セーブデータの消去");
         if (u32 btn = find_pane(r3 + OPTION_AREA, "Pic_Btn")) {
-            engine::soundplayer::lyt::move(text, 0, engine::math::load_f32(text + 0x30));
-            engine::soundplayer::lyt::resize(text, engine::math::load_f32(btn + 0x4C) - 40, engine::math::load_f32(text + 0x50));
+            engine::ui::lyt::move(text, 0, engine::math::load_f32(text + 0x30));
+            engine::ui::lyt::resize(text, engine::math::load_f32(btn + 0x4C) - 40, engine::math::load_f32(text + 0x50));
         }
     }
     if (u32 map = find_pane(r3 + OPTION_AREA, "Pic_Area"))
@@ -176,7 +180,7 @@ u32 app_SystemPrompt_OpenPending(u32 r3) {
     void_function(no_fn, no_imp, guest::host_fn(&erase_no));
     GS(u8, 0x50) = 0, GS(u8, 0x54) = 0;
     const u32 yes = lib_Message_Get((u32)&GS(u8, 0x50), 1), no = lib_Message_Get((u32)&GS(u8, 0x54), 2);
-    app_SystemPrompt_Ask(r3, engine::soundplayer::lyt::Text(u"セーブデータを消して、はじめからにします。\nよろしいですか？"), yes,
+    app_SystemPrompt_Ask(r3, engine::ui::lyt::Text(u"セーブデータを消して、はじめからにします。\nよろしいですか？"), yes,
                          yes_fn, no, no_fn);
     guest::log("options: the save data's question asked");
     return 1;
@@ -209,6 +213,12 @@ u32 controller_theater_LayoutController_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
 // The way back (Common/Wii_Btn.lex) went to the Wii Menu, and ends the app here: its back arrow
 // stays, the "Wii" logo under it goes (Pic_Wii and its shadow Pic_Shadow; the button's animations
 // change their colours, not whether they're shown).
+// Offline, where the TV programmes' button is hidden, 出発 (engine/wuhu) hangs from its locator
+// (Loc_Tv_Btn) and is made from its layout (Move_Btn_Tv_Btn.lex, the bar's right end cap, its face
+// running off the screen's edge), so the bar has its five places filled as online, 出発 rising last
+// in the bar's opening. The hidden button stays where it is, inactive (not hit-tested: the cursor
+// finds 出発, over it); the bar never makes its buttons active again. Online the bar is left as the
+// channel has it (there is no free place).
 void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     layout_living_MoveBtn_ctor_orig(r3, r4, r5, r6, r7);
     enum : u32 { SHOP = 1, IRONNA = 2, TV = 3, BACK = 4 };
@@ -233,20 +243,34 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     layout_living_MoveBtn_AddTransitButton(r3, GA_layout_living_MoveBtn_sData + 0x1D0, r4, GA_layout_living_MoveBtn_sData + 0x1F8, r5, r7, TO_SOUND_PLAYER);
     if (guest::load32(r3 + 0xD08) > BACK + 1)
         engine::soundplayer::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 1)));
+    // ("layout/Move_Btn/Move_Btn_Tv_Btn.lex", "Loc_Tv_Btn": the bar's own strings again)
+    if (guest::net_offline()) {
+        layout_living_MoveBtn_AddTransitButton(r3, GA_layout_living_MoveBtn_sData + 0x208, r4, GA_layout_living_MoveBtn_sData + 0x22C, r5, r7, engine::wuhu::TO_ISLAND);
+        if (guest::load32(r3 + 0xD08) > BACK + 2)
+            engine::wuhu::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 2)));
+    }
 }
 
 // The application's scene factories, made at the start (one block of them): the Sound Player's
-// is made with them (engine/soundplayer: its guest objects last as long as the program).
+// and the island's are made with them (engine/soundplayer, engine/wuhu: their guest objects last
+// as long as the program), and the island's music puts its sequence into guest memory
+// (engine/wuhu/music.cpp).
 void app_SceneFactories_ctor(u32 r3) {
     app_SceneFactories_ctor_orig(r3);
     engine::soundplayer::boot();
+    engine::wuhu::boot();
+    engine::wuhu::music_boot();
 }
 
 // controller::living::SceneTransit::Go(To): the scene a room bar button leads to, once the room
-// has been wiped out. The Sound Player's button asks for its own To.
+// has been wiped out. The Sound Player's button and 出発 ask for their own To.
 u32 controller_living_SceneTransit_Go(u32 r3, u32 r4) {
     if (r4 == TO_SOUND_PLAYER) {
         engine::system::change_scene(engine::soundplayer::scene_factory());
+        return 0;
+    }
+    if (r4 == engine::wuhu::TO_ISLAND) {
+        engine::system::change_scene(engine::wuhu::scene_factory());
         return 0;
     }
     return controller_living_SceneTransit_Go_orig(r3, r4);

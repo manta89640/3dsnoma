@@ -21,6 +21,7 @@
 #include "engine/soundplayer/music.h"
 
 #include "engine/math/vecmath.h"
+#include "engine/wuhu/music.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
@@ -119,6 +120,7 @@ PlayState Music::state() const {
 
 Beat Music::beat() const {
     Beat b;
+    b.bar = engine::wuhu::music_bar_beats(current());
     u32 seq = sequence_in(slot());
     if (!seq || state() != PlayState::PLAYING)
         return b;

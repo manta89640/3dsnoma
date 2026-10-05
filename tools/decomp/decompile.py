@@ -224,12 +224,19 @@ PATCHED_NAMES = {
     # the room bar's Sound Player button leads to its scene, made with the channel's own scene
     # factories at the start (runtime/patches/menus.cpp, engine/soundplayer)
     "controller_living_SceneTransit_Go", "app_SceneFactories_ctor",
+    # the way to Wuhu Island and back in black (runtime/patches/wipes.cpp, engine/wuhu):
+    # SceneTransit::Request, layout::parts::Wipe's Out and In
+    "controller_living_SceneTransit_Request", "layout_parts_Wipe_Out", "layout_parts_Wipe_In",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",
     # the way out timed by the clock, not in frames: its fade and wait took 4x as long at 15 fps
     # (runtime/patches/wii_parts.cpp)
     "app_Exit_Update",
+    # the island's music (engine/wuhu/music.cpp): sound::SoundManager's start plays the port's own
+    # sequence for its virtual ID (to be named sound_SoundManager_StartSound); the BGM manager's
+    # frame step (sound_BGMManager_Update) runs the music test (NOMA_WUHU_MUSIC_TEST)
+    "sound_SoundManager_StartSound", "sound_BGMManager_Update",
 }
 
 # bump to invalidate the m2c cache when the asm rewriting changes

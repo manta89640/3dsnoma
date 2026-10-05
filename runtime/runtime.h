@@ -75,6 +75,18 @@ bool platform_audio_thread_start(void (*fn)());
 // The I/O thread, which reads the channel's contents for IOS (runtime/hw/ios/ios.cpp) while the
 // guest runs on; false where it can't start (reads are then done at once).
 bool platform_io_thread_start(void (*fn)());
+// A worker for a long piece of native work the guest mustn't wait for (a scene's load: reading a big
+// file, building what it needs from it), running fn(arg) once and ending: below the guest's thread
+// in priority, so that the guest (its sound thread with it) runs on and the work goes on while it
+// waits; on the 3DS on the GPU thread's core. False where none can start (the caller then does the
+// work itself).
+bool platform_worker_start(void (*fn)(void*), void* arg);
+// where the program's data is: the host's --data folder, the 3DS's sdmc:/3ds/noma (main.dol,
+// content/, nand/, and the port's own data such as wuhu/island.ng3d)
+const std::string& data_dir();
+// the native heap's and the GPU-visible (linear) memory's free bytes, for logs; false where the
+// platform doesn't count them (the host)
+bool platform_native_memory(u32* heap_free, u32* linear_free);
 // a wake-up between host threads: one waiting thread wakes per signal (or at the timeout)
 struct HostSignal;
 HostSignal* platform_signal_new();

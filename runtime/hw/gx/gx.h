@@ -4,7 +4,8 @@
 // main memory at the PI FIFO write pointer. When that FIFO is also the GPU's (linked mode) the
 // command processor executes them; otherwise they are a display list being recorded, executed
 // later by a CALL_DL command. fifo.cpp moves the bytes, cp.cpp decodes the command stream and
-// keeps the GPU's register state, a renderer (gx_render.h) draws.
+// keeps the GPU's register state, a renderer (GxRenderer below) draws. One command is ours, not
+// GX's: 0x50 + a big-endian u32, a native draw (engine/g3d/native_draw.h).
 #pragma once
 #include <algorithm>
 
@@ -99,6 +100,12 @@ struct GxRenderer {
     // the platform hands its GPU to the system for a while (an applet such as the keyboard):
     // what was drawn so far goes to the GPU, and nothing is left open
     virtual void suspend() {}
+    // our own command 0x50 (not GX's): a native draw lands here, at its place in the stream
+    // (engine/g3d/native_draw.h): the renderer brings its state up to date, calls
+    // engine::g3d::native_draw_execute(id), and takes nothing it cached about the GPU's state as
+    // still true afterwards. Without a renderer the packet is never executed (native_draw takes it
+    // back later).
+    virtual void native(u32 id) {}
 };
 void gx_set_renderer(GxRenderer* r);
 // Before the platform runs an applet that takes over the GPU and the screens (the 3DS keyboard):
@@ -112,6 +119,8 @@ void gx_fifo_init();
 void gx_pi_fifo_write(u32 off, u32 value, int size);  // PI 0x0C/0x10/0x14: CPU FIFO base/end/wptr
 u32 gx_pi_fifo_read(u32 off);
 void gx_run();  // execute whatever the GPU's FIFO holds now (also called from device polls)
+// let the GPU's thread finish what it was given (no-op where the decoder runs inline)
+void gx_sync();
 
 // cp.cpp: decode the commands in [p, p+n) in a row; returns bytes used (less than n when the
 // last command is cut off: the rest waits for its tail)
@@ -126,6 +135,7 @@ u32 gx_display_list_offset();
 // what the decoder has executed so far (totals; a renderer's statistics take differences)
 struct GxDecodeCounts {
     u32 draws, vertices, bp, cp, xf, dl;
+    u32 native;  // native draw commands (0x50)
 };
 GxDecodeCounts gx_decode_counts();
 
