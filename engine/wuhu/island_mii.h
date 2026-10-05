@@ -50,15 +50,19 @@ public:
     // the TV's width over height (16:9 or 4:3), the camera's aspect
     f32 aspect() const { return aspect_; }
 
-    // the NPC: there (spawned); his height scale; where he stands (guest units, facing yaw degrees),
-    // from the next update on
+    // the NPC: there (spawned); his height scale; where he stands (guest units, facing yaw degrees,
+    // his height in guest units), from the next update on
     bool npc_present() const { return npc_actor_ != 0; }
     f32 npc_height_scale() const { return npc_height_scale_; }
-    void place_npc(engine::math::Vec3 at, f32 yaw) { npc_at_ = at, npc_yaw_ = yaw; }
+    void place_npc(engine::math::Vec3 at, f32 yaw, f32 height) { npc_at_ = at, npc_yaw_ = yaw, npc_tall_ = height; }
     // the matrix RFL draws his face with this frame (RFL head units -> world, guest units; his
     // Head_Only node's view matrix, the head's scale in it, back from the camera's view, times RFL's
     // axes), after update; false while he isn't there
     bool npc_head(engine::math::Mtx34* world) const;
+    // whether he is in the camera's view this frame and over a few pixels tall (after update): his
+    // dress and head pieces are drawn only then (they cost the most of anything on the island: his
+    // dress goes through the GX path, a few thousand vertices made on the CPU)
+    bool npc_visible() const { return npc_visible_; }
     // the player's Mii out of sight (moved far below the island) while true: design renders
     void set_hide_player(bool hide) { hide_player_ = hide; }
 
@@ -80,6 +84,7 @@ private:
     enum Clip { WAIT, WALK, RUN, N_CLIPS };
     void set_clip(Clip c);
     void write_camera(const engine::g3d::Camera& c);
+    bool npc_in_view(const engine::g3d::Camera& camera) const;
 
     u32 step_ = 0;
     u32 block_ = 0;
@@ -106,10 +111,10 @@ private:
     const u8* npc_record_ = nullptr;
     u32 npc_db_ = 0, npc_db_buffer_ = 0, npc_data_ = 0, head_name_ = 0;
     u32 npc_actor_ = 0, npc_behavior_ = 0, npc_head_node_ = 0;
-    f32 npc_height_scale_ = 1, npc_yaw_ = 0;
+    f32 npc_height_scale_ = 1, npc_yaw_ = 0, npc_tall_ = 0;
     engine::math::Vec3 npc_at_{0, 0, 0};
     engine::math::Mtx34 npc_head_view_{}, camera_view_{};
-    bool npc_head_ok_ = false, hide_player_ = false;
+    bool npc_head_ok_ = false, hide_player_ = false, npc_visible_ = false;
     std::unique_ptr<MidohaOutfit> outfit_;
     // his face's own parts (midoha.h), written over RFL's face textures; frames since he was made
     std::unique_ptr<MidohaFace> face_;

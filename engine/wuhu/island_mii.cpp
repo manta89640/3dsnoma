@@ -396,6 +396,7 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
     }
     write_camera(camera);
     camera_fovy_ = camera.fovy_deg;
+    npc_visible_ = npc_actor_ && npc_in_view(camera);
     g3d::invalidate_gx_state();
     g3d::root_calc(root);
     GFRAME(0x50);
@@ -415,6 +416,25 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
     }
 }
 
+// The NPC against the camera: a sphere round him (his height, with room for the ponytail over his
+// head and his arms) in the view's frustum, and at least NPC_MIN_PIXELS of the screen's 240 lines
+// tall
+bool IslandMii::npc_in_view(const engine::g3d::Camera& camera) const {
+    constexpr f32 NPC_MIN_PIXELS = 3.0f;
+    const f32 r = 0.75f * npc_tall_;
+    const engine::math::Mtx34 v = engine::g3d::look_at(camera);
+    const engine::math::Vec3 c = npc_at_ + engine::math::Vec3{0, 0.6f * npc_tall_, 0};
+    const f32 x = v.m[0][0] * c.x + v.m[0][1] * c.y + v.m[0][2] * c.z + v.m[0][3];
+    const f32 y = v.m[1][0] * c.x + v.m[1][1] * c.y + v.m[1][2] * c.z + v.m[1][3];
+    const f32 z = -(v.m[2][0] * c.x + v.m[2][1] * c.y + v.m[2][2] * c.z + v.m[2][3]);  // ahead
+    if (z + r < camera.near_ || z - r > camera.far_)
+        return false;
+    const f32 ty = std::tan(camera.fovy_deg * 3.14159265f / 360.0f), tx = ty * camera.aspect;
+    if (std::fabs(x) - z * tx > r * std::sqrt(1 + tx * tx) || std::fabs(y) - z * ty > r * std::sqrt(1 + ty * ty))
+        return false;
+    return z <= r || 2 * r / z * 120.0f / ty >= NPC_MIN_PIXELS;
+}
+
 void IslandMii::view() {
     if (step_ < STEPS || !block_)
         return;
@@ -430,7 +450,7 @@ void IslandMii::draw_opaque() {
         return;
     g3d::root_draw_opaque(guest::load32(root_word_));
     // the NPC's dressed body, under the camera's view again (the root's pass may have loaded another)
-    if (outfit_ && npc_actor_) {
+    if (outfit_ && npc_actor_ && npc_visible_) {
         view();
         outfit_->draw(guest::load32(g3d::actor_body(npc_actor_) + 0x1C), camera_fovy_);
     }

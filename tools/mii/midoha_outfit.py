@@ -24,7 +24,7 @@ big-endian, ready to be copied into guest memory:
   GX arrays (32-byte aligned): positions f32 x3, normals f32 x3, texture coordinates f32 x2 (the
        bind pose, model space)
   batches: 12 bytes each: u32 display list offset (from the lists' start), u32 size, u16 loads, u16
-       first load. Before a batch's list, its loads: (u8 slot 0-6, u8 0, u16 set) each: the set's
+       first load. Before a batch's list, its loads: (u8 slot 0-3, u8 0, u16 set) each: the set's
        matrices into position/normal matrix slot `slot` (GX_PNMTX0 + 3 slot) and texture matrix
        GX_TEXMTX0 + 3 slot; the slots keep what earlier batches loaded
   display lists: GX_DRAW_TRIANGLES on vertex format 6, each vertex u8 PNMTXIDX (3 slot), u8
@@ -43,7 +43,14 @@ from PIL import Image, ImageDraw
 HERE = os.path.dirname(os.path.abspath(__file__))
 MESH = os.path.join(HERE, "midoha_outfit_mesh.json")
 DEFAULT_PNG = os.path.join(HERE, "midoha_outfit.png")
-SLOTS = 7               # matrix slots a batch may use (the 3DS's matrix palette holds 7 sets' worth)
+# Matrix slots a batch may use. A set takes two of the 3DS GX path's palette entries (its position and
+# its texture matrix, 3 of the palette's 42 rows each), and a draw has to fit the palette whole to be
+# kept in its list cache; else its vertices are made again every frame, on the CPU (tools/armbench's
+# GX path: 1,388 ARM11 cycles a vertex made, 82 a cached one's, plus 4,556 a cached draw): with 7 sets
+# a batch (the palette exactly) none ever fitted, and the outfit's 11,970 vertices cost the 3DS's GPU
+# thread about 21 ms a frame; with 4 (69 batches) about 1.6 ms. (Triangle strips would make fewer
+# vertices but many more draws, which cost more.)
+SLOTS = 4
 LEVELS = 4              # 1024, 512, 256, 128
 VTXFMT = 6
 GX_DRAW_TRIANGLES = 0x90
