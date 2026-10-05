@@ -37,7 +37,9 @@ struct TexUnit {
     s8 post_matrix = -1;
 };
 
-// colour channel 0 (the one the island's materials use; channel 1 is never lit there)
+// colour channel 0 (the one the island's materials use; channel 1 is never lit there). A prelit
+// material (fmt::MAT_PRELIT: its lighting baked into the vertex colours) is unlit, its colour and
+// alpha the vertex's: the backends need no normals and run no light loop for it.
 struct Lighting {
     bool lit = false;              // colour lit (else the material colour as is)
     bool mat_from_vertex = false;  // material colour: the vertex colour, else mat_color
@@ -85,6 +87,7 @@ struct Material {
     bool translucent = false;      // drawn in the translucent pass
     s8 priority = 0;               // nw4r draw priority (lower first)
     bool indirect = false;         // the source had indirect stages (dropped: the scroll stays)
+    bool prelit = false;           // fmt::MAT_PRELIT: lit by its vertex colours (Lighting: unlit)
     u32 approximated = 0;          // what the translation approximated (combiners, texgens, matrix modes)
 };
 

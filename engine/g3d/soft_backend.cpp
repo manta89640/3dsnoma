@@ -124,6 +124,7 @@ struct Item {
     // 5,000 units away differs from the terrain's by 0.03 of a depth step, less than a float's
     // rounding there); normals to world (nw) and to view (nv, from world)
     f64 pmv[4][4] = {};
+    bool pos16 = false;          // its buffer's positions are s16 (fmt::VA_POS16: origin and scale in pmv)
     f32 nw[3][3] = {}, nv[3][3] = {};
     bool need_normal_world = false, need_normal_view = false;
     // pixel pipeline
@@ -537,6 +538,17 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
                 v += (f64)proj[r][l] * mv[l][c];
             it.pmv[r][c] = v + (c == 3 ? proj[r][3] : 0.0);
         }
+    // compact positions (fmt::VA_POS16): s16 x the buffer's scale + its origin, folded in (the
+    // vertices are then exact)
+    const fmt::VertexBuffer& vb = pkg.vertex_buffers()[b.vbuf];
+    it.pos16 = vb.attrs & fmt::VA_POS16;
+    if (it.pos16)
+        for (int r = 0; r < 4; r++) {
+            it.pmv[r][3] += it.pmv[r][0] * vb.pos_origin[0] + it.pmv[r][1] * vb.pos_origin[1] +
+                            it.pmv[r][2] * vb.pos_origin[2];
+            for (int c = 0; c < 3; c++)
+                it.pmv[r][c] *= vb.pos_scale;
+        }
     f32 m34[3][4];
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 4; c++)
@@ -644,11 +656,21 @@ const Vtx& SoftBackend::Impl::vertex(const Item& it, const fmt::VertexBuffer& vb
     Vtx& v = vcache[i];
     memset(v.a, 0, sizeof(v.a));
     const u8* q = data + (size_t)i * vb.stride;
-    f32 pos[3];
-    memcpy(pos, q, 12);
+    f64 pos[3];
+    u32 at;
+    if (it.pos16) {  // (the origin and scale are in pmv)
+        s16 sp[3];
+        memcpy(sp, q, 6);
+        pos[0] = sp[0], pos[1] = sp[1], pos[2] = sp[2];
+        at = 8;
+    } else {
+        f32 fp[3];
+        memcpy(fp, q, 12);
+        pos[0] = fp[0], pos[1] = fp[1], pos[2] = fp[2];
+        at = 12;
+    }
     for (int r = 0; r < 4; r++)
         v.c[r] = it.pmv[r][0] * pos[0] + it.pmv[r][1] * pos[1] + it.pmv[r][2] * pos[2] + it.pmv[r][3];
-    u32 at = 12;
     f32 n[3] = {0, 0, 0};
     bool has_n = false;
     if (vb.attrs & fmt::VA_NRM) {

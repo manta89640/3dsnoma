@@ -100,6 +100,15 @@ void lighting(const fmt::Material& m, Lighting& l) {
     l.light_set = (m.flags & fmt::MAT_LIGHT_SET) ? (s16)m.light_set : (s16)-1;
     memcpy(l.mat_color, m.mat_color, 4);
     memcpy(l.amb_color, m.amb_color, 4);
+    // prelit: the channel's lighting is in the vertex colours (the stager's static sun): unlit, the
+    // channel's colour and alpha the vertex's
+    if ((m.flags & fmt::MAT_PRELIT) && m.n_chans > 0) {
+        l.lit = l.alpha_lit = false;
+        l.mat_from_vertex = l.alpha_mat_from_vertex = true;
+        l.amb_from_vertex = false;
+        l.light_mask = 0;
+        l.light_set = -1;
+    }
 }
 
 }  // namespace
@@ -205,6 +214,7 @@ void build_material(const Package& pkg, u32 index, Material* out) {
     r.translucent = m.flags & fmt::MAT_XLU;
     r.priority = m.priority;
     r.indirect = (m.flags & fmt::MAT_INDIRECT) || m.n_ind;
+    r.prelit = (m.flags & fmt::MAT_PRELIT) && m.n_chans > 0;
 }
 
 }  // namespace engine::g3d
