@@ -279,10 +279,11 @@ theme (Sound Player semantics).
 ## 9. ミドハ (Midoha), the first NPC (2026-10-05, session 3dsnoma-8a, branch wuhu/mid)
 
 The user's character, a young man in Mii style with an elf's ears, a high ponytail with a cord of
-jade beads, and a hanbok. Tier 1+2 (the user's decision): his face is Wii Mii parts, his head is
-ours (his whole hair sculpted, the ears, the band, the cord), his dress a swappable texture on the
-standard Mii body (no body mesh of his own yet). He is shown only on request until the user
-approves the design (`NOMA_WUHU_MIDOHA=A|B|C`, a candidate face).
+jade beads, and a hanbok. His face is a Mii's (RFL draws it) with eyes, brows and mouth painted after
+the concept; his head is ours (his whole hair sculpted, the ears, the band, the cord); his dress is a
+garment model of ours skinned to the Mii body. The user took the designs as they stood (2026-10-05):
+he is on the island by default with the recommended face, D (`NOMA_WUHU_MIDOHA=A|B|C|D` another
+candidate's, `=0` not there).
 
 - **His Mii** (`tools/mii/midoha.py` -> `engine/wuhu/midoha_data.h`, our data): RFLCharData records,
   bald (RFL hair 30: the skin-coloured skull alone, under the sculpted hair). He is in no Mii
@@ -300,21 +301,29 @@ approves the design (`NOMA_WUHU_MIDOHA=A|B|C`, a candidate face).
   type 2: the head's 0.69 scale in it), back from the camera's view, times RFL's axes
   (RFLSetCoordinate +X up, +Y front). Drawn after the Mii's opaque pass, under the camera's view
   loaded again (the native-draw rule: the GX state goes out at the command).
-- **His dress** (`tools/mii/midoha_outfit.py`: `tools/mii/midoha_outfit.png` -> `DATA/wuhu/midoha_outfit.bin`):
-  the body has no texture coordinates, so `MidohaOutfit` makes them on the GPU from the position:
-  each shape's display lists are split once (at his spawn) into the triangles that face forward in
-  the bind pose and the others (no vertex changes: the lists' own matrix loads replayed in both),
-  and drawn with a texgen from the position through a texture matrix per draw matrix (a planar
-  projection of the bind pose, u = (x + 72) / 144, v = (128 - y) / 128, times that matrix's bind
-  matrix: positions are stored in their node's space), which the lists' own indexed loads (0x30)
-  fetch from an array of ours; positions and normals from the body's view matrices of the frame.
-  The body's own opaque draw is turned off (ScnObj option 6); it still poses. Front triangles take
-  the front texture, the others the back one. Unlit, times the Mii light's tint (`mii_ModelRes_sInstance`
-  +0x34, as the body's materials).
-- **Placing**: 25 units before the player's start, facing it (`NOMA_WUHU_MIDOHA_AT=<marker>`: there).
+- **His face's parts** (`tools/mii/midoha_face.py` -> `DATA/wuhu/midoha_face.bin`, our art): no Wii eye
+  is the concept's (an almond eye under a thin upper line with a small wing), so his eyes, brows and
+  mouth are painted after it at RFL's face texture's layout (256 x 256, RGB5A3) and written over the
+  textures RFL makes from his Wii parts (`MidohaFace`, engine/wuhu/midoha.cpp: checked every frame,
+  written again when RFL's come in over them); RFL then draws them on his face as any Mii's. The
+  nose stays RFL's line nose. The island makes his face at 256 texels (the player's stays at 128).
+- **His dress** (`engine/wuhu/midoha_outfit.h`; `tools/mii/midoha_outfit_model.py` the mesh,
+  `tools/mii/midoha_outfit_paint.py` the texture painted from the concept into
+  `tools/mii/midoha_outfit.png`, `tools/mii/midoha_outfit.py` packs both into `DATA/wuhu/midoha_outfit.bin`):
+  the jeogori with its collar bands, the sleeves widening to open cuffs, the belt and buckle, the
+  pleated skirt to the ankles, 3,990 triangles skinned to 13 of the body's nodes (at most 4 weights a
+  vertex, 82 weight sets), the bones by node name with their inverse binds (the form a native skinned
+  path can take). Each frame the envelope matrices come from the body's view matrices and go to GX
+  matrix memory; the batches' display lists name their slots (PNMTXIDX), as the body's own do. The
+  body's own draw is off but for its hands and shoes. Lit as the body (the Mii light's tint, the
+  body's sheen); the texture's level (1024 down to 128, RGB565) chosen by his size on screen.
+  To repaint: paint over `tools/mii/midoha_outfit.png` (`midoha_outfit.py template` shows the
+  pieces' places) and pack it again.
+- **Placing**: before the player's start and off to one side (30 units ahead, 18 across), facing it (`NOMA_WUHU_MIDOHA_AT=<marker>`: there).
 - **Design renders**: `NOMA_MIDOHA_SHOTS=1` (island.cpp's SHOTS): the camera goes round him (turnaround
   and close-ups on a grey ground, then the plaza), the player's Mii out of sight, each shot logged
   for the frame dumps.
-- **Cost**: the head pieces about 3,200 triangles in one native batch per piece; the dress replaces
-  the body's draw (864 triangles, the same vertices); guest memory: the outfit block 276 KB (two
-  256x256 RGB565 textures, the split lists), the second actor's slot 333 KB.
+- **Cost**: the head pieces 11,164 triangles near, 3,367 from 450 guest units on (three Mii heights:
+  the follow camera's usual distance and beyond), one native batch per piece; the dress 3,990
+  triangles in 28 GX batches (129 matrix loads); guest memory: the outfit block about 2.98 MB (the
+  texture's four levels 2.79 MB), the face images 256 KB, the second actor's slot.

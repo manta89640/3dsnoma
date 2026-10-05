@@ -25,12 +25,14 @@ const char* const STAGE_COMMAND = "tools/mii/midoha_parts.py DATA";
 }  // namespace
 
 const midoha::Candidate* midoha_candidate() {
+    // (unset or 1: the recommended one, the last; 0: none)
     const char* e = std::getenv("NOMA_WUHU_MIDOHA");
-    if (!e || !*e || !std::strcmp(e, "0"))
-        return nullptr;
-    // (1: the recommended one, the last)
     const midoha::Candidate& last = midoha::CANDIDATES[midoha::N_CANDIDATES - 1];
-    const char want = !std::strcmp(e, "1") ? last.letter : (char)(e[0] & ~0x20);
+    if (!e || !*e || !std::strcmp(e, "1"))
+        return &last;
+    if (!std::strcmp(e, "0"))
+        return nullptr;
+    const char want = (char)(e[0] & ~0x20);
     for (const midoha::Candidate& c : midoha::CANDIDATES)
         if (c.letter == want)
             return &c;

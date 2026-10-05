@@ -26,9 +26,9 @@
 // frames (600). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the
 // scene's shell without the package).
 //
-// ミドハ (engine/wuhu/midoha.h), while his design is approved: NOMA_WUHU_MIDOHA=A|B|C shows him (that
-// candidate face) standing 25 units before the player's start, facing it (NOMA_WUHU_MIDOHA_AT=<marker>:
-// at that marker instead), his head pieces drawn after the Mii's opaque pass. NOMA_MIDOHA_SHOTS=1: the
+// ミドハ (engine/wuhu/midoha.h) stands before the player's start, off to one side, facing it
+// (NOMA_WUHU_MIDOHA_AT=<marker>: at that marker instead), his head pieces drawn after the Mii's opaque
+// pass; NOMA_WUHU_MIDOHA=A|B|C|D another candidate face, =0 not there. NOMA_MIDOHA_SHOTS=1: the
 // design renders: the camera goes round him through a list of shots (turnarounds on a plain grey
 // ground, his face close, him on the plaza), the player's Mii out of sight, each shot logged
 // ("midoha: shot NAME begin" once it has settled, "... end" on its last frame: the frame dumps between
@@ -331,13 +331,15 @@ bool Island::place_at(const fmt::Marker& m) {
     return true;
 }
 
-// ミドハ where NOMA_WUHU_MIDOHA_AT says, or 25 units before the player's start, facing it; his feet on
-// the ground there (a Player's placing, with his own height)
+// ミドハ where NOMA_WUHU_MIDOHA_AT says, or before the player's start and off to one side (30 units
+// ahead, 18 across: the follow camera sees past the player to him), facing it; his feet on the ground
+// there (a Player's placing, with his own height)
 void Island::place_npc() {
     npc_body_ = std::make_unique<Player>(*collision_, PlayerParams::make(k_, mii_->npc_height_scale()));
     const f32 a = player_->yaw() * DEG;
-    Vec3 at = player_->position() + Vec3{std::sin(a), 0, std::cos(a)} * 25.0f;
-    f32 yaw = player_->yaw() + 180.0f;
+    const Vec3 start = player_->position(), ahead{std::sin(a), 0, std::cos(a)}, across{-ahead.z, 0, ahead.x};
+    Vec3 at = start + ahead * 30.0f + across * 18.0f;
+    f32 yaw = std::atan2(start.x - at.x, start.z - at.z) / DEG;
     if (const char* e = std::getenv("NOMA_WUHU_MIDOHA_AT")) {
         if (const fmt::Marker* m = package_->find_marker(e)) {
             at = Vec3{m->position[0], m->position[1], m->position[2]};

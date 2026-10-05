@@ -1,7 +1,6 @@
 // ミドハ (Midoha), the island's first NPC: a Mii whose face is Wii Mii parts and whose head and dress
-// are the port's own (docs/wuhu_design.md §9). Shown only on request while his design is being
-// approved: NOMA_WUHU_MIDOHA=A|B|C|D (a candidate face, engine/wuhu/midoha_data.h; 1 = D, the
-// recommended one).
+// are the port's own (docs/wuhu_design.md §9). On the island by default, with the recommended face
+// (D); NOMA_WUHU_MIDOHA=A|B|C|D another candidate face (engine/wuhu/midoha_data.h), =0 not there.
 //
 // His three layers:
 //   * the Mii (island_mii.h): his RFLCharData given to RFL through a middle database of one of its own
