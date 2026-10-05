@@ -198,6 +198,7 @@ struct Direct {
     u32 texenv_buf = 0;
     u32 cull = GPU_CULL_BACK_CCW;
     C3D_Tex* bound[3] = {};
+    C3D_Tex* c3d_bound[3] = {};  // what citro3d's own context holds per unit (bound through it)
 } D;
 // NOMA_PICA_C3D=1 (env.txt): every draw and state change through citro3d, none written directly
 // (to tell the direct writes from the rest when the GPU misbehaves)
@@ -606,6 +607,7 @@ void st_tex(int u, C3D_Tex* t) {
     D.bound[u] = t;
     if (!direct()) {
         C3D_TexBind(u, t);
+        D.c3d_bound[u] = t;
         return;
     }
     const u32 reg[5] = {t->border, t->dim, t->param, t->lodParam, osConvertVirtToPhys(t->data) >> 3};
@@ -996,6 +998,23 @@ u32 texel_bits(GPU_TEXCOLOR f) {
     }
 }
 
+// A texture about to be freed: no unit may keep pointing at it. Its C3D_Tex lives in P.textures'
+// node, so a pointer kept after the erase would read freed memory, and citro3d (which binds the
+// units it holds again at its next context update) or the GPU's own registers would keep the
+// texture's freed address: on hardware, whatever that memory holds next (black).
+void forget_texture(const C3D_Tex* t) {
+    for (int u = 0; u < 3; u++) {
+        if (P.tex[u] == t)
+            P.tex[u] = nullptr, P.env_valid = false;
+        if (D.bound[u] == t)
+            D.bound[u] = nullptr, P.env_valid = false;
+        if (D.c3d_bound[u] == t) {
+            C3D_TexBind(u, nullptr);
+            D.c3d_bound[u] = nullptr;
+        }
+    }
+}
+
 // drop the least recently used texture the frame hasn't drawn with (the previous frame is
 // finished: C3D_FrameBegin waited for it); false when there is none
 // (unused_before: only one last drawn with before that frame)
@@ -1007,6 +1026,7 @@ bool evict_texture(u32 unused_before = ~0u) {
             victim = it;
     if (victim == P.textures.end())
         return false;
+    forget_texture(&victim->second.tex);
     C3D_TexDelete(&victim->second.tex);
     P.textures.erase(victim);
     P.evicted++;
@@ -1121,6 +1141,19 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     return &e.tex;
 }
 
+// what a unit the combiners read samples when its texture couldn't be made (no memory, no image):
+// white, so the draw shows its other inputs, not the unit's previous texture or freed memory
+C3D_Tex s_white;
+bool white_init() {
+    if (!C3D_TexInit(&s_white, 8, 8, GPU_RGBA8))
+        return false;
+    memset(s_white.data, 0xFF, s_white.size);
+    C3D_TexFlush(&s_white);
+    C3D_TexSetFilter(&s_white, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&s_white, GPU_REPEAT, GPU_REPEAT);
+    return true;
+}
+
 void collect_textures() {
     for (C3D_Tex& t : P.dead)
         C3D_TexDelete(&t);
@@ -1132,6 +1165,7 @@ void collect_textures() {
     LightLock_Unlock(&s_free_lock);
     for (auto it = P.textures.begin(); it != P.textures.end();) {
         if (P.frame - it->second.last_used > 120) {
+            forget_texture(&it->second.tex);
             C3D_TexDelete(&it->second.tex);
             it = P.textures.erase(it);
         } else {
@@ -1519,6 +1553,8 @@ bool PicaRenderer::init() {
     P.dl = new DlEntry[DL_ENTRIES];
     if (!P.vbuf || !P.slots || !P.rows || !P.ibuf)
         return false;
+    if (!white_init())
+        log("pica: no memory for the white texture: a texture that can't be made leaves its unit as it was");
     bind_vertices();
     C3D_CullFace(GPU_CULL_NONE);
     aptHook(&s_apt_cookie, apt_hook, nullptr);
@@ -1578,6 +1614,12 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                     if (e.comb.unit[u].map < 0)
                         continue;
                     tex[u] = texture_for(e.comb.unit[u].map, &su.sx[u], &su.sy[u]);
+                    if (!tex[u] && s_white.data) {
+                        tex[u] = &s_white, su.sx[u] = su.sy[u] = 1.0f;
+                        static u32 s_logged;
+                        if (s_logged++ < 4)
+                            log("pica: texture map %d of a draw couldn't be made: white instead", e.comb.unit[u].map);
+                    }
                     su.texgen[u] = (s8)e.comb.unit[u].coord;
                 }
             }
