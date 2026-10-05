@@ -115,8 +115,8 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    For sound on the 3DS, ndsp needs `sdmc:/3ds/dspfirm.cdc` (dumped with DSP1).
    Wuhu Island (work in progress) is made from your own Wii Sports Resort disc's files:
    `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d`, baked with
-   the host build's `ng3d-bake` (build the host target first); [docs/wuhu.md](docs/wuhu.md) says
-   what goes into it.
+   the host build's `ng3d-bake` and with its cells' visibility from `ng3d-pvs` (build the host
+   targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it.
 
 ## Running on the host
 

@@ -22,6 +22,17 @@ A material is GX's register image as its display lists leave it (brres.GxRegs): 
 words verbatim, colour channel 0, texture maps, texgens and one TexMtx per texgen (the texture SRT,
 its nw4r matrix mode, map mode and effect matrix). Two GX facts the image can't say by itself are
 stated where they are filled in (blend's masked bits; texgen matrices).
+
+Geometry (NG3D version 2): every position is snapped to a grid of POS_QUANTUM units (in the space it
+is stored in) and a vertex buffer whose positions fit in s16 steps of it about a point of the grid is
+written VA_POS16 (the pos_origin and pos_scale the header has): exact against the snapped values,
+so two buffers that share a vertex (neighbouring cells, two materials of a cell) give it the same
+place and no crack opens between them; buffers too wide for it (the open sea, the sky) stay f32.
+Given a Lighting, a material lit by colour channel 0 whose lighting may be taken as static becomes
+MAT_PRELIT: its lighting (preview.py's model of GX's: per vertex, the material's light set, point
+lights at their positions) is baked into the vertex colours, and it is written as an unlit
+material whose channel colour is the vertex's. A vertex buffer carries normals only when a material
+of it needs them (unbaked lighting, environment mapping), colours only when one reads them.
 """
 import math
 import os
@@ -44,6 +55,77 @@ PALETTE_AS_GX = {0: 3, 1: 4, 2: 5}
 # BP 0x41's bits 2-4 (dither, colour update, alpha update): nw4r's material list writes the blend
 # register through BP mask 0xFFE3, leaving them to the global state, where colour update is on
 BLEND_GLOBAL_BITS = 0x0008
+
+# the grid staged positions are snapped to, and VA_POS16's step: a buffer is written s16 when its
+# positions lie within 32,767 steps of a grid point (5,461 units across: a cell of 4,000 with the
+# triangles whose centroids are in it, 5,208 at most on the island); the snap moves a coordinate by
+# at most half a step (0.042 units, 4 mm at k = 10). One step for every buffer, so a vertex two
+# buffers share decodes to the same place in both (to float32's rounding of s16 * step + origin)
+POS_QUANTUM = 1.0 / 12.0
+POS16_SPAN = 2 * 32767 * POS_QUANTUM - POS_QUANTUM
+
+
+def snap_positions(p):
+    """Positions on the POS_QUANTUM grid (float32)."""
+    return (np.rint(np.asarray(p, np.float64) / POS_QUANTUM) * POS_QUANTUM).astype(np.float32)
+
+
+class Lighting:
+    """The static lighting a MAT_PRELIT material's vertex colours take: the scene's lights and light
+    sets (as the package's LITE and LSET records have them), evaluated per vertex as
+    tools/g3d/preview.py's Scene.channel() does per fragment -- colour = material source x clamp(
+    ambient + sum of N.L x light colour), the light set's ambient and lights replacing the
+    material's, point lights from their positions (GX's per-vertex direction; World lights the
+    package's point lights from their direction toward the origin), alpha = source x ambient alpha.
+    lights: [(kind, position, direction, rgba)]; sets: {index: (ambient rgba, [light indices])}."""
+
+    def __init__(self, lights, sets):
+        self.lights, self.sets = lights, sets
+
+    def channel(self, word, light_set, matc, ambc, pos, nrm, clr, comps):
+        n = len(pos)
+        src = clr[:, comps] if word & 1 and clr is not None else np.broadcast_to(matc[comps], (n, len(comps)))
+        if not word & 2:
+            return src
+        if light_set is not None and light_set in self.sets:
+            amb_rgba, idx = self.sets[light_set]
+            amb = np.broadcast_to(np.asarray(amb_rgba, np.float64)[comps] / 255.0, (n, len(comps)))
+            lights = [self.lights[i] for i in idx]
+        else:
+            amb = clr[:, comps] if word & 0x40 and clr is not None else np.broadcast_to(ambc[comps], (n, len(comps)))
+            lights = []
+        light = np.array(amb, np.float64)
+        if comps[0] == 0 and nrm is not None:
+            fn = (word >> 7) & 3
+            for kind, lpos, ldir, rgba in lights:
+                if kind == 1:          # LK_POINT
+                    d = np.asarray(lpos, np.float64)[None, :] - pos
+                    d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+                    dot = (nrm * d).sum(1)
+                else:
+                    dot = nrm @ -np.asarray(ldir, np.float64)
+                if fn == 0:
+                    dot = np.ones_like(dot)
+                elif fn >= 2:
+                    dot = np.maximum(dot, 0)
+                light += dot[:, None] * (np.asarray(rgba[:3], np.float64) / 255.0)[None, :]
+        return src * np.clip(light, 0, 1)
+
+    def bake(self, m, light_set, pos, nrm, clr):
+        """u8 RGBA per vertex: channel 0 of material record `m` (its words before prelighting),
+        lit by light set `light_set` (None: the material's own ambient, no lights)."""
+        pos = np.asarray(pos, np.float64)
+        nrm = None if nrm is None else np.asarray(nrm, np.float64)
+        if nrm is not None:
+            nrm = nrm / np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+        c = None if clr is None else np.asarray(clr, np.float64) / 255.0
+        matc = np.asarray(m.mat_color, np.float64) / 255.0
+        ambc = np.asarray(m.amb_color, np.float64) / 255.0
+        rgb = self.channel(m.chan_color, light_set, matc, ambc, pos, nrm, c, [0, 1, 2])
+        a = self.channel(m.chan_alpha, light_set, matc, ambc, pos, nrm, c, [3])
+        out = np.concatenate([rgb, a], 1)
+        return np.clip(np.rint(out * 255.0), 0, 255).astype(np.uint8)
+
 
 def _pow2(v, lo=8):
     p = lo
@@ -87,13 +169,23 @@ Part = namedtuple("Part", "name brres model matrix hidden tex_override", default
 
 class Converter:
     """Makes package records from BRRES objects, each once (textures by (file, name), materials
-    by (file, model, material))."""
+    by (file, model, material)).
 
-    def __init__(self, pkg):
+    lighting: a Lighting to bake static lighting with (MAT_PRELIT), or None (materials stay lit at
+    run time). keep_lit: (model name, material name) pairs whose lighting must stay live (an
+    animation drives their material or ambient colour). pos16: write VA_POS16 where it fits."""
+
+    def __init__(self, pkg, lighting=None, keep_lit=(), pos16=True):
         self.pkg = pkg
         self.tex = {}
         self.mat = {}
         self.stats = Counter()
+        self.lighting = lighting
+        self.keep_lit = set(keep_lit)
+        self.pos16 = pos16
+        self.mat_info = {}           # material index -> what its vertices need (vertex_needs)
+        self.snap_error = 0.0        # the most the snap moved a coordinate (units)
+        self.snap_error_3d = 0.0     # ... a position (its distance)
 
     # ---------------------------------------------------------------- textures
     def texture(self, r, name):
@@ -219,14 +311,60 @@ class Converter:
             tg.post_mtx = i if g["normalize"] and g["post"] is not None else NONE16
         for i in range(mat.n_texgens, 8):
             M.texgens[i].matrix = M.texgens[i].post_mtx = NONE16
+        info = vertex_needs(M, self.pkg.tex_mtx[M.tex_mtx_first:M.tex_mtx_first + M.n_tex_mtx])
+        lit = info["lit"]
+        if lit and self.lighting is not None and (mdl.name, mat.name) not in self.keep_lit:
+            # its lighting baked into the vertex colours: the words as they were, for the bake;
+            # then an unlit channel taking the vertex colour (colour and alpha), no light set
+            info.update(prelit=True, words=Rec("Material", chan_color=M.chan_color, chan_alpha=M.chan_alpha,
+                                               mat_color=list(M.mat_color), amb_color=list(M.amb_color)),
+                        light_set=M.light_set if M.flags & ng3d.MAT_LIGHT_SET else None, clr=True)
+            info["nrm"] = info["env"]
+            M.flags = (M.flags | ng3d.MAT_PRELIT) & ~ng3d.MAT_LIGHT_SET
+            M.chan_color = (M.chan_color & ~2) | 1
+            M.chan_alpha = (M.chan_alpha & ~2) | 1
+            self.stats["materials prelit (lighting in the vertex colours)"] += 1
+        elif lit:
+            self.stats["materials lit at run time"] += 1
         self.pkg.materials.append(M)
         idx = len(self.pkg.materials) - 1
         self.mat[key] = idx
+        self.mat_info[idx] = info
         self.stats["materials"] += 1
         return idx
 
+    # ---------------------------------------------------------------- vertices
+    def prepare(self, c, material, to_world=None):
+        """Corners made ready for `material`'s batch: its lighting baked into the colours (MAT_PRELIT;
+        to_world: a 4x4 taking the corners' space to the one the lights are in, or None), the
+        normals and colours dropped if nothing reads them, the positions snapped to the grid."""
+        info = self.mat_info[material]
+        out = dict(c)
+        if info.get("prelit"):
+            P, N = c["pos"], c.get("nrm")
+            if to_world is not None:
+                W = np.asarray(to_world, np.float64)
+                P = np.asarray(P, np.float64) @ W[:3, :3].T + W[:3, 3]
+                if N is not None:
+                    N = np.asarray(N, np.float64) @ np.linalg.inv(W[:3, :3])
+            if N is None:
+                self.stats["prelit corners without normals (lit by the ambient alone)"] += len(P)
+            out["clr"] = self.lighting.bake(info["words"], info["light_set"], P, N, c.get("clr"))
+        if not info["nrm"]:
+            out.pop("nrm", None)
+        if not info["clr"]:
+            out.pop("clr", None)
+        snapped = snap_positions(c["pos"])
+        if len(snapped):
+            d = snapped - np.asarray(c["pos"], np.float64)
+            self.snap_error = max(self.snap_error, float(np.abs(d).max()))
+            self.snap_error_3d = max(self.snap_error_3d, float(np.linalg.norm(d, axis=1).max()))
+        out["pos"] = snapped
+        return out
+
     # ---------------------------------------------------------------- models
-    def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None, parts=()):
+    def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None, parts=(), detail=None,
+              select=None):
         """A Model of `mdl`: its nodes (rest SRT, bind matrix, visibility, billboard) and a batch per
         draw (opaque list, then translucent), vertices in the space of the node they hang from.
         Draws whose visibility node is in `hidden` are left out (the node stays, invisible).
@@ -239,6 +377,8 @@ class Converter:
         translucent ones likewise) -- the sun in the sky dome, which the renderer moves with the
         eye as one model; a stretch of the sea with the island it rings. A part's nodes are in the
         map as "part/node"; a name the map already has is an error.
+        detail(brres model, brres material) -> True marks a draw's batches BATCH_DETAIL; select(brres
+        model, draw, triangles (n, 3, 3) in the model's space) -> which of a draw's triangles to keep.
         Returns (model index, {node name: index within the model})."""
         pkg = self.pkg
         shift = 1 if extra_root else 0
@@ -320,12 +460,19 @@ class Converter:
                         c["pos"][s2] = c["pos"][s2] @ Mx[:3, :3].T.astype(np.float32) + Mx[:3, 3].astype(np.float32)
                         if "nrm" in c:
                             c["nrm"][s2] = c["nrm"][s2] @ Mx[:3, :3].T.astype(np.float32)
-                corners = corners_from(c, sm, shape)
                 own = node + base if node >= 0 else space
-                b = build_single_batch(self, corners, mi, own)
-                per_node.setdefault(own, []).append(b)
                 Wn = M @ (W[node] if node >= 0 else np.eye(4))
-                P = c["pos"] @ Wn[:3, :3].T + Wn[:3, 3]
+                if select is not None:
+                    Pw = (c["pos"] @ Wn[:3, :3].T + Wn[:3, 3]).reshape(-1, 3, 3)
+                    keep = np.repeat(np.asarray(select(sm, d, Pw), bool), 3)
+                    if not keep.any():
+                        continue
+                    c = {k: v[keep] for k, v in c.items()}
+                # (lit as the model stands at rest, unplaced: a moving model carries its light)
+                corners = self.prepare(corners_from(c, sm, shape), mi, Wn)
+                b = build_single_batch(self, corners, mi, own, (detail or (lambda *_: False))(sm, mats[d.mat]))
+                per_node.setdefault(own, []).append(b)
+                P = corners["pos"] @ Wn[:3, :3].T + Wn[:3, 3]
                 lo, hi = np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0))
         n_batches = len(pkg.batches) - first_batch
         # a node's batches, when they are one run in the model's draw order (else none: the
@@ -347,6 +494,20 @@ class Converter:
                 radius=float(np.linalg.norm(hi - lo) / 2), lod_next=NONE16)
         self.stats["models"] += 1
         return len(pkg.models) - 1, node_map
+
+
+def vertex_needs(M, tex_mtx):
+    """What a material's vertices need: normals (lighting at run time, or a texgen from the normal
+    or mapping the environment), colours (its channel reads the vertex colour). -> dict(lit, env,
+    nrm, clr, prelit=False)."""
+    lit = M.n_chans >= 1 and bool((M.chan_color | M.chan_alpha) & 2)
+    env = False
+    for g in M.texgens[:M.n_texgens]:
+        tm = tex_mtx[g.matrix] if g.matrix != NONE16 and g.matrix < len(tex_mtx) else None
+        if g.source in (1, 2, 3) or (tm is not None and tm.map_mode in (1, 3, 4)):
+            env = True
+    clr = M.n_chans >= 1 and any(w & 1 or (w & 0x42) == 0x42 for w in (M.chan_color, M.chan_alpha))
+    return dict(lit=lit, env=env, nrm=lit or env, clr=clr, prelit=False)
 
 
 def srt_of(M):
@@ -401,24 +562,35 @@ def transform_corners(c, M):
     return out
 
 
-def _uv_mode(c):
-    """('s16', frac0, frac1) or ('f32',): how a piece's UVs are stored exactly enough. s16 at the
-    source's own fraction when the range allows (exact), else at the range's limit if that keeps
-    at least 1/256 of a texture repeat, else f32."""
+def _uv_need(c, i):
+    """The fraction bits UV i of a piece is exact at (None: the piece has no UV i)."""
+    uv = c.get("uv%d" % i)
+    if uv is None:
+        return None
+    need = c["uvfrac"][i]
+    if need is None:                   # f32 source: the fraction its values are exact at
+        need = 14
+        for f in range(0, 15):
+            if np.all(np.abs(uv * (1 << f) - np.rint(uv * (1 << f))) < 1e-6):
+                need = f
+                break
+    return need
+
+
+def _uv_mode(c, pieces=None):
+    """('s16', frac0, frac1) or ('f32',): how a piece's UVs (or all of `pieces`', the one encoding
+    a batch's vertices share) are stored exactly enough. s16 at the source's own fraction when the
+    range allows (exact), else at the range's limit if that keeps at least 1/256 of a texture
+    repeat, else f32."""
+    pieces = pieces or [c]
     fr = []
     for i in range(2):
-        uv = c.get("uv%d" % i)
-        if uv is None:
+        needs = [n for n in (_uv_need(p, i) for p in pieces) if n is not None]
+        if not needs:
             fr.append(0)
             continue
-        need = c["uvfrac"][i]
-        if need is None:                   # f32 source: the fraction its values are exact at
-            need = 14
-            for f in range(0, 15):
-                if np.all(np.abs(uv * (1 << f) - np.rint(uv * (1 << f))) < 1e-6):
-                    need = f
-                    break
-        m = float(np.abs(uv).max()) if len(uv) else 0.0
+        need = max(needs)
+        m = max((float(np.abs(p["uv%d" % i]).max()) for p in pieces if len(p["uv%d" % i])), default=0.0)
         limit = 15 if m == 0 else int(math.floor(math.log2(32767.0 / m)))
         if limit < need and limit < 8:
             return ("f32",)
@@ -427,10 +599,11 @@ def _uv_mode(c):
 
 
 def stride_of(attrs, mode):
-    """Bytes a vertex: position f32 x3, normal s8 x3 + pad, colour u8 x4, each UV s16 x2 or f32 x2."""
+    """Bytes a vertex: position f32 x3 (VA_POS16: s16 x3 + pad), normal s8 x3 + pad, colour u8 x4,
+    each UV s16 x2 or f32 x2."""
     uv = 8 if mode[0] == "f32" else 4
-    return 12 + (4 if attrs & ng3d.VA_NRM else 0) + (4 if attrs & ng3d.VA_CLR else 0) + \
-        (uv if attrs & ng3d.VA_UV0 else 0) + (uv if attrs & ng3d.VA_UV1 else 0)
+    return (8 if attrs & ng3d.VA_POS16 else 12) + (4 if attrs & ng3d.VA_NRM else 0) + \
+        (4 if attrs & ng3d.VA_CLR else 0) + (uv if attrs & ng3d.VA_UV0 else 0) + (uv if attrs & ng3d.VA_UV1 else 0)
 
 
 def layout_of(c, mode):
@@ -468,6 +641,18 @@ class _Vbuf:
         self.order = []
 
 
+def pos16_fit(lo, hi):
+    """The grid point a buffer of positions in [lo, hi] is written about in VA_POS16, or None when
+    they don't all lie within 32,767 steps of one."""
+    lo, hi = np.asarray(lo, np.float64), np.asarray(hi, np.float64)
+    if not len(lo) or float((hi - lo).max()) > POS16_SPAN:
+        return None
+    origin = np.rint((lo + hi) / 2 / POS_QUANTUM) * POS_QUANTUM
+    if float(np.maximum(hi - origin, origin - lo).max()) / POS_QUANTUM > 32767:
+        return None
+    return origin
+
+
 def _flush_vbuf(cv, vb):
     pkg = cv.pkg
     data = b"".join(vb.order)
@@ -479,9 +664,31 @@ def _flush_vbuf(cv, vb):
         for i, bit in ((0, ng3d.VA_UV0), (1, ng3d.VA_UV1)):
             if vb.attrs & bit:
                 scale[i] = 1.0 / (1 << vb.mode[1 + i])
-    pkg.add("vertex_buffers", count=len(vb.order), attrs=vb.attrs, stride=vb.stride, flags=flags, uv_scale=scale)
+    attrs, stride, origin, pscale = vb.attrs, vb.stride, [0.0, 0.0, 0.0], 0.0
+    n = len(vb.order)
+    rows = np.frombuffer(data, np.uint8).reshape(n, vb.stride)
+    P = rows[:, 0:12].copy().view("<f4").reshape(n, 3).astype(np.float64)
+    o = pos16_fit(P.min(0), P.max(0)) if cv.pos16 and n else None
+    if o is not None:
+        # s16 steps of the grid about a grid point: the snapped positions exactly
+        q = np.rint((P - o) / POS_QUANTUM)
+        back = (q * POS_QUANTUM + o).astype(np.float32)
+        if np.abs(back - P.astype(np.float32)).max() > 1e-6 * max(1.0, float(np.abs(P).max())):
+            raise ValueError("VA_POS16 isn't exact for a buffer (positions off the grid?)")
+        q16 = np.concatenate([q.astype("<i2"), np.zeros((n, 1), "<i2")], 1).view(np.uint8).reshape(n, 8)
+        rows = np.ascontiguousarray(np.concatenate([q16, rows[:, 12:]], 1))
+        data = rows.tobytes()
+        attrs = (attrs & ~ng3d.VA_POS) | ng3d.VA_POS16
+        stride -= 4
+        origin, pscale = [float(x) for x in o], POS_QUANTUM
+        cv.stats["vertex buffers VA_POS16"] += 1
+    else:
+        cv.stats["vertex buffers f32 positions (too wide for VA_POS16)"] += 1
+        cv.stats["vertices with f32 positions"] += n
+    pkg.add("vertex_buffers", count=n, attrs=attrs, stride=stride, flags=flags, uv_scale=scale,
+            pos_origin=origin, pos_scale=pscale)
     pkg.vertex_data.append(data)
-    cv.stats["vertices"] += len(vb.order)
+    cv.stats["vertices"] += n
     cv.stats["vertex bytes"] += len(data)
     return len(pkg.vertex_buffers) - 1
 
@@ -503,8 +710,8 @@ def _new_unique(vb, rows):
     return len({x.tobytes() for x in rows} - vb.rows.keys())
 
 
-def build_single_batch(cv, c, material, node):
-    """One batch in its own vertex buffer (model meshes)."""
+def build_single_batch(cv, c, material, node, detail=False):
+    """One batch in its own vertex buffer (model meshes); c: prepared corners (Converter.prepare)."""
     mode = _uv_mode(c)
     attrs, stride = layout_of(c, mode)
     rows = encode_vertices(c, attrs, mode)
@@ -513,62 +720,145 @@ def build_single_batch(cv, c, material, node):
     if len(vb.order) > 65536:
         raise ValueError("a model mesh of %d vertices" % len(vb.order))
     vbi = _flush_vbuf(cv, vb)
-    return _add_batch(cv, material, vbi, idx, c["pos"], node)
+    return _add_batch(cv, material, vbi, idx, c["pos"], node, detail)
 
 
-def _add_batch(cv, material, vbi, idx, pos, node):
+def _add_batch(cv, material, vbi, idx, pos, node, detail=False):
     pkg = cv.pkg
     first = len(pkg.indices)
     pkg.indices.extend(int(i) for i in idx)
     lo, hi = pos.min(0), pos.max(0)
     pkg.add("batches", material=material, vbuf=vbi, first_index=first, n_indices=len(idx),
-            bbox=[float(x) for x in list(lo) + list(hi)], node=node)
+            bbox=[float(x) for x in list(lo) + list(hi)], node=node, flags=ng3d.BATCH_DETAIL if detail else 0)
     cv.stats["triangles"] += len(idx) // 3
+    if detail:
+        cv.stats["detail batches (BATCH_DETAIL)"] += 1
     return len(pkg.batches) - 1
 
 
 class MeshSet:
-    """Static geometry gathered as pieces (group key, material, corners in world space, tag), built
-    into one batch per (group, material, tag) -- tag tells pieces that must stay apart (detail
-    levels) -- and one vertex buffer per (group, vertex layout), split before 65,536 vertices."""
+    """Static geometry gathered as pieces (group key, material, corners in world space, the detail
+    levels it is in, detail), built into batches: the pieces of a (group, material, detail, vertex
+    attributes) family share one encoding and one vertex buffer, and the family has a batch per
+    distinct set of pieces its levels draw (a level draws every piece that is in it; two levels
+    drawing the same pieces share a batch), so a group's level lists hold one batch a material (and
+    detail). detail marks a batch BATCH_DETAIL. A group's vertex buffer holds its families of one
+    layout, split before 65,536 vertices and where its positions would grow too wide for VA_POS16.
+    add() prepares the corners for the material (Converter.prepare)."""
 
     def __init__(self, cv):
         self.cv = cv
         self.pieces = {}
 
-    def add(self, group, material, corners, tag=0):
-        mode = _uv_mode(corners)
-        attrs, stride = layout_of(corners, mode)
-        key = (group, material, tag, attrs, mode)
-        self.pieces.setdefault(key, []).append(corners)
+    def add(self, group, material, corners, levels=(0,), detail=False):
+        corners = self.cv.prepare(corners, material)
+        attrs, _ = layout_of(corners, ("s16", 0, 0))
+        key = (group, material, bool(detail), attrs)
+        self.pieces.setdefault(key, []).append((tuple(sorted(set(levels))), corners))
+
+    def absorb_small(self, max_triangles, neighbours, margin=0.0):
+        """Small families (fewer than max_triangles; the slivers a centroid cut leaves where a
+        material crosses a group's edge) moved into the largest family of the same material,
+        detail, attributes and levels among neighbours(group), if one has it, the sliver lies within
+        that group's box (grown by `margin`: the group's box, which picks its detail level and culls
+        it, stays as it was) and the two together still fit VA_POS16. Returns how many moved."""
+        moved = 0
+        tris = {k: sum(len(c["pos"]) // 3 for _, c in v) for k, v in self.pieces.items()}
+        gbox = {}
+        for k, v in self.pieces.items():
+            P = np.concatenate([c["pos"] for _, c in v])
+            lo, hi = gbox.get(k[0], (np.full(3, np.inf), np.full(3, -np.inf)))
+            gbox[k[0]] = (np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0)))
+        for key in sorted(self.pieces, key=lambda k: (tris[k], str(k))):
+            parts = self.pieces.get(key)
+            if not parts or tris[key] >= max_triangles:
+                continue
+            group, material, detail, attrs = key
+            levels = {lv for lv, _ in parts}
+            Pk = np.concatenate([c["pos"] for _, c in parts])
+            best = None
+            for g in neighbours(group):
+                k2 = (g, material, detail, attrs)
+                other = self.pieces.get(k2)
+                if not other or {lv for lv, _ in other} != levels or tris[k2] < tris[key]:
+                    continue
+                if (Pk.min(0) < gbox[g][0] - margin).any() or (Pk.max(0) > gbox[g][1] + margin).any():
+                    continue
+                P = np.concatenate([c["pos"] for _, c in other + parts])
+                if pos16_fit(P.min(0), P.max(0)) is None:
+                    continue
+                if best is None or tris[k2] > tris[best]:
+                    best = k2
+            if best is not None:
+                self.pieces[best].extend(parts)
+                tris[best] += tris[key]
+                del self.pieces[key]
+                moved += 1
+        self.cv.stats["small families moved into a neighbour's (one draw fewer each)"] += moved
+        return moved
 
     def build(self):
-        """-> {group: [(batch index, material, tag)]} in a stable order (opaque materials first)."""
+        """-> {group: [(batch index, material, levels)]} in a stable order."""
         cv, pkg = self.cv, self.cv.pkg
         out = {}
+        # each family's encoding (one for all its pieces), then its vertex buffer by (group, layout)
+        fams = []
+        for key in sorted(self.pieces, key=lambda k: (k[0], k[3], k[1], k[2])):
+            parts = self.pieces[key]
+            mode = _uv_mode(None, [c for _, c in parts])
+            fams.append((key, mode))
         by_vb = {}
-        for key in sorted(self.pieces, key=lambda k: (k[0], k[3], str(k[4]), k[1], k[2])):
-            by_vb.setdefault((key[0], key[3], key[4]), []).append(key)
-        for (group, attrs, mode), keys in by_vb.items():
+        for key, mode in fams:
+            by_vb.setdefault((key[0], key[3], mode), []).append(key)
+        for (group, attrs, mode), keys in sorted(by_vb.items(), key=lambda kv: (kv[0][0], kv[0][1], str(kv[0][2]))):
             stride = stride_of(attrs, mode)
             vb = _Vbuf(attrs, stride, mode)
+            vlo, vhi = np.full(3, np.inf), np.full(3, -np.inf)
             pending = []
+
+            def flush():
+                vbi = _flush_vbuf(cv, vb)
+                for k2, sets in pending:
+                    for levels, (idx2, pos2) in sets.items():
+                        b = _add_batch(cv, k2[1], vbi, idx2, pos2, NONE16, k2[2])
+                        out.setdefault(k2[0], []).append((b, k2[1], levels))
             for key in keys:
                 parts = self.pieces[key]
-                c = {k: np.concatenate([p[k] for p in parts]) for k in parts[0] if k != "uvfrac"}
+                cs = [c for _, c in parts]
+                c = {k: np.concatenate([p[k] for p in cs]) for k in cs[0] if k != "uvfrac"}
                 rows = encode_vertices(c, attrs, mode)
-                if len(vb.order) + _new_unique(vb, rows) > 65535:
-                    vbi = _flush_vbuf(cv, vb)
-                    for (k2, idx2, pos2) in pending:
-                        b = _add_batch(cv, k2[1], vbi, idx2, pos2, NONE16)
-                        out.setdefault(k2[0], []).append((b, k2[1], k2[2]))
+                lo, hi = np.minimum(vlo, c["pos"].min(0)), np.maximum(vhi, c["pos"].max(0))
+                # (a buffer that would grow too wide for VA_POS16 is closed first, unless its own
+                # positions already are)
+                wide = cv.pos16 and pending and pos16_fit(lo, hi) is None and pos16_fit(vlo, vhi) is not None
+                if pending and (wide or len(vb.order) + _new_unique(vb, rows) > 65535):
+                    if wide:
+                        cv.stats["vertex buffers split to stay VA_POS16"] += 1
+                    flush()
                     vb, pending = _Vbuf(attrs, stride, mode), []
-                pending.append((key, _index_into(vb, rows), c["pos"]))
+                    lo, hi = c["pos"].min(0), c["pos"].max(0)
+                idx = _index_into(vb, rows)
+                # the pieces each level draws; a batch per distinct set
+                spans, at = [], 0
+                for lv, p in parts:
+                    n = len(p["pos"])
+                    spans.append((lv, at, at + n))
+                    at += n
+                sets = {}
+                for level in sorted({x for lv, _ in parts for x in lv}):
+                    sel = [(a, b) for lv, a, b in spans if level in lv]
+                    key_set = tuple(sel)
+                    found = next((k for k in sets if sets[k][2] == key_set), None)
+                    if found is not None:
+                        sets[found + (level,)] = sets.pop(found)
+                        continue
+                    ii = np.concatenate([idx[a:b] for a, b in sel])
+                    pp = np.concatenate([c["pos"][a:b] for a, b in sel])
+                    sets[(level,)] = (ii, pp, key_set)
+                pending.append((key, {lv: (v[0], v[1]) for lv, v in sets.items()}))
+                vlo, vhi = lo, hi
             if pending:
-                vbi = _flush_vbuf(cv, vb)
-                for (k2, idx2, pos2) in pending:
-                    b = _add_batch(cv, k2[1], vbi, idx2, pos2, NONE16)
-                    out.setdefault(k2[0], []).append((b, k2[1], k2[2]))
+                flush()
         return out
 
 
