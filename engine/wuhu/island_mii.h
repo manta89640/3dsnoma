@@ -21,6 +21,7 @@
 
 #include "engine/g3d/world.h"
 #include "engine/wuhu/midoha.h"
+#include "engine/wuhu/midoha_outfit.h"
 #include "engine/wuhu/player.h"
 #include "runtime/runtime.h"
 
@@ -113,6 +114,8 @@ private:
     // his face's own parts (midoha.h), written over RFL's face textures; frames since he was made
     std::unique_ptr<MidohaFace> face_;
     u32 npc_frames_ = 0;
+    f32 camera_fovy_ = 45.0f;  // (the outfit's texture level goes by it)
+    u32 npc_clip_file_ = 0, npc_clip_anim_ = 0;  // his clip's names (guest strings)
 };
 
 }  // namespace engine::wuhu
