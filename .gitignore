@@ -23,6 +23,9 @@ gen/
 
 # Local test runs
 runs/
+/cmdlist.bin
+/g3drender/
+IMG_7639.HEIC
 .DS_Store
 __pycache__/
 *.pyc
