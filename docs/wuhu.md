@@ -150,9 +150,9 @@ water alone has one list for all three):
 
 | level | from | what | whole world |
 |---|---|---|---|
-| 0 | 0 | the island at full detail (Wedge Island too) with its edge-blend strips, island_V, the trees' full models, every prop, the sea by the shores and inland (shore foam, waves, ripples, the lake, the falls, the cave's water) | 472 batches, 124,667 triangles |
+| 0 | 0 | the island at full detail (Wedge Island too) with its edge-blend strips, island_V, the trees' full models, static props, the sea by the shores and inland (shore foam, waves, ripples, the lake, the falls, the cave's water) | 460 batches, 112,347 triangles |
 | 1 | 5,000 | the far island (island_R), the lake, the falls, the sea by the shores, the trees' lighter models, the boats at anchor, the venues' gates | 232, 52,550 |
-| 2 | 15,000 | the far island and its waters | 148, 18,139 |
+| 2 | 15,000 | the far island and its waters, with the tree L models | 176 batches, 20,008 triangles |
 
 (Version 1: 0 / 3,000 / 20,000, the island at full detail at every level, trees at 0-1: 435 /
 406 / 320 batches, 110,267 / 84,620 / 49,857 triangles.)
@@ -173,16 +173,16 @@ distance: a 230-unit conifer is 13 pixels tall at 5,000 units and 4 at 15,000, a
 at 15,000. At 5,000 the far island switches in; the step (each of the 8 cells with the most
 level-0 triangles seen from just past 5,000 units of its box, on the ground, the cell alone at
 level 0 and at level 1, 800x450) is 34-64 dB, at most 1.4 % of the pixels more than 16 levels
-off: the grass edges along cliff tops and the cliffs' shading. Trees go with level 2: three levels
-are the format's, and a level goes on to any distance, so trees can't be dropped by size within
-one. The speed round's walking frames had 36 % of their vertices 4,000-12,000 units off.
+off: the grass edges along cliff tops and the cliffs' shading. Tree silhouettes switch to their
+five- and six-triangle source meshes at level 2. The speed round's walking frames had 36 % of their
+vertices 4,000-12,000 units off.
 
 **Detail** (`BATCH_DETAIL`, culled by the batch's own box beyond `Env::detail_distance`, 3,000
 units): the edge-blend strips (`mt_gake_blend`, `mt_kusa_blend`, `mt_suna_blend`, `mt_tuti_blend`),
 the decals (`mt_stage_logo`, `png_net_b`), the sea's shore foam, waves and ripples
 (`mt_zd_w_kiwa` and its `_off`, `mt_ze_w_nami`, `mt_ze_w_nami2`, `mt_zb_w_hamon`), and the small
-props (parasols, tents, parked cars, kayaks, flags, poles, tees, buoys, the venues' small props):
-156 batches. At 2,000 the shore foam across a bay goes visibly (a walking frame by the volcano,
+props (parasols, tents, kayaks, flags, poles, tees, buoys, the venues' small props): 144 batches.
+At 2,000 the shore foam across a bay goes visibly (a walking frame by the volcano,
 28.9 dB against none culled); at 3,000 it stays (54.5 dB) for 2.6 more draws and 850 more
 triangles a walking frame. Strips further off than that are on cells that switch to the far island
 at 5,000, which has none.
@@ -196,14 +196,14 @@ not objects anyone sees.
 
 | class | placed | staged as | how |
 |---|---|---|---|
-| conifer | 159 | baked, two levels | `WS2_common_tree_H` (level 0), `_M` (level 1) |
-| broadleaf tree | 179 | baked, two levels | `WS2_common_tree2_H`, `_M` |
+| conifer | 159 | baked, three levels | `WS2_common_tree_H` / `_M` / `_L` (levels 0 / 1 / 2; 32 / 27 / 5 triangles) |
+| broadleaf tree | 179 | baked, three levels | `WS2_common_tree2_H` / `_M` / `_L` (levels 0 / 1 / 2; 54 / 30 / 6 triangles) |
 | palm | 141 | baked, levels 0-1 | `WS2_common_tree3` (it has one model) |
-| cruiser at anchor | 28 | baked, levels 0-1 | 160 units long |
-| yacht | 19 | baked, levels 0-1 | |
+| cruiser at anchor | 28 | static instances | enter nearby with 3DS X (Wii Remote 1); steer on water with the circle pad |
+| yacht | 19 | static instances | enter nearby with 3DS X (Wii Remote 1); steer on water with the circle pad |
 | fountain | 1 | baked, level 0 | its water's SRT0 in the world animation |
 | jet-ski start gate, wakeboard goal gate | 1 + 1 | baked, levels 0-1 | 168 and 400 units wide |
-| parked car | 32 | baked, level 0, detail | 385 triangles each |
+| parked car | 32 | static instances | enter nearby with 3DS X (Wii Remote 1), drive with the circle pad; 385 triangles each |
 | parasol | 17 | baked, level 0, detail | |
 | kayak | 10 | baked, level 0, detail | |
 | golf tee | 9 | baked, level 0, detail | |
@@ -514,7 +514,10 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 
 ## Left out (fidelity gaps)
 
-- Indirect texturing: the water's and lava's warp (the engine has no dependent reads).
+- Indirect texturing: the open sea's reflection and wave warp are approximated by a 16-frame
+  precomputed atlas made from `sea2_day`, `jog_waterA` and `jog_waterB`; it advances every 25 world
+  frames. This keeps the sea animated without per-frame texture work, but it is not WSR's dependent
+  texture read (the engine has no dependent reads). Lava's warp is still omitted.
 - The water reflection (`WS2_common_island_R`, drawn mirrored by WSR; its geometry is the far
   island), `WS2_common_under` (a navy skirt under the sea drawn with depth test off before the
   island), the night models (`island_L`, `vr_N`) and the evening sky (`vr_E`): daytime only.
@@ -528,8 +531,13 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
   by the cells are baked as placed.
 - Particle effects: the waterfalls' mist, the volcano's smoke, the fountain's spray, whales'
   spouts (`Effect/Static/effect.carc`).
-- Bloom and depth of field (`WS2_bic_F0_Bloom.pblm`, `_dof.pdof`), the caves' darker ambient
-  (WSR fades the ambient colours inside 42 "shadow area" boxes, PMP group 5 type 3).
+- Bloom and depth of field (`WS2_bic_F0_Bloom.pblm`, `_dof.pdof`). The stage reads the 42
+  shadow-area boxes (PMP group 5/type 3) and bakes an initial ambient fade into prelit geometry:
+  up to 45% within 5 units of a box's interior. It also bakes soft directional sun occlusion from
+  opaque static island geometry into prelit vertex colours (1536-square light-space depth map,
+  5x5 PCF, at most 40% darkening), with no per-frame cost. Moving and translucent objects do not
+  cast or receive these shadows yet. Both are first approximations and need comparison against the
+  original scene.
 - Flags' cloth motion (SHP0) and every PAT0: flags stand at rest.
 - Rigid multi-bone shapes (gulls, hawks, whales): a triangle that spans two bones (270 of them)
   is kept with the bone most of its corners use, so it is exact at rest and stretches a little

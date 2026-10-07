@@ -80,11 +80,29 @@ MatShared mat_shared_now();  // as G3DState holds it now
 
 // Draw1Mat1ShpDirectly's material setup for material `m` (its sources), as `ctrl` asks (8:
 // lighting forced off; 0x10, no material: nothing): into `r`, the light cache and `sh` moved on.
-// False where it can't (fur, an indirect normal map: logged once).
+// False where it can't (an indirect normal map: logged once).
 bool derive_material(u32 mat, const MatSources& m, u32 ctrl, LightCache& lc, MatShared& sh, GxSink& r);
 // ... and its shape setup's matrix registers for shape `shp` drawn with the view arrays: a
 // single-matrix shape's matrix index registers and the texture matrices made from its normal
 // matrix; a skinned shape's defaults (true: the defaults, which the game sends to CP too)
 bool derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxSink& r);
+
+// A fur material (its ResMatFur, nw4r_g3d_ResMat_GetResMatFur): Draw1Mat1ShpDirectly draws the shape
+// once a layer, with the layer's positions (the shape's ResFurPos), and before each layer sets
+// from the layer's fraction t the TEV konst colour 2, the indirect matrices of the stages whose
+// method is 3, and the material colour of each channel whose colour or alpha takes it from the
+// register. What it reads once, before the layers:
+struct FurLayers {
+    u32 fur;                     // ResMatFur: +0x4 layers (for t), +0x8 curve (0 linear, 1 t^0.6), +0xC alpha exponent, +0x10 colour exponent
+    u8 c0[4], c1[4], c2[4];      // TEV colour registers 0-2 (RGBA, their low bytes)
+    u8 mat_clr[2][4];            // channels 0 and 1: material colour
+    u32 chan_id[4];              // nw4r_g3d_sFurChanIds: GX_COLOR0, GX_ALPHA0, GX_COLOR1, GX_ALPHA1
+    s32 mat_src[4], attn_fn[4];  // by chan_id: material source (0: register), attenuation function
+    bool ind[3];                 // indirect matrices 1-3 of method 3 ...
+    f32 ind_mtx[3][12];          // ... as the material's list holds them (a 3x4 matrix)
+    s8 ind_exp[3];
+};
+FurLayers fur_layers(u32 mat, const MatSources& s);
+void derive_fur_layer(const FurLayers& f, u32 layer, GxSink& r);
 
 }  // namespace engine::g3d::live

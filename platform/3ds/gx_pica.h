@@ -26,7 +26,8 @@ void pica_watchdog();
 //   * begin: the frame started if this is its first draw, the GX draws so far sent, the scissor
 //     and the clip matrix of the GX state at this point of the stream (GX clip space -> the PICA's:
 //     the viewport in the 640x456 frame, scaled to 400x240, rotated for the 240x400 target, the GX
-//     depth range), and what citro3d still had to write (a frame's frame buffer and viewport) written;
+//     depth range already complemented for depth map scale 1, offset 1), and what citro3d still
+//     had to write (a frame's frame buffer and viewport) written;
 //   * end: nothing the GX path keeps about the GPU's state is taken as still true (its shader
 //     program, attribute layout, uniforms, combiners, textures, pixel state, culling); `used` is
 //     the program the backend ran (citro3d only notices a program that differs from the last).

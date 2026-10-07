@@ -187,10 +187,12 @@ The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button su
 `engine/system/home_button.cpp` keeps it from loading or opening. Closing the app from the HOME
 Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
 progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
-On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs), the
-C-stick (New 3DS) or L and R turn the camera round it, the D-pad's up and down tilt the camera and
-its left and right bring it in and out, Y brings it round behind the Mii; touch, START and B work
+On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs), hold ZR for
+a faster sprint and cliff leap, and press or hold A for a short or high jump. The C-stick (New 3DS)
+or L and R turn the camera round the Mii, the D-pad tilts the camera or brings it in and out, and Y
+brings it round behind the Mii; touch, START and B work
 the Home tab and the window that asks about going back.
+Near a parked car, X (Wii Remote 1) gets in or out; the circle pad accelerates/reverses and steers.
 
 ## The Sound Player
 

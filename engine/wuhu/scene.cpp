@@ -94,9 +94,9 @@ f32 clamp1(f32 v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
 
 // The player's controls this frame: the remote's buttons, as the game's input manager read them;
 // the move stick (the circle pad); the camera: the New 3DS's C-stick, or L and R to turn it round
-// the Mii (R to the right), the D-pad's up and down to look up and down and its left and right to
-// come in and go out, Y (the remote's 2) to bring it round behind the Mii. (NOMA_INPUT on the host:
-// S(x;y), C(x;y), [L], [R], the D-pad's U, D, L, R and 2.)
+// the Mii (R to the right), ZR sprints, the D-pad's up and down look up and down and its left and
+// right bring it in and out, Y (the remote's 2) brings it round behind the Mii, A jumps. (NOMA_INPUT
+// on the host: S(x;y), C(x;y), [L], [R], [ZR], the D-pad's U, D, L, R, 2 and A.)
 Controls read_controls() {
     Controls c;
     c.held = game::buttons_held();
@@ -108,7 +108,11 @@ Controls read_controls() {
     c.camera_x = clamp1(in.cam_x + r - l);
     c.camera_y = clamp1(in.cam_y + on(game::PAD_UP) - on(game::PAD_DOWN));
     c.zoom = on(game::PAD_RIGHT) - on(game::PAD_LEFT);
+    c.fast_run = (in.pad & guest::PAD_ZR) != 0;
     c.behind = (c.pressed & game::PAD_TWO) != 0;
+    c.jump = (c.pressed & game::PAD_A) != 0;
+    c.jump_held = (c.held & game::PAD_A) != 0;
+    c.vehicle = (c.pressed & game::PAD_ONE) != 0;
     return c;
 }
 

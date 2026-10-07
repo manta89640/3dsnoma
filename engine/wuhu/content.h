@@ -26,7 +26,11 @@ struct Controls {
     f32 camera_x = 0, camera_y = 0;  // the camera stick (C-stick, L/R, the D-pad): -1..1, x turns the
                                      // view right, y up looks up
     f32 zoom = 0;                    // -1..1: + takes the camera further out
+    bool fast_run = false;           // (held) New 3DS ZR / host [ZR]: sprint, including at a light tilt
     bool behind = false;             // (pressed) the camera round behind the Mii now
+    bool jump = false;               // (pressed) A takes off while the Mii is on the ground
+    bool jump_held = false;          // (held) A shapes the jump's rise
+    bool vehicle = false;            // (pressed) Wii Remote 1 / 3DS X: enter or leave a car or boat
 };
 
 class IslandContent {

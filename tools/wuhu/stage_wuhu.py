@@ -17,11 +17,11 @@ What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md 
     placed objects of PlnEnv0.carc/WS2_pln_island_tag0.pmp group 1 (what the Flyover's 1-player mode
     spawns: exclude bit 2 skipped) that stand still -- trees (full models), boats at anchor, the
     fountain, the venues' gates, and as detail (BATCH_DETAIL, culled beyond DETAIL_DISTANCE)
-    parasols, tents, parked cars, kayaks, flags at rest, poles, tees, buoys and the venues' small
+    parasols, tents, kayaks, flags at rest, poles, tees, buoys and the venues' small
     props -- and the sea by the shores and inland (lake, pool, falls, shore foam, waves, ripples);
     level 1 the far island (WS2_common_island_R, WSR's own low-detail copy, with a few of the
-    island's nodes it lacks), the waters, the trees' lighter models, the boats and gates; level 2 the
-    far island and its waters. One batch a (cell, material, detail) in a level's list; slivers of a
+    island's nodes it lacks), the waters, the trees' medium models, the boats and gates; level 2 the
+    far island and its waters with the trees' low models. One batch a (cell, material, detail) in a level's list; slivers of a
     material cut off at a cell's edge go to the neighbour with the rest of it.
   - the moving ones as models placed by instances with their own node animation: windmills,
     balloons, the airship, moving cars, cruisers and the liner on their routes, whales, gulls and
@@ -67,6 +67,8 @@ import brres  # noqa: E402
 import convert  # noqa: E402
 import ng3d  # noqa: E402
 import nintendo_formats as nf  # noqa: E402
+import shadows  # noqa: E402
+import water  # noqa: E402
 from ng3d import NONE16  # noqa: E402
 
 DEFAULT_WSR = os.path.join(os.path.dirname(ROOT), "wii-sports-extract/wii-sports-resort")
@@ -96,12 +98,12 @@ CELL = 4000.0
 #   1 (from LOD1) = the far island: WS2_common_island_R's geometry (WSR's own low-detail copy of
 #       the island, drawn mirrored as its water reflection: the same frame, 15k triangles for the
 #       whole archipelago, one TEV stage a material, Wedge Island's light model in it), the lake,
-#       the falls and the sea by the shores, the trees' lighter models (WS2_common_tree_M,
-#       tree2_M; the palm has one), the boats and the venues' gates;
-#   2 (from LOD2) = the far island and its waters alone: a 230-unit conifer is 4 pixels tall at
+#       the falls and the sea by the shores, the trees' medium models (WS2_common_tree_M,
+#       tree2_M), the boats and the venues' gates;
+#   2 (from LOD2) = the far island and its waters, plus the trees' low models (tree_L, tree2_L):
+#       a 230-unit conifer is 4 pixels tall at
 #       15,000 units on the 3DS's 240 lines at 45 degrees, a boat 2.
-# (Three levels are the format's; trees can't be dropped by size within a level, which goes on to
-# any distance, so they go with level 2's start.)
+# (Three levels are the format's; their thresholds are distances in the package's world units.)
 LOD1, LOD2 = 5000.0, 15000.0
 LOD_DISTANCES = [0.0, LOD1, LOD2]
 # the tags: which levels a piece is in
@@ -285,8 +287,8 @@ VIEWS = OrderedDict([
 
 # CmnObjManager classes (main.dol 0x80669518) by PMP (group 1) type (0x80669858), and how each
 # is staged: "static" baked into the cells for levels 0-1 (TAG_PROP; NEAR_STATIC level 0), "small"
-# baked for level 0 only (TAG_NEAR) as detail, "tree" baked with two detail levels, "instance" a
-# model + instance (+ animation),
+# baked for level 0 only (TAG_NEAR) as detail, "tree" baked at up to three detail levels,
+# "instance" a model + instance (optionally animated),
 # "out" left out (the reason in docs/wuhu.md)
 PMP_CLASS = {0: 2, 1: 3, 2: 4, 3: 6, 4: 8, 5: 41, 6: 42, 7: 5, 9: 7, 10: 9, 11: 10, 12: 10, 18: 10, 19: 10,
              13: 11, 15: 11, 24: 11, 25: 11, 35: 12, 33: 13, 14: 14, 16: 15, 20: 16, 22: 16, 23: 16, 21: 17,
@@ -294,20 +296,20 @@ PMP_CLASS = {0: 2, 1: 3, 2: 4, 3: 6, 4: 8, 5: 41, 6: 42, 7: 5, 9: 7, 10: 9, 11: 
              41: 28, 42: 30, 43: 31, 45: 32, 46: 33, 48: 34, 49: 35, 50: 36, 51: 37, 52: 38, 53: 39, 54: 40}
 SA = "Stage/Static/StageArc.carc"
 CLASSES = {
-    2: ("conifer", "tree", "Tree/G3D/WS2_common_tree.brres", ("WS2_common_tree_H", "WS2_common_tree_M")),
-    3: ("broadleaf tree", "tree", "Tree/G3D/WS2_common_tree2.brres", ("WS2_common_tree2_H", "WS2_common_tree2_M")),
+    2: ("conifer", "tree", "Tree/G3D/WS2_common_tree.brres", ("WS2_common_tree_H", "WS2_common_tree_M", "WS2_common_tree_L")),
+    3: ("broadleaf tree", "tree", "Tree/G3D/WS2_common_tree2.brres", ("WS2_common_tree2_H", "WS2_common_tree2_M", "WS2_common_tree2_L")),
     4: ("palm", "tree", "Tree/G3D/WS2_common_tree3.brres", ("WS2_common_tree3", None)),
     5: ("seagull", "instance", "Bird/G3D/WS2_common_bird.brres", ("WS2_common_bird",)),
     6: ("airship", "instance", "Airship/G3D/WS2_common_airship.brres", ("WS2_common_airship",)),
-    7: ("cruiser (at anchor)", "static", "Cruiser/G3D/WS2_common_cruiser.brres", ("WS2_common_cruiser",)),
-    8: ("yacht", "static", "Yacht/G3D/WS2_common_yacht.brres", ("WS2_common_yacht",)),
+    7: ("cruiser (at anchor)", "instance", "Cruiser/G3D/WS2_common_cruiser.brres", ("WS2_common_cruiser",)),
+    8: ("yacht", "instance", "Yacht/G3D/WS2_common_yacht.brres", ("WS2_common_yacht",)),
     9: ("parasol", "small", "Parasol/G3D/WS2_common_parasol.brres", ("WS2_common_parasol",)),
     10: ("flag A", "small", "Flag/G3D/WS2_common_FlagA1.brres", ("WS2_common_FlagA1",)),
     11: ("flag B", "small", "Flag/G3D/WS2_common_FlagB1.brres", ("WS2_common_FlagB1",)),
     12: ("flag C", "small", "Flag/G3D/WS2_common_FlagC1.brres", ("WS2_common_FlagC1",)),
     13: ("golf flag", "small", "Flag/G3D/WS2_common_glf_flag.brres", ("WS2_common_glf_flag",)),
     14: ("tent", "small", "Tent/G3D/WS2_common_tent.brres", ("WS2_common_tent",)),
-    15: ("parked car", "small", "Car/G3D/WS2_common_car.brres", ("WS2_common_car",)),
+    15: ("parked car", "instance", "Car/G3D/WS2_common_car.brres", ("WS2_common_car",)),
     16: ("balloon", "instance", "Balloon/G3D/WS2_common_balloon.brres", ("WS2_common_balloon",)),
     17: ("hermit crab", "out", None, ()),
     18: ("windmill", "instance", "WindMill/G3D/WS2_common_windmill.brres", ("WS2_common_windmill",)),
@@ -345,12 +347,14 @@ CRUISER_SPEED = 20.0 / 29.0
 BIRD_SPEED = 1.9
 WINDMILL_DESYNC = 37.0         # frames between windmills' phases (they turn together in WSR's data)
 
-# distances beyond which small instances aren't drawn (0 = always), from the near side of their
+# distances beyond which instances aren't drawn (0 = always), from the near side of their
 # bounding sphere (World): a 20-unit gull or hawk is 3 pixels across at 2,000 units on the 3DS's 240
 # lines at 45 degrees, a 55-unit car 5 at 3,000, a 600-unit whale 22 at 8,000, a 160-unit cruiser 6
 # at 8,000; the big ones (airship, liner, balloons, windmills) always. (The cars' and cruisers'
 # spheres hold their whole routes: a renderer culling them by where they are now gains most.)
-INSTANCE_CULL = {5: 2000.0, 23: 2000.0, 26: 3000.0, 32: 8000.0, 33: 8000.0}
+# Parked cars stay available around town; small moving props disappear at their visual thresholds.
+INSTANCE_CULL = {5: 2000.0, 7: 15000.0, 8: 15000.0, 15: 12000.0,
+                 23: 2000.0, 26: 3000.0, 32: 8000.0, 33: 8000.0}
 # the "static" props at level 0 only (small next to the boats and the gates)
 NEAR_STATIC = {21}
 
@@ -728,12 +732,28 @@ class Stager:
     def __init__(self, wsr, prelit=True, pos16=True):
         self.wsr = wsr
         self.pkg = ng3d.Package()
+        # Group 5/type 3 records are WSR's shadow-area volumes. Their PMP matrix places a
+        # unit box in island space; the bake uses these to fade ambient light in caves and
+        # other enclosed areas, while leaving the direct sun untouched.
+        tag0 = read_pmp(wsr.get("Stage/PlnScene/PlnEnv0.carc", "WS2_pln_island_tag0.pmp"))
+        self.shadow_areas = []
+        for obj in tag0:
+            if obj["group"] != 5 or obj["type"] != 3:
+                continue
+            try:
+                inv = np.linalg.inv(obj["mtx"])
+            except np.linalg.LinAlgError:
+                continue
+            half_extent = np.linalg.norm(obj["mtx"][:3, :3], axis=0)
+            if np.all(half_extent > 1e-6):
+                self.shadow_areas.append((inv, half_extent))
         # the lights first: MAT_PRELIT materials take them into their vertex colours as the
         # geometry is converted
         self.lights, self.light_sets = env_lights(wsr)
         self.island = wsr.brres(SA, "Island/G3D/WS2_common_island.brres")
         lighting = convert.Lighting([(l["kind"], l["position"], l["direction"], l["rgba"]) for l in self.lights],
-                                    {ls["id"]: (ls["ambient"], ls["lights"]) for ls in self.light_sets}) \
+                                    {ls["id"]: (ls["ambient"], ls["lights"]) for ls in self.light_sets},
+                                    self.shadow_areas) \
             if prelit else None
         self.keep_lit = live_lit_materials(self.island, wsr)
         self.cv = convert.Converter(self.pkg, lighting, self.keep_lit, pos16)
@@ -822,9 +842,20 @@ class Stager:
         w = self.wsr
         isl = self.island
         self.seatex = sea = w.brres(SA, "Island/G3D/WS2_common_seatex.brres")
-        self.sea_override = {"sea2_dummy": (sea, "sea2_day")}
+        reflection = water.reflection_atlas(
+            sea.texture_rgba("sea2_day"), isl.texture_rgba("jog_waterA"), isl.texture_rgba("jog_waterB"))
+        self.water_reflection = water.AtlasTexture("departure_sea_reflection", reflection)
+        self.sea_override = {"sea2_dummy": (self.water_reflection, "departure_sea_reflection")}
         island, island_r = isl.models["WS2_common_island"], isl.models["WS2_common_island_R"]
         sea_m = isl.models["WS2_common_sea"]
+        # WSR's fourth sea texgen is the environment lookup, but the 3DS has three texture
+        # coordinates. Route that lookup through the unused waterA matrix slot so the animated
+        # reflection atlas fits the existing three-unit TEV material.
+        water_mat = next(m for m in sea_m.materials if m.name == "mt_za_water")
+        water_mat.texgens[3]["matrix"] = 1
+        water_mat.srt[1]["scale"] = [0.25, 0.25]
+        water_mat.srt[1]["rot"] = 0.0
+        water_mat.srt[1]["trans"] = [0.0, 0.0]
         # the island (Wedge Island with it) at level 0, its edge-blend strips detail; a few nodes at
         # every level (FAR_FROM_ISLAND)
         def island_tag(node, mat):
@@ -912,6 +943,8 @@ class Stager:
         by_class = Counter(o["cls"] for o in objs)
         self.say("tag0: %d records, %d group-1 objects spawned (exclude mask 2 drops %s)" % (
             len(tag0), len(objs), dict(dropped)))
+        self.say("lighting: %d shadow-area boxes (group 5/type 3), ambient fades by up to 45%% over 5 units" %
+                 len(self.shadow_areas))
         counts = OrderedDict()
         handled = Counter()
         for cls in sorted(by_class):
@@ -921,8 +954,8 @@ class Stager:
             counts.setdefault(cls, dict(name=CLASSES[cls][0], placed=0, handling="out", brres=CLASSES[cls][2],
                                         models=list(CLASSES[cls][3])))
             counts[cls]["dropped_by_exclude_bit"] = n
-        # static props and trees: trees at full detail at level 0, their lighter model at level 1
-        # (the palm's one model at 0-1); the boats and gates at levels 0-1, the fountain at 0; the
+        # static props and trees: H/M/L tree models in levels 0/1/2 (the palm has one model at 0-1);
+        # the boats and gates at levels 0-1, the fountain at 0; the
         # small props at level 0, BATCH_DETAIL
         for o in objs:
             name, how, path, models = CLASSES[o["cls"]]
@@ -931,10 +964,13 @@ class Stager:
             r = w.brres(SA, path)
             cell = self.cell_of(o["pos"][0], o["pos"][2])
             if how == "tree":
-                near, mid = models
+                near, mid = models[:2]
+                far = models[2] if len(models) > 2 else None
                 if mid:
                     self.bake_model(r, r.models[near], o["mtx"], TAG_NEAR, cell=cell)
                     self.bake_model(r, r.models[mid], o["mtx"], TAG_MID, cell=cell)
+                    if far:
+                        self.bake_model(r, r.models[far], o["mtx"], TAG_FAR, cell=cell)
                 else:
                     self.bake_model(r, r.models[near], o["mtx"], TAG_PROP, cell=cell)
             elif how == "static":
@@ -973,6 +1009,21 @@ class Stager:
 
         ident = np.eye(4)
         notes = OrderedDict()
+        # parked cars are runtime instances so the player can take the nearest one and drive it;
+        # their original transforms and class_id are retained, but no route animation is attached.
+        parked = [o for o in objs if o["cls"] == 15]
+        if parked:
+            r, mdl, mi, nm = model_for(15)
+            for o in parked:
+                place(15, mi, ng3d.NONE16, o["mtx"], 0, flags=ng3d.INST_STATIC)
+            notes[15] = "parked; runtime instance, enter with 1 and drive with the circle pad"
+        for cls in (7, 8):
+            anchored = [o for o in objs if o["cls"] == cls]
+            if anchored:
+                r, mdl, mi, nm = model_for(cls)
+                for o in anchored:
+                    place(cls, mi, ng3d.NONE16, o["mtx"], 0, flags=ng3d.INST_STATIC)
+                notes[cls] = "anchored boat; runtime instance, enter with 1 and steer with the circle pad"
         # windmills: the blades turn about the hub (CHR0 WS2_common_windmill, 299 frames), on the
         # placed matrix; they turn in step in WSR, staggered here
         ws = [o for o in objs if o["cls"] == 18]
@@ -1091,6 +1142,19 @@ class Stager:
                     place(cls, mi, ai, M, (k * 0.618 % 1.0) * period)
             notes[cls] = "%s flapping on a circle of the placed scale's radius at %.1f units a frame" % (
                 flap, BIRD_SPEED)
+        # The Skydiving parachute's idle/open loop from OmkScene. The island attaches this single
+        # animated instance to the Mii during an intentional run off a ledge; its reserved class id
+        # keeps it out of the island's parked vehicle and prop handling.
+        parachute = w.brres("Common/OmkScene/common.carc", "G3D/WS2_omk_parachute.brres")
+        parachute_model = parachute.models["WS2_omk_parachute_01"]
+        parachute_index, parachute_nodes = self.cv.model(parachute, parachute_model)
+        parachute_anim = parachute.anims["CHR0"]["WS2_omk_parachute_01"]
+        parachute_builder = convert.AnimBuilder(pkg, parachute_anim.name, parachute_anim.frames)
+        convert.add_chr0(parachute_builder, parachute_anim, parachute_index, parachute_nodes, parachute_model)
+        pkg.add("instances", model=parachute_index, flags=ng3d.INST_ANIMATED, anim=parachute_builder.end(),
+                class_id=0xFFFE, mtx=np.eye(4)[:3].tolist(), anim_offset=0.0, cull_distance=0.0)
+        self.inv["falling"] = dict(source="Common/OmkScene/common.carc:G3D/WS2_omk_parachute.brres",
+                                   model="WS2_omk_parachute_01", animation="WS2_omk_parachute_01 (30-frame CHR0)")
         self.say("instances: %s" % ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(made.items())))
         for cls, n in made.items():
             self.inv["props"][cls]["instances"] = n
@@ -1181,9 +1245,23 @@ class Stager:
         out["world_clr"] = dict(frames=200, tracks=n, sources=["CLR0 WS2_common_island", "CLR0 WS2_common_island_V"])
         # the sea: the Flyover's set (main.dol 0x806BE698: sea_P with sea_nami); 20,000 frames
         ab = convert.AnimBuilder(pkg, "sea_srt", 20000)
-        n = convert.add_srt0(ab, isl.anims["SRT0"]["WS2_common_sea_P"], self.texmtx_of("WS2_common_sea"))
+        n = convert.add_srt0(ab, isl.anims["SRT0"]["WS2_common_sea_P"], self.texmtx_of("WS2_common_sea"),
+                             skip={("mt_za_water", 1)})
         n += convert.add_srt0(ab, isl.anims["SRT0"]["WS2_common_sea_nami"], self.texmtx_of("WS2_common_sea"),
                               period=1000)
+        reflection_mtx = self.texmtx_of("WS2_common_sea")("mt_za_water", 1)
+        if reflection_mtx is not None:
+            # Sixteen prefiltered wave/reflection phases, stepping every 25 world frames and
+            # repeating every 400. The base SRT is quarter-scale, so these are 4x4 atlas cells.
+            s_keys, t_keys = [], []
+            for repeat in range(50):
+                for frame in range(16):
+                    at = float(repeat * 400 + frame * 25)
+                    s_keys.append((at, (frame % 4) * 0.25, 0.0))
+                    t_keys.append((at, (frame // 4) * 0.25, 0.0))
+            ab.add(ng3d.TT_TEXMTX_TRANS_S, reflection_mtx, s_keys, ng3d.IP_STEP, reg=1)
+            ab.add(ng3d.TT_TEXMTX_TRANS_T, reflection_mtx, t_keys, ng3d.IP_STEP, reg=1)
+            n += 2
         self.sea_srt = ab.end()
         out["sea_srt"] = dict(frames=20000, tracks=n, sources=["SRT0 WS2_common_sea_P", "SRT0 WS2_common_sea_nami"])
         ab = convert.AnimBuilder(pkg, "sea_clr", 1000)
@@ -1631,6 +1709,13 @@ def main(argv=None):
         st.stage_cvis(kcl, a.pvs, work)
         if not a.keep_raw:
             shutil.rmtree(work, ignore_errors=True)
+    if not a.no_prelit:
+        shadow_stats = shadows.bake_soft_sun_shadow(st.pkg)
+        st.inv["sun_shadow_bake"] = shadow_stats
+        st.say("sun shadows: %u triangles, %u static vertices, %u strongly shadowed, %ux%u map, %ux%u PCF" %
+               (shadow_stats["triangles"], shadow_stats["vertices"], shadow_stats["shadowed"],
+                shadow_stats.get("resolution", 0), shadow_stats.get("resolution", 0),
+                shadow_stats.get("pcf", 0), shadow_stats.get("pcf", 0)))
     pkg = st.pkg
     bad = pkg.check()
     if bad:

@@ -109,6 +109,14 @@ public:
     void set_draw_distance(f32 cells, f32 instances);
     void set_lod_scale(f32 scale);
 
+    // Runtime instance access for gameplay-controlled objects. Mutate only on the game thread,
+    // before starting the frame's World job or building its packets.
+    u32 instance_count() const;
+    u16 instance_class(u32 instance) const;
+    bool instance_animated(u32 instance) const;
+    Mtx34 instance_transform(u32 instance) const;
+    bool set_instance_transform(u32 instance, const Mtx34& transform);
+
     // the speed-ups in use (WorldFeature bits)
     void set_features(u32 features);
     u32 features() const;

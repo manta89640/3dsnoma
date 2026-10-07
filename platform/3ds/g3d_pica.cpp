@@ -640,13 +640,13 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     static const u32 k_zero[33] = {};  // (buffers 1-11: none)
     cmd_incremental(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
     cmd_write(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
-    // The depth, complemented. The GX path's draws output z (clip space) and the depth map makes the
-    // buffer's depth -z/w (citro3d's default: scale -1, offset 0). Near 1, as most of the island is
+    // Both renderers use the complemented clip depth supplied by gx_pica's set_xform. With the
+    // old clip depth and citro3d's default map (-1, 0), near 1, as most of the island is
     // (1 - near/distance, near 15 Mii units), that ratio of two nearly equal 24-bit floats is off by
     // up to ~7e-5 -- hundreds of the buffer's steps, half a package unit of distance 300 units away:
-    // an overlay and the ground under it come out in either order. The native shader outputs
-    // z' = -(z + w) instead, from one row the CPU sums in double precision (draw: cpf_'s row 2, the
-    // GX projection's depth row, applied to the model-view in matrices()), with 16 bits of precision
+    // an overlay and the ground under it come out in either order. The shared clip transform outputs
+    // z' = -(z + w) instead (draw: cpf_'s row 2, the GX projection's depth row, applied to the
+    // model-view in matrices()), with 16 bits of precision
     // of its own, and this depth map makes 1 + z'/w of it: the same -z/w, as
     // accurate as the buffer (and the same clipping: z' within [-w, 0] as z was). Checked on the
     // host with the GPU's 24-bit floats emulated, over the island's 21 camera views: a point
@@ -1107,8 +1107,9 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     const u64 t0 = svcGetSystemTick();
     u32 *cmd, cmd_size, cmd_start;
     GPUCMD_GetBuffer(&cmd, &cmd_size, &cmd_start);
-    // the packet's: clip x projection, and its rows as the shader takes them (row 2: the depth out
-    // complemented, z' = -(z + w): see begin_packet); the lights toward them in view space
+    // The shared clip matrix already complements depth. Apply it once: complementing row 2 again
+    // would reverse the island's depth while its material tests still expect smaller values nearer
+    // the eye, so distant water would cover nearer land. The GX and native draws share this mapping.
     double cl[4][4];
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++)
@@ -1116,7 +1117,7 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     mul44(cl, proj_, cp_);
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++)
-            cpf_[i][j] = (f32)(i == 2 ? -(cp_[2][j] + cp_[3][j]) : cp_[i][j]);
+            cpf_[i][j] = (f32)cp_[i][j];
     lights_.assign(8 * p.lights.size(), 0.0f);
     for (size_t i = 0; i < p.lights.size(); i++) {
         const g3::Packet::Light& l = p.lights[i];
@@ -1223,9 +1224,9 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     // shader doesn't write)
     if (units_[0][2] != ~0u && ((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION)
         cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
-    // the GX path's depth map (citro3d's default, which it never changes)
-    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
-    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
+    // the GX path uses the same complemented clip depth
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
     u32 cmd_end;
     GPUCMD_GetBuffer(&cmd, &cmd_size, &cmd_end);
     pica_native_end(&prog_);

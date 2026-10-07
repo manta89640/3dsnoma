@@ -1370,9 +1370,12 @@ void set_xform() {
     // y' = 1 - X/200, X = (x/w * vsx + vox - 342) * kx
     m[1][0] = -vsx * kx / 200.0f;
     m[1][3] = 1.0f - (vox - 342.0f) * kx / 200.0f;
-    // the PICA keeps depth -z'/w: the GX window depth, 0-1
-    m[2][2] = -vsz / 16777215.0f;
-    m[2][3] = -voz / 16777215.0f;
+    // Keep the GX depth, but complement clip z before the PICA divides z by w. The new z/w is
+    // GX depth - 1, close to zero at the far plane; adding one in the depth map recovers the GX
+    // depth without dividing two nearly equal 24-bit values. The native g3d renderer uses the
+    // same mapping (g3d_pica.cpp).
+    m[2][2] = vsz / 16777215.0f;
+    m[2][3] = voz / 16777215.0f - 1.0f;
     m[3][3] = 1.0f;
     if (memcmp(m, P.clip, sizeof(m)) != 0) {
         memcpy(P.clip, m, sizeof(m));
@@ -1425,6 +1428,7 @@ void begin_frame() {
     P.resume = false;
     C3D_FrameDrawOn(P.top);
     frame_list_starts();
+    C3D_DepthMap(true, 1.0f, 1.0f);
     P.c3d_touched = true;
     if (stepping())  // (NOMA_PICA_STEP: the clear alone, then a command list of one register write)
         step_piece(STEP_CLEAR), step_piece(STEP_LIST);

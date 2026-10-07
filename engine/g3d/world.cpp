@@ -1001,6 +1001,41 @@ void World::set_draw_distance(f32 cells, f32 instances) {
     impl_->dirty = true;
 }
 
+u32 World::instance_count() const { return (u32)impl_->insts.size(); }
+
+u16 World::instance_class(u32 instance) const {
+    return instance < package_.instances().count ? package_.instances()[instance].class_id : NONE;
+}
+
+bool World::instance_animated(u32 instance) const {
+    if (instance >= package_.instances().count)
+        return false;
+    const fmt::Instance& in = package_.instances()[instance];
+    return in.anim != NONE && (in.flags & fmt::INST_ANIMATED);
+}
+
+Mtx34 World::instance_transform(u32 instance) const {
+    return instance < impl_->insts.size() ? impl_->insts[instance].mtx : identity34();
+}
+
+bool World::set_instance_transform(u32 instance, const Mtx34& matrix) {
+    if (instance >= impl_->insts.size())
+        return false;
+    Impl::Inst& n = impl_->insts[instance];
+    const fmt::Instance& in = package_.instances()[instance];
+    const fmt::Model& model = package_.models()[in.model];
+    n.mtx = matrix;
+    n.scale = max_scale(n.mtx);
+    n.centre = transform(n.mtx, box_centre(model.bbox));
+    n.radius = model.radius * n.scale;
+    n.posed_model = NONE;
+    n.posed_tick = 0;
+    n.at = n.centre;
+    n.speed = 0;
+    impl_->dirty = true;
+    return true;
+}
+
 void World::set_lod_scale(f32 scale) {
     impl_->lod_scale = scale;
     impl_->dirty = true;

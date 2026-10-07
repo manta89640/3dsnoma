@@ -196,14 +196,17 @@ Sections (v1):
   not water) under the feet within a step height (40 island units up, 200 down); walls = sphere
   (radius ~6 island units at knee and chest height) push-out against non-walkable triangles and
   invisible fences (attr high byte 0x08/0x00); water: the Mii may wade while the water surface
-  (attr 0x1106) is < 8 units above the ground, else that move is refused (shore stops the Mii); slopes
+  (attr 0x1106) is < 8 units above the ground; deeper water switches to surface swimming and the
+  nearby shore returns the Mii to walking; slopes
   steeper than walkable push back; tree trunks = cylinders from INST (radius from the model). Must use
   the octree with neighbouring cells (the octree only lists triangles within its build radius).
 - Camera: third person, orbit yaw/pitch/distance around the Mii's head (island units: distance ~35,
   pitch 15 deg default); auto-turn behind the Mii while walking (slowly), manual orbit overrides for
   2 s; terrain avoidance (ray from target to camera against the KCL, pull in); FOV 45 deg;
   near 1.5 / far 80,000 island units (×k in guest units).
-- Controls. 3DS: circle pad = move (stick mode: no pointer nudge while the island runs); C-stick (New
+- Controls. 3DS: circle pad = move and swim (stick mode: no pointer nudge while the island runs); X
+  enters or leaves a nearby car or anchored boat. In a car or boat, pad up/down accelerates or reverses
+  and left/right steers; boats float on the water and stop at shore. C-stick (New
   3DS, irrst) or L/R = orbit camera, D-pad up/down = pitch, D-pad left/right = orbit, Y = camera
   behind; START or B = the menu (B presses the Home tab like the Sound Player); touch = pointer
   (Home tab, dialog). Host: NOMA_INPUT tokens `S(x;y)[:secs]` (stick), `C(x;y)[:secs]` (camera
@@ -250,8 +253,10 @@ theme (Sound Player semantics).
   (0, 100000, 25000); set 6 Flag ambient #bec8d2 + Flag_Light; set 8 Obj2 ambient #646464 + Map_Light.
   The sun model (StageArc Sun/G3D) belongs in the sky.
 - **Walking (research reach/reach.md):** slope limit 50 deg (walkable normal.y >= 0.643), step ~5 iu,
-  head clearance 20, water and lava are walls, no drop higher than ~30 iu (2 Mii heights: no falling
-  into coves you can't leave). About 73% of the main island is then reachable on foot, incl. tunnels,
+  head clearance 20, water and lava are walls, normal walking refuses drops higher than ~30 iu (2 Mii
+  heights: no falling into coves you can't leave). Holding ZR while sprinting carries momentum off a
+  ledge and deploys the staged Skydiving parachute; an unlanded fall resets after ten seconds. About
+  73% of the main island is then reachable on foot, incl. tunnels,
   the volcano's lava chamber, the castle and the ruins. reach/warps.json holds warp points (27 warp-only:
   Wedge Island, islets, villa cove, summit rim...; 51 at reachable landmarks): they go into the package
   as markers of kind 3 ("warp") with Japanese names, and the exploration menu offers them.
@@ -299,4 +304,9 @@ theme (Sound Player semantics).
   its commands in place (the same words as GPUCMD_Add). The Mii, the camera and the World's
   animations move by the display's frames since the last update (at most 3), not one 1/60 s a game
   frame; PACE is per second, 2 x 25/60 of the WSR-scale pace (what the user approved at ~25 fps).
+  The departure scene's Mii runs at a further 2.5 times that pace; walking is unchanged. Its height,
+  collision body and follow camera are 0.8 times the previous 1.7x size. A starts a grounded jump
+  about 0.8 Mii heights high; holding A gives a fuller rise, releasing early makes a short hop, and
+  the descent accelerates faster than the ascent. Seal.lex's Jump pose holds in the air, and a
+  ceiling stops the rise.
   `NOMA_WUHU_BY_FRAMES=1` restores frame steps for repeatable host runs.

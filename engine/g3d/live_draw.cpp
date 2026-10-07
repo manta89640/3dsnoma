@@ -286,25 +286,32 @@ struct FifoSink : GxSink {
 };
 
 // the shape: its vertex format (the pre-primitive list; from its arrays on when the format is
-// the last shape's, as nw4r skips it), the arrays the draw reads instead of its own, a
-// single-matrix shape's matrices (slot 0, from the view arrays), the matrix index registers'
-// defaults in CP too when they are the defaults, the primitive list
-void emit_shape(const Draw& d, bool mtx_defaults, Sent& s) {
+// the last shape's, as nw4r skips it; a fur shape's once, before its first layer), the arrays the
+// draw reads instead of its own (a fur layer's positions), a single-matrix shape's matrices (slot
+// 0, from the view arrays), the matrix index registers' defaults in CP too when they are the
+// defaults, the primitive list
+void emit_shape(const Draw& d, bool mtx_defaults, Sent& s, u32 layer = 0) {
     const u32 shp = d.shp;
-    const u32 vcd[3] = {load32(shp + 0xC), load32(shp + 0x10), load32(shp + 0x14)};
-    const u32 pre = shp::dl_addr(shp, shp::PRE_PRIM), pre_n = shp::dl_size(shp, shp::PRE_PRIM);
-    if (s.vcd_ok && !memcmp(vcd, s.vcd, sizeof(vcd)))
-        put_call(pre + 0x20, pre_n - 0x20);
-    else
-        put_call(pre, pre_n);
-    memcpy(s.vcd, vcd, sizeof(vcd)), s.vcd_ok = true;
-    for (u32 r = 0x50; r < 0xAC; r++)  // (what the list set: the vertex format, the attribute arrays)
-        s.cp_ok[r] = false;
-    for (u32 r = 0xB0; r < 0xBC; r++)
-        s.cp_ok[r] = false;
+    if (layer == 0) {
+        const u32 vcd[3] = {load32(shp + 0xC), load32(shp + 0x10), load32(shp + 0x14)};
+        const u32 pre = shp::dl_addr(shp, shp::PRE_PRIM), pre_n = shp::dl_size(shp, shp::PRE_PRIM);
+        if (s.vcd_ok && !memcmp(vcd, s.vcd, sizeof(vcd)))
+            put_call(pre + 0x20, pre_n - 0x20);
+        else
+            put_call(pre, pre_n);
+        memcpy(s.vcd, vcd, sizeof(vcd)), s.vcd_ok = true;
+        for (u32 r = 0x50; r < 0xAC; r++)  // (what the list set: the vertex format, the attribute arrays)
+            s.cp_ok[r] = false;
+        for (u32 r = 0xB0; r < 0xBC; r++)
+            s.cp_ok[r] = false;
+    }
+    ArrayOverride arrays[4];
+    memcpy(arrays, d.arrays, sizeof(arrays));
+    if (d.fur_pos)
+        arrays[0] = d.layer_pos(layer);
     for (u32 a = 0; a < 4; a++)
-        if (d.arrays[a].base)
-            put_cp(0xA0 + a, d.arrays[a].base & 0x3FFFFFFF, s), put_cp(0xB0 + a, d.arrays[a].stride, s);
+        if (arrays[a].base)
+            put_cp(0xA0 + a, arrays[a].base & 0x3FFFFFFF, s), put_cp(0xB0 + a, arrays[a].stride, s);
     const s32 cur = shp::cur_mtx(shp);
     if (cur >= 0) {
         put_indexed(0x20, (u32)cur, 0, 12);
@@ -360,8 +367,18 @@ void draw_native(u32 r3, u32 vpos, u32 vnrm, u32 venv, u32 opa, u32 xlu, u32 rep
     LightCache lc = light_cache_now();
     MatShared sh = mat_shared_now();
     for (const Draw& d : f.draws) {
-        if (derive_material(d.mat, mat_sources(d.mat, repl), d.ctrl, lc, sh, out)) {
+        const MatSources src = mat_sources(d.mat, repl);
+        if (derive_material(d.mat, src, d.ctrl, lc, sh, out)) {
             const bool defaults = derive_shape(d.shp, vpos, vnrm, sh, out);
+            if (d.fur_pos) {
+                const FurLayers fur = fur_layers(d.mat, src);
+                for (u32 layer = 0; layer < d.layers(); layer++) {
+                    derive_fur_layer(fur, layer, out);
+                    out.flush();
+                    emit_shape(d, defaults, s, layer);
+                }
+                continue;
+            }
             out.flush();
             emit_shape(d, defaults, s);
         } else {
@@ -390,10 +407,11 @@ struct CheckCall {
     std::string name;  // (taken at the call: a scene change frees the model)
     u32 vpos, vnrm, venv;
     std::vector<Draw> draws;
-    // the derivation's register writes, draw by draw (draw k's end at writes_end[k]), and whether
-    // it could derive the draw's material
+    // the derivation's register writes, draw by draw and a fur draw's layer by layer (segment k's
+    // end at writes_end[k]; draw d's first segment seg_first[d]), and whether it could derive the
+    // draw's material
     std::vector<GxRegs::Write> writes;
-    std::vector<u32> writes_end;
+    std::vector<u32> writes_end, seg_first;
     std::vector<u8> derived;
 };
 
@@ -683,10 +701,12 @@ void check_gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
     }
     const Draw& d = c.call.draws[c.draw];
     const DecodedShape& s = c.shape;
-    if (c.prim == 0 && c.layer == 0) {
-        c.draws++;
-        // the draw's material and matrix registers
-        const u32 from = c.draw ? c.call.writes_end[c.draw - 1] : 0, to = c.call.writes_end[c.draw];
+    if (c.prim == 0) {
+        if (c.layer == 0)
+            c.draws++;
+        // the draw's material and matrix registers (a fur layer's: what it changes)
+        const u32 seg = c.call.seg_first[c.draw] + c.layer;
+        const u32 from = seg ? c.call.writes_end[seg - 1] : 0, to = c.call.writes_end[seg];
         for (u32 i = from; i < to; i++)
             c.regs.apply(c.call.writes[i]);
         if (c.call.derived[c.draw])
@@ -748,10 +768,21 @@ void nw4r_g3d_DrawResMdlDirectly(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8,
         LightCache lc = light_cache_now();
         MatShared sh = mat_shared_now();
         for (const Draw& d : call.draws) {
-            const bool ok = derive_material(d.mat, mat_sources(d.mat, r9), d.ctrl, lc, sh, regs);
+            const MatSources src = mat_sources(d.mat, r9);
+            const bool ok = derive_material(d.mat, src, d.ctrl, lc, sh, regs);
             derive_shape(d.shp, r4, r5, sh, regs);
             call.derived.push_back(ok);
-            call.writes_end.push_back((u32)call.writes.size());
+            call.seg_first.push_back((u32)call.writes_end.size());
+            if (ok && d.fur_pos) {
+                const FurLayers fur = fur_layers(d.mat, src);
+                for (u32 layer = 0; layer < d.layers(); layer++) {
+                    derive_fur_layer(fur, layer, regs);
+                    call.writes_end.push_back((u32)call.writes.size());
+                }
+            } else {
+                for (u32 layer = 0; layer < d.layers(); layer++)
+                    call.writes_end.push_back((u32)call.writes.size());
+            }
         }
     }
     c.pending.push_back(std::move(call));

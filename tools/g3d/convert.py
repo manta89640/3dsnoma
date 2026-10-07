@@ -79,8 +79,27 @@ class Lighting:
     package's point lights from their direction toward the origin), alpha = source x ambient alpha.
     lights: [(kind, position, direction, rgba)]; sets: {index: (ambient rgba, [light indices])}."""
 
-    def __init__(self, lights, sets):
+    def __init__(self, lights, sets, ambient_shadow_boxes=()):
         self.lights, self.sets = lights, sets
+        # Optional world-space boxes used for WSR's shadow areas. Each row is the inverse
+        # transform of a unit box in PMP space (centered at the origin, half-width 1).
+        self.ambient_shadow_boxes = [(np.asarray(m, np.float64), np.asarray(half_extent, np.float64))
+                                     for m, half_extent in ambient_shadow_boxes]
+
+    def ambient_shadow(self, pos):
+        """Fade only the ambient RGB inside shadow-area boxes, with a short inward feather."""
+        factor = np.ones(len(pos), np.float64)
+        for inv, half_extent in self.ambient_shadow_boxes:
+            local = np.asarray(pos, np.float64) @ inv[:3, :3].T + inv[:3, 3]
+            inside = np.all(np.abs(local) <= 1.0, axis=1)
+            if not inside.any():
+                continue
+            # The last five world units inside the box blend into its shaded interior.
+            edge = np.min((1.0 - np.abs(local)) * half_extent[None, :], axis=1)
+            t = np.clip(edge / 5.0, 0.0, 1.0)
+            t = t * t * (3.0 - 2.0 * t)
+            factor[inside] = np.minimum(factor[inside], 1.0 - 0.45 * t[inside])
+        return factor
 
     def channel(self, word, light_set, matc, ambc, pos, nrm, clr, comps):
         n = len(pos)
@@ -95,6 +114,8 @@ class Lighting:
             amb = clr[:, comps] if word & 0x40 and clr is not None else np.broadcast_to(ambc[comps], (n, len(comps)))
             lights = []
         light = np.array(amb, np.float64)
+        if comps[0] == 0 and self.ambient_shadow_boxes:
+            light *= self.ambient_shadow(pos)[:, None]
         if comps[0] == 0 and nrm is not None:
             fn = (word >> 7) & 3
             for kind, lpos, ldir, rgba in lights:
@@ -307,7 +328,7 @@ class Converter:
             used = (s["flag"] & 1) or s["map_mode_id"] != 0
             tg = M.texgens[i]
             tg.type, tg.source, tg.normalize = g["type"], g["src"], int(g["normalize"])
-            tg.matrix = i if used else NONE16
+            tg.matrix = g.get("matrix", i) if used else NONE16
             tg.post_mtx = i if g["normalize"] and g["post"] is not None else NONE16
         for i in range(mat.n_texgens, 8):
             M.texgens[i].matrix = M.texgens[i].post_mtx = NONE16
@@ -955,7 +976,7 @@ def add_clr0(ab, anim, material_of, period=None):
     return n
 
 
-def add_srt0(ab, anim, texmtx_of, period=None, time_scale=1.0):
+def add_srt0(ab, anim, texmtx_of, period=None, time_scale=1.0, skip=()):
     """SRT0 texture matrices as TT_TEXMTX_* tracks (all five components: nw4r sets the whole
     matrix while animating it). texmtx_of(material name, matrix number) -> TexMtx index or None.
     time_scale stretches the curves (frames times it), period is the loop's length after that."""
@@ -963,6 +984,8 @@ def add_srt0(ab, anim, texmtx_of, period=None, time_scale=1.0):
     for mname, mtxs in anim.materials.items():
         for j, x in mtxs.items():
             if not isinstance(j, int):
+                continue
+            if (mname, j) in skip:
                 continue
             ti = texmtx_of(mname, j)
             if ti is None:

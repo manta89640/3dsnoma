@@ -204,6 +204,7 @@ struct Drive {
     bool world = false;           // ...or a world direction in wx, wz
     f32 wx = 0, wz = 0;
     bool run = false;
+    bool jump = false;
     FollowCameraInput cam;
 };
 
@@ -233,6 +234,7 @@ public:
             else
                 cam.stick_to_world(d.sx, d.sy, &in.move_x, &in.move_z);
             in.run = d.run;
+            in.jump = d.jump;
             w_.reset_stats();
             pl.update(in, TICK);
             cam.update(d.cam, pl.position(), pl.yaw(), pl.speed() / pp_.run_speed, TICK);
@@ -323,6 +325,42 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
         pp.wade_depth, pp.max_drop, std::acos(pp.walkable_ny) * 180 / PI);
     Walker wk(w, pp, out, tag);
     const Vec3 spawn{-2029, 69, 2330};
+
+    {  // one grounded press jumps, another press in the air does not; it lands at the same place
+        Player pl(w, pp);
+        f32 ground_y = 0;
+        Tally t = wk.run("jump", spawn, 180, 2, pl, [&](const Player& p, u32 i, Drive& d) {
+            if (i == 0)
+                ground_y = p.position().y;
+            d.jump = i == 0 || i == 20;
+            return true;
+        });
+        const bool apex = t.max_y > ground_y + 0.6f * pp.jump_height &&
+                          t.max_y < ground_y + 1.15f * pp.jump_height;
+        const bool landed = !pl.airborne() && std::fabs(pl.position().y - ground_y) < 0.1f;
+        wk.report("jump", pl, t, apex && landed, "one jump, no midair restart, landed");
+    }
+
+    {  // running momentum carries through an intentional jump
+        Player pl(w, pp);
+        Vec3 takeoff{};
+        bool took_off = false, was_airborne = false;
+        Tally t = wk.run("jump_momentum", spawn, 180, 3, pl, [&](const Player& p, u32 i, Drive& d) {
+            if (i == 30)
+                takeoff = p.position(), d.jump = true, took_off = true;
+            else if (was_airborne && !p.airborne())
+                return false;
+            was_airborne |= p.airborne();
+            d.world = true, d.wz = -1.0f, d.run = true;
+            return true;
+        });
+        const Vec3 landed = pl.position();
+        const f32 jump_distance = std::sqrt((landed.x - takeoff.x) * (landed.x - takeoff.x) +
+                                            (landed.z - takeoff.z) * (landed.z - takeoff.z));
+        wk.report("jump_momentum", pl, t,
+                  took_off && was_airborne && !pl.airborne() && jump_distance > pp.run_speed * 30.0f,
+                  "kept running momentum through the jump");
+    }
 
     {  // north into the fountain: up its rim (y 79), and the basin's water has no floor
         Player pl(w, pp);

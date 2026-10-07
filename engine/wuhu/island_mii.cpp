@@ -17,7 +17,8 @@
 // frame for a man, 1.687 and 5.343 for a woman), so at that speed it plays at its own pace and at any
 // other the stride keeps to the ground. (That the clips were made for those speeds is an inference:
 // player.h's stride lengths make the same one.) Both walking clips are driven all the time, so that the
-// one being crossfaded from keeps step too. Falling, the Mii keeps the clip it had, its frame still.
+// one being crossfaded from keeps step too. A jump or ledge fall uses Seal.lex's one-frame Jump pose;
+// the imported WSR parachute supplies the animated falling silhouette.
 #include "engine/wuhu/island_mii.h"
 
 #include <algorithm>
@@ -44,6 +45,7 @@ const char* const ANIM_FILES[] = {
     "g3d/Mii/Animation/Wait.lex",
     "g3d/Mii/Animation/Head.lex",
     "g3d/Mii/Animation/Color_Anim.lex",
+    "g3d/Mii/Animation/Seal.lex",
 };
 const u32 N_ANIM_FILES = sizeof(ANIM_FILES) / sizeof(ANIM_FILES[0]);
 // a blink every 3.5 s, for a tenth of a second
@@ -118,7 +120,7 @@ bool IslandMii::make_step() {
         std::vector<u32> paths;
         for (const char* p : ANIM_FILES)
             paths.push_back(s.add(p));
-        u32 wait = s.add("Wait"), move = s.add("Move");
+        u32 wait = s.add("Wait"), move = s.add("Move"), seal = s.add("Seal"), jump = s.add("Jump");
         u32 walk = s.add("Walk"), run = s.add("Run"), f_walk = s.add("Female_Walk"), f_run = s.add("Female_Run");
         // the block's layout
         u32 size = 0;
@@ -152,6 +154,7 @@ bool IslandMii::make_step() {
         clip_file_[WAIT] = strings_ + wait, clip_anim_[WAIT] = strings_ + wait;
         clip_file_[WALK] = clip_file_[RUN] = strings_ + move;
         clip_anim_[WALK] = strings_ + walk, clip_anim_[RUN] = strings_ + run;
+        clip_file_[JUMP] = strings_ + seal, clip_anim_[JUMP] = strings_ + jump;
         longest_file_ = strings_ + move, longest_anim_ = strings_ + f_walk;
         female_walk_ = strings_ + f_walk, female_run_ = strings_ + f_run;
         // the 3D sound first, as g3d::Stage's ctor makes it before its root
@@ -191,8 +194,8 @@ bool IslandMii::make_step() {
         g3d::behavior_set_expression(behavior_, expression_);
         // the clips: their animation objects (made with the body), loops and own speeds
         const Gait gt = gait();
-        const f32 loops[N_CLIPS] = {120, 60, female_ ? 30.0f : 40.0f};
-        const f32 speeds[N_CLIPS] = {0, gt.walk, gt.run};
+        const f32 loops[N_CLIPS] = {120, 60, female_ ? 30.0f : 40.0f, 1};
+        const f32 speeds[N_CLIPS] = {0, gt.walk, gt.run, 0};
         for (int c = 0; c < N_CLIPS; c++) {
             anim_[c] = g3d::body_anim(g3d::actor_body(actor_), clip_file_[c], clip_anim_[c]);
             frames_[c] = loops[c], speed_[c] = speeds[c];
@@ -250,7 +253,7 @@ void IslandMii::write_camera(const engine::g3d::Camera& c) {
 }
 
 void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at, f32 yaw, PlayerState state,
-                       f32 walked) {
+                       f32 walked, f32 run_pace_multiplier) {
     if (step_ < STEPS || !block_)
         return;
     const u32 root = guest::load32(root_word_);
@@ -260,11 +263,15 @@ void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at,
         case PlayerState::WAIT: set_clip(WAIT); break;
         case PlayerState::WALK: set_clip(WALK); break;
         case PlayerState::RUN: set_clip(RUN); break;
-        case PlayerState::FALL: break;
+        case PlayerState::FALL: set_clip(JUMP); break;
+        case PlayerState::JUMP: set_clip(JUMP); break;
+        case PlayerState::SWIM: set_clip(RUN); break;
         }
         for (int c = WALK; c <= RUN; c++)
-            if (speed_[c] > 0)
-                frame_[c] = std::fmod(frame_[c] + walked / speed_[c], frames_[c]);
+            if (speed_[c] > 0) {
+                const f32 pace = c == RUN ? std::max(1.0f, run_pace_multiplier) : 1.0f;
+                frame_[c] = std::fmod(frame_[c] + walked / (speed_[c] * pace), frames_[c]);
+            }
         guest::store32(expression_,
                        frame_count_ % BLINK_EVERY < BLINK_FRAMES ? g3d::FACE_BLINK : g3d::FACE_NORMAL);
         // the behaviour and the BodyController first; then the body where the player is and the

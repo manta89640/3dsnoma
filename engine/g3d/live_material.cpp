@@ -41,6 +41,7 @@ const u32 LIGHT_CACHE = GA_nw4r_g3d_G3DState_sLightCache;
 const u32 TEX_MTX_FUNCS = G3D_STATE + 0x240;  // {function, needs normal} by mapping mode
 const u32 TEV_DL_SIZE = GA_nw4r_g3d_ResTev_sDlSize;      // ResTev's list's size by stage count - 1
 const u32 CULL = GA_nw4r_g3d_sCullModeTable;              // GX cull mode by nw4r's
+const u32 FUR_CHAN_IDS = GA_lbl_80709DE8;                 // the fur loop's channels: COLOR0, ALPHA0, COLOR1, ALPHA1
 
 // a texture map's BP registers (maps 0-3, 4-7)
 u32 tex_reg(u32 base03, u32 map) { return map < 4 ? base03 + map : base03 + 0x20 + (map - 4); }
@@ -364,10 +365,6 @@ MatShared mat_shared_now() {
 // ---- Draw1Mat1ShpDirectly's material setup
 
 bool derive_material(u32 mt, const MatSources& s, u32 ctrl, LightCache& lc, MatShared& sh, GxSink& r) {
-    if (mat::fur(mt)) {
-        warn_once("a fur material: drawn by the game's own code");
-        return false;
-    }
     if (ctrl & 0x10)
         return true;
     if (s.misc && (load8(s.misc + 4) | load8(s.misc + 5) | load8(s.misc + 6) | load8(s.misc + 7))) {
@@ -474,6 +471,113 @@ bool derive_shape(u32 shp, u32 vpos, u32 vnrm, const MatShared& sh, GxSink& r) {
     r.xf_write(0x1018, 0x3CF3CF00u);
     r.xf_write(0x1019, 0x00F3CF3Cu);
     return true;
+}
+
+
+// ---- fur: Draw1Mat1ShpDirectly's layer loop
+
+FurLayers fur_layers(u32 mt, const MatSources& s) {
+    FurLayers f{};
+    f.fur = mat::fur(mt);
+    // the TEV colour registers 0-2 (nw4r_g3d_ResMatTevColor_GXGetTevColor: the list's BP loads of
+    // each register's two halves, at +0x40 + 10 a register; nothing where the list has none there)
+    u8* const c[3] = {f.c0, f.c1, f.c2};
+    for (u32 i = 0; i < 3 && s.tevcolor_dl; i++) {
+        const u32 p = s.tevcolor_dl + 0x40 + i * 0xA;
+        if (!load8(p))
+            continue;
+        const u32 ra = (u32)load8(p + 1) << 24 | (u32)load8(p + 2) << 16 | (u32)load8(p + 3) << 8 | load8(p + 4);
+        const u32 bg = (u32)load8(p + 6) << 24 | (u32)load8(p + 7) << 16 | (u32)load8(p + 8) << 8 | load8(p + 9);
+        c[i][0] = (u8)ra, c[i][1] = (u8)(bg >> 12), c[i][2] = (u8)bg, c[i][3] = (u8)(ra >> 12);
+    }
+    // the channels: material colours (nw4r_g3d_ResMatChan_GXGetChanMatColor) and, by channel id,
+    // the material source and attenuation function (nw4r_g3d_ResMatChan_GXGetChanCtrl)
+    for (u32 ch = 0; ch < 2 && s.chan; ch++)
+        for (u32 k = 0; k < 4; k++)
+            f.mat_clr[ch][k] = load8(s.chan + ch * 0x14 + 4 + k);
+    for (u32 i = 0; i < 4; i++) {
+        const u32 id = load32(FUR_CHAN_IDS + 4 * i);
+        f.chan_id[i] = id;
+        if (!s.chan)
+            continue;
+        const u32 v = load32(s.chan + (id & 1) * 0x14 + (id & 2 ? 0x10 : 0xC));
+        f.mat_src[i] = (s32)(v & 1);
+        f.attn_fn[i] = !((v >> 10) & 1) ? 0 : !((v >> 9) & 1) ? 2 : 1;
+    }
+    // indirect matrices 1-3 whose method (nw4r_g3d_ResMatMisc_GetIndirectTexMtxCalcMethod) is 3, as
+    // the material's indirect list holds them (nw4r_g3d_ResMatIndMtxAndScale_GXGetIndTexMtx)
+    for (u32 k = 0; k < 3; k++) {
+        if (!s.misc || load8(s.misc + k + 4) != 3)
+            continue;
+        f.ind[k] = true;
+        static const u32 at[3] = {0xA, 0x20, 0x2F};
+        const u32 p = s.ind_dl ? s.ind_dl + at[k] : 0;
+        if (!p || !load8(p))
+            continue;
+        auto word = [&](u32 o) { return (u32)load8(p + o) << 24 | (u32)load8(p + o + 1) << 16 | (u32)load8(p + o + 2) << 8 | load8(p + o + 3); };
+        const u32 a = word(1), b = word(6), cc = word(0xB);
+        f.ind_exp[k] = (s8)((((a >> 22) & 3) | ((b >> 20) & 0xC) | ((cc >> 18) & 0x30)) - 0x11);
+        const f32 scale = 0.0009765625f;
+        auto lo = [&](u32 w) { return scale * (f32)((s32)(w << 21) >> 21); };
+        auto hi = [&](u32 w) { return scale * (f32)((s32)((w << 10) & 0xFFE00000u) >> 21); };
+        f32* m = f.ind_mtx[k];
+        m[0] = lo(a), m[1] = lo(b), m[2] = lo(cc), m[3] = 0.0f;
+        m[4] = hi(a), m[5] = hi(b), m[6] = hi(cc), m[7] = 0.0f;
+        m[8] = 0.0f, m[9] = 0.0f, m[10] = 1.0f, m[11] = 0.0f;
+    }
+    return f;
+}
+
+void derive_fur_layer(const FurLayers& f, u32 layer, GxSink& r) {
+    // the layer's fraction (nw4r_g3d_ResMatFur_GetLayerFraction)
+    f32 t = 0.0f;
+    if (f.fur) {
+        const u32 curve = load32(f.fur + 0x8);
+        const f32 x = (f32)(layer + 1) / (f32)load32(f.fur + 0x4);
+        t = curve == 0 ? x : curve == 1 ? (f32)g::pow((f64)x, 0.6000000238418579) : 0.0f;
+    }
+    const f32 one = 1.0f, u = one - t;
+    const f32 alpha_t = (f32)g::pow((f64)t, (f64)(f.fur ? loadf(f.fur + 0xC) : 0.0f));
+    const f32 color_t = (f32)g::pow((f64)t, (f64)(f.fur ? loadf(f.fur + 0x10) : 0.0f));
+    // TEV konst colour 2: red the fraction, green colour 2's by t^4 (GXSetTevKColor)
+    const f32 green = (f32)(u32)f.c2[1] * (f32)g::pow((f64)t, 4.0);
+    const u32 kr = (u8)NOMA_FCTIWZ(255.0f * t), kg = (u8)NOMA_FCTIWZ(green), kb = f.c2[2], ka = f.c2[3];
+    r.bp_write(0xE4000000u | 0x800000u | kr | ka << 12);
+    r.bp_write(0xE5000000u | 0x800000u | kb | kg << 12);
+    // the indirect matrices, their rotation part scaled by t (GXSetIndTexMtx)
+    for (u32 k = 0; k < 3; k++) {
+        if (!f.ind[k])
+            continue;
+        const f32* m = f.ind_mtx[k];
+        const f32 o[6] = {t * m[0], t * m[1], m[2], t * m[4], t * m[5], m[6]};
+        const u32 e = (u32)(s32)f.ind_exp[k] + 0x11;
+        auto fix = [](f32 v) { return (u32)NOMA_FCTIWZ(1024.0f * v) & 0x7FF; };
+        r.bp_write((k * 3 + 6) << 24 | ((e << 22) & 0xC00000) | fix(o[3]) << 11 | fix(o[0]));
+        r.bp_write((k * 3 + 7) << 24 | ((e << 20) & 0xC00000) | fix(o[4]) << 11 | fix(o[1]));
+        r.bp_write((k * 3 + 8) << 24 | ((e << 18) & 0xC00000) | fix(o[5]) << 11 | fix(o[2]));
+    }
+    // the material colours: channel 0 and 1's where its colour or alpha takes the register's: the
+    // channel's own by t^(colour exponent) or colour registers 0 to 1 by t, by the attenuation
+    // function; alpha the channel's or registers 0 to 1 by t^(alpha exponent)
+    const s32 br = NOMA_FCTIWZ(((f32)(u32)f.c0[0] * u) + ((f32)(u32)f.c1[0] * t));
+    const s32 bg = NOMA_FCTIWZ(((f32)(u32)f.c0[1] * u) + ((f32)(u32)f.c1[1] * t));
+    const s32 bb = NOMA_FCTIWZ(((f32)(u32)f.c0[2] * u) + ((f32)(u32)f.c1[2] * t));
+    const s32 ba = NOMA_FCTIWZ(((f32)(u32)f.c0[3] * (one - alpha_t)) + ((f32)(u32)f.c1[3] * alpha_t));
+    for (u32 j = 0; j < 2; j++) {
+        if (f.mat_src[2 * j] != 0 && f.mat_src[2 * j + 1] != 0)
+            continue;
+        const u8* mc = f.mat_clr[j];
+        u32 cr, cg, cb;
+        if (f.attn_fn[2 * j] == 0) {
+            cr = (u8)NOMA_FCTIWZ(color_t * (f32)(u32)mc[0]);
+            cg = (u8)NOMA_FCTIWZ(color_t * (f32)(u32)mc[1]);
+            cb = (u8)NOMA_FCTIWZ(color_t * (f32)(u32)mc[2]);
+        } else {
+            cr = (u8)br, cg = (u8)bg, cb = (u8)bb;
+        }
+        const u32 ca = f.attn_fn[2 * j + 1] == 0 ? mc[3] : (u8)ba;
+        r.xf_write(0x100C + (f.chan_id[2 * j] & 1), cr << 24 | cg << 16 | cb << 8 | ca);
+    }
 }
 
 }  // namespace engine::g3d::live

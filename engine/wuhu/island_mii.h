@@ -4,7 +4,8 @@
 // opaque and translucent passes, in the same depth buffer (engine/g3d/native_draw.h) -- and walked
 // by native code (engine/wuhu/player.h): every frame it stands where the player is (times k: Wii no
 // Ma's units), turned its way, and plays the room's Wait, Walk or Run (a woman's Female_Walk and
-// Female_Run) through a SpecialAnim behaviour, a walking clip's frame driven by the distance walked
+// Female_Run), or Seal.lex's Jump pose, through a SpecialAnim behaviour; a walking clip's frame is
+// driven by the distance walked
 // so that its feet keep to the ground whatever the speed. Its camera is the island's, scaled by k.
 //
 // Its guest objects are made a step a frame while the island loads (make_step) and freed in the
@@ -43,7 +44,8 @@ public:
     // (guest units) facing yaw (nw4r degrees), the clip its state asks for, `walked` guest units on
     // (this frame's walking: the walking clips' frames go by it); then the actor manager's update and
     // the root's calc.
-    void update(const engine::g3d::Camera& camera, engine::math::Vec3 at, f32 yaw, PlayerState state, f32 walked);
+    void update(const engine::g3d::Camera& camera, engine::math::Vec3 at, f32 yaw, PlayerState state, f32 walked,
+                f32 run_pace_multiplier = 1.0f);
     // The draw. view() first: the camera's viewport, projection, scissor and scissor offset into GX
     // (engine/ui/g3d.h camera_load_view), which the native draws before the opaque pass take; then
     // the opaque pass, the translucent one.
@@ -53,7 +55,7 @@ public:
 
 private:
     static constexpr u32 STEPS = 5;
-    enum Clip { WAIT, WALK, RUN, N_CLIPS };
+    enum Clip { WAIT, WALK, RUN, JUMP, N_CLIPS };
     void set_clip(Clip c);
     void write_camera(const engine::g3d::Camera& c);
 

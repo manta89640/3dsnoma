@@ -11,6 +11,8 @@
 
 #include "engine/collision/kcl.h"
 
+#include <vector>
+
 namespace engine::wuhu {
 
 using engine::collision::f32;
@@ -45,6 +47,7 @@ struct PlayerParams {
     f32 walkable_ny;                 // ground at least this flat (normal y) is walked on; steeper slid down
     f32 wall_ny;                     // steeper than this (and overhangs) is a wall
     f32 gravity, max_fall_speed;     // island units / s^2 and / s
+    f32 jump_height;                 // rise from a grounded jump, in island units
     f32 walk_stride, run_stride;     // distance a loop of the Walk / Run clip covers
 
     // for a Mii of height scale `scale` (1 = 158 units) and k = Wii no Ma units per island unit
@@ -56,9 +59,18 @@ struct PlayerInput {
     // camera (FollowCamera::stick_to_world)
     f32 move_x = 0, move_z = 0;
     bool run = false;  // run at any tilt
+    bool fast_run = false;  // faster sprint, for a running leap and retained air momentum
+    bool jump = false;  // newly pressed, grounded jump
+    bool jump_held = false;  // held jump button, for a higher arc
 };
 
-enum class PlayerState : u8 { WAIT, WALK, RUN, FALL };
+enum class PlayerState : u8 { WAIT, WALK, RUN, FALL, JUMP, SWIM };
+
+struct Obstacle {
+    Vec3 centre;
+    f32 half_width, half_length, yaw;
+    f32 bottom, top;
+};
 
 class Player {
 public:
@@ -67,6 +79,7 @@ public:
     // puts the Mii on the ground at or below `feet` (up to a step above it), facing `yaw_deg`;
     // false (and the Mii left at `feet`) if there is no ground there
     bool place(Vec3 feet, f32 yaw_deg);
+    bool place_swimming(Vec3 feet, f32 yaw_deg);
     // advances `dt` seconds, in steps of at most 1/60 s (the same input and dt give the same result)
     void update(const PlayerInput& in, f32 dt);
 
@@ -79,6 +92,8 @@ public:
     f32 stride_phase() const { return phase_; }
     f32 distance() const { return distance_; }  // walked in all
     bool airborne() const { return airborne_; }  // falling or sliding down a steep slope
+    bool swimming() const { return swimming_; }
+    void set_obstacles(const std::vector<Obstacle>& obstacles) { obstacles_ = obstacles; }
     u16 ground_attribute() const { return ground_attr_; }
     f32 water_depth() const { return depth_; }  // of the water the Mii stands in (0: dry)
     const PlayerParams& params() const { return p_; }
@@ -98,6 +113,8 @@ private:
     };
     Ground ground_at(f32 x, f32 z, f32 from_y, f32 to_y) const;
     f32 water_above(f32 x, f32 z, f32 ground_y, f32 top_y) const;
+    bool water_surface(f32 x, f32 z, f32 from_y, f32 to_y, f32* y) const;
+    bool blocked(Vec3 feet) const;
     bool landing_ok(f32 x, f32 z, f32 from_y, f32 lowest) const;
     Vec3 push(Vec3 sphere) const;
     Vec3 slide_off_walls(Vec3 feet, bool* free) const;
@@ -106,14 +123,15 @@ private:
     bool try_step(Vec3 d);
     void start_fall(bool slide, f32 lowest);
     void ride_slope(Vec3 n);
-    void fall(f32 frames);
+    void fall(f32 frames, bool jump_held);
+    void swim(const PlayerInput& in, f32 frames);
 
     const engine::collision::World& world_;
     PlayerParams p_;
     Vec3 pos_{0, 0, 0}, last_ground_{0, 0, 0};
     f32 yaw_ = 0, speed_ = 0, vy_ = 0;
     f32 phase_ = 0, distance_ = 0, depth_ = 0;
-    bool airborne_ = false, sliding_ = false;
+    bool airborne_ = false, sliding_ = false, jumping_ = false, run_leap_ = false, swimming_ = false;
     f32 slide_x_ = 0, slide_z_ = 0;  // down the slope, on x/z
     f32 fall_lowest_ = 0;            // the lowest the fall may end (max_drop under where it began)
     int air_ticks_ = 0;
@@ -121,6 +139,7 @@ private:
     Vec3 ground_n_{0, 1, 0};
     // what's solid near the body, gathered once a walking tick (push() checks it covers a sphere)
     mutable engine::collision::Nearby near_;
+    std::vector<Obstacle> obstacles_;
 };
 
 // angles in degrees, wrapped into (-180, 180]
