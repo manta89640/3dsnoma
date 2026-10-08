@@ -83,6 +83,8 @@ public:
     // The surface at (x, z) at `seconds`, its waves faded about a grid centred at (cx, cz): its
     // height (the level and the waves), and its normal if asked.
     f32 height(f32 x, f32 z, double seconds, f32 cx, f32 cz, engine::math::Vec3* normal = nullptr) const;
+    // ... with the waves made already (sea_waves for that time, about (cx, cz): many places at once)
+    f32 height(f32 x, f32 z, const SeaWaves& w, f32 cx, f32 cz, engine::math::Vec3* normal = nullptr) const;
 
     // the grid's vertices: their count, and each one's (x, z) from the centre
     u32 grid_vertices() const { return (u32)grid_xz_.size() / 2; }

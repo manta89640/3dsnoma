@@ -424,6 +424,46 @@ ground-level day (research env_choice/env.md, its set (f), decoded from the file
 - World box (cells): x -35,120..10,985, y -217..4,639, z -14,693..20,651. The sea model reaches
   +-114,000 and the sky dome 70,000.
 
+## The sea
+
+`tools/wuhu/stage_wuhu.py` (SEA_*, WAKES, TRAIL) and `engine/g3d/sea.h`; research sea/report.md.
+
+- The flat sea is WSR's `mt_za_water` with three texture units: the camera-projected glare
+  (`jog_water_light`), `jog_waterB` and `sea2_day` (for `sea2_dummy`), its texture matrices 2 and 3
+  moved to the package's 1 and 2 so sea_P's scrolls drive them every frame (the 16-frame reflection
+  atlas of tools/g3d/water.py is gone). The sea at its level (a corner at y 0, none above 20: the
+  open sea and the ramps up the beaches) has a material of its own flagged `MAT_SEA`; the inland
+  waters that share the material (lake, pool, streams, Wedge Island's rim) keep the plain one.
+- Near the eye a wave grid (section `SEAW`): a log-polar grid of 2,257 vertices and 4,464 triangles,
+  48 around, rings from 3 to 1,200 units, centred under the eye on an 8-unit lattice, drawn after the
+  sky while the eye is under 600 units over the sea. Four waves of deep water's speed (300, 190, 120
+  and 75 units long, 2.6/1.6/0.95/0.5 high, periods 4.2-2.1 s, within 45 degrees of one wind), each
+  faded out from 1.5 to 3 of its wavelengths from the centre, flattened toward the shores by an
+  amplitude map (375 x 300 texels of 128 units over the islands' box; none within 40 units of land,
+  whole from 400; land the collision's triangles that aren't water or a fence reaching above y -3).
+  Its material is the flat sea's plus two combiner stages: times its vertices' shade (doubled) and
+  plus a sky colour times their brightening (the sun's side of a swell, the sky's Fresnel reflection,
+  the sun's glint toward the visible sun, each relative to the flat surface's, so the rim is the flat
+  sea's colour). It marks its pixels in the stencil buffer; `MAT_SEA` items aren't drawn there. On
+  the 3DS its own vertex program (`platform/3ds/shaders/g3d_sea.v.pica`, 104 instructions, the phases
+  folded on the CPU in double precision); on the host the soft backend does the same on the CPU.
+- Boats ride the same waves on the CPU (`World::sea_height`): the driven one and the boats at anchor
+  within 1,500 units of the eye, lifted, pitched and rolled by the swell under their hulls; a
+  swimming Mii is drawn on the waves (its body stays on the collision's surface). A landmark out at
+  sea (NOMA_WUHU_START=ホエール・ウオッチング) starts the Mii swimming.
+- Wakes: WSR's `WS2_common_cruiser_ef` and `WS2_common_move_liner_ef` (SRT0 scroll, CLR0 frame 0)
+  as parts of the moving cruisers' and the liner's models; the driven boat's as an instance of its
+  own (class 0xFFFD, `MAT_RUNTIME`: its C0 alpha follows the boat's speed, scaled to its hull).
+  Trails: every boat (`INST_TRAIL`) samples its path every 14 units; the nearest four with samples
+  are drawn as one dynamic item first in the translucent pass, ribbons of the wake's foam streaks
+  widening 7 units a second and fading over 5 s, on the waves.
+- Costs: the grid 1 draw (+ two program switches on the 3DS), 2,257 vertices, ~9 KB of amplitudes a
+  frame into a 64 KB ring; the trails 1 draw of at most 192 vertices; a moving cruiser's wake one
+  translucent draw of 32 triangles. The CPU's part (host): the grid's amplitudes only when its centre
+  moves (2,257 bilinear lookups), the trails' ribbons a frame (192 vertices on the waves), the moored
+  boats' poses (5 height queries each). NOMA_G3D_STATS counts the wave grids and trails drawn; the
+  island's frame line says `sea grid` and `trails`.
+
 ## Markers
 
 - `spawn` (kind 0): (-2029, 69, 2330) facing -Z, Wuhu Town's plaza south of the coin-toss
@@ -514,10 +554,10 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 
 ## Left out (fidelity gaps)
 
-- Indirect texturing: the open sea's reflection and wave warp are approximated by a 16-frame
-  precomputed atlas made from `sea2_day`, `jog_waterA` and `jog_waterB`; it advances every 25 world
-  frames. This keeps the sea animated without per-frame texture work, but it is not WSR's dependent
-  texture read (the engine has no dependent reads). Lava's warp is still omitted.
+- Indirect texturing: the open sea's warp of `jog_waterB` by `jog_waterA` (the engine has no
+  dependent reads) and the lava's are left out; the sea's other three layers scroll as WSR's sea_P
+  scrolls them. The waves near the eye are ours (WSR's island sea is flat; see "The sea"), and so are
+  the trails behind boats; WSR's EFB reflections and refraction of its jet-ski sea are left out.
 - The water reflection (`WS2_common_island_R`, drawn mirrored by WSR; its geometry is the far
   island), `WS2_common_under` (a navy skirt under the sea drawn with depth test off before the
   island), the night models (`island_L`, `vr_N`) and the evening sky (`vr_E`): daytime only.

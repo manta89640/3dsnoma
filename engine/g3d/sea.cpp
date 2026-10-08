@@ -89,6 +89,10 @@ f32 Sea::amplitude(f32 x, f32 z) const {
 f32 Sea::height(f32 x, f32 z, double seconds, f32 cx, f32 cz, Vec3* normal) const {
     SeaWaves w;
     sea_waves(*s_, seconds, cx, cz, &w);
+    return height(x, z, w, cx, cz, normal);
+}
+
+f32 Sea::height(f32 x, f32 z, const SeaWaves& w, f32 cx, f32 cz, Vec3* normal) const {
     f32 h, dx, dz;
     sea_wave(w, x - cx, z - cz, amplitude(x, z), &h, &dx, &dz);
     if (normal)

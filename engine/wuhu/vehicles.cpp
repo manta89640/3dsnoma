@@ -27,6 +27,10 @@ constexpr f32 BOAT_DRAFT = 0.15f;    // of its height under the surface
 constexpr f32 WHEEL_RADIUS = 6.0f;   // WS2_common_car's (model units)
 constexpr f32 STEER_MAX = 28.0f;     // the front wheels' furthest turn (degrees), less with speed
 constexpr f32 STEER_EASE = 0.08f;    // seconds: how fast they follow the stick
+constexpr f32 BOW_UP = 0.05f;        // a boat's bow raised at top speed (rise a unit forward)
+constexpr f32 MOORED_RANGE = 1500.0f;  // boats at anchor further from the eye than this stay still
+constexpr f32 MOORED_CALM = 0.01f;     // ... and where the waves are weaker than this (of their whole)
+constexpr f32 WAKE_EASE = 0.5f;        // seconds: how fast the driven boat's wake follows its speed
 const char* const WHEELS[4] = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"};
 
 f32 col_length(const Mtx34& m, int c) {
@@ -77,6 +81,7 @@ Vehicles::Vehicles(engine::g3d::World& world, const engine::g3d::Package& packag
         std::copy(m.bbox, m.bbox + 6, v.bbox);
         const Mtx34 t = world_.instance_transform(i);
         v.scale = {col_length(t, 0), col_length(t, 1), col_length(t, 2)};
+        v.rest = t;
         for (int w = 0; w < 4; w++)
             v.wheels[w] = v.boat ? -1 : world_.instance_node(i, WHEELS[w]);
         list_.push_back(v);
@@ -98,7 +103,7 @@ Obstacle Vehicles::box_at(const Vehicle& v, const Mtx34& m) const {
     return o;
 }
 
-Obstacle Vehicles::box(u32 v) const { return box_at(list_[v], world_.instance_transform(list_[v].instance)); }
+Obstacle Vehicles::box(u32 v) const { return box_at(list_[v], list_[v].rest); }
 
 f32 Vehicles::track_width(u32 v) const { return 0.8f * (list_[v].bbox[3] - list_[v].bbox[0]) * list_[v].scale.x; }
 
@@ -141,7 +146,7 @@ void Vehicles::enter(u32 v) {
     const Obstacle o = box(v);
     yaw_ = std::atan2(o.sin_yaw, o.cos_yaw) / DEG;
     // (its tilt as parked: its z and x axes' rise)
-    const Mtx34 m = world_.instance_transform(list_[v].instance);
+    const Mtx34 m = list_[v].rest;
     const f32 zh = std::hypot(m.m[0][2], m.m[2][2]), xh = std::hypot(m.m[0][0], m.m[2][0]);
     slope_f_ = zh > 1e-6f ? m.m[1][2] / zh : 0;
     slope_s_ = xh > 1e-6f ? m.m[1][0] / xh : 0;
@@ -150,7 +155,7 @@ void Vehicles::enter(u32 v) {
 Vec3 Vehicles::position() const {
     if (driven_ == NONE)
         return Vec3{0, 0, 0};
-    const Mtx34 m = world_.instance_transform(list_[driven_].instance);
+    const Mtx34& m = list_[driven_].rest;
     return Vec3{m.m[0][3], m.m[1][3], m.m[2][3]};
 }
 
@@ -204,7 +209,7 @@ bool Vehicles::hits_other(const Obstacle& was, const Obstacle& now) const {
 
 // a car with its origin moved to `next` on x/z: on the ground under its corners, or false
 bool Vehicles::car_move(const Vehicle& v, Vec3 next, Mtx34* out) {
-    const Mtx34 old = world_.instance_transform(v.instance);
+    const Mtx34 old = v.rest;
     const f32 height = (v.bbox[4] - v.bbox[1]) * v.scale.y;
     const f32 step = CAR_STEP * height;
     const f32 bottom = old.m[1][3] + v.bbox[1] * v.scale.y;
@@ -246,10 +251,10 @@ bool Vehicles::car_move(const Vehicle& v, Vec3 next, Mtx34* out) {
     return true;
 }
 
-// a boat with its origin moved to `next` on x/z: on deep water under its corners, or false; rocking
-// with `time`
-bool Vehicles::boat_move(const Vehicle& v, Vec3 next, f32 time, Mtx34* out) {
-    const Mtx34 old = world_.instance_transform(v.instance);
+// a boat with its origin moved to `next` on x/z: on deep water under its corners, or false; where it
+// is then without the swell (on_swell puts it on the waves)
+bool Vehicles::boat_move(const Vehicle& v, Vec3 next, Mtx34* out) {
+    const Mtx34 old = v.rest;
     const f32 height = (v.bbox[4] - v.bbox[1]) * v.scale.y;
     const f32 draft = BOAT_DRAFT * height;
     const f32 surface_was = old.m[1][3] + v.bbox[1] * v.scale.y + draft;
@@ -278,14 +283,73 @@ bool Vehicles::boat_move(const Vehicle& v, Vec3 next, f32 time, Mtx34* out) {
             if (collision_.cast(Vec3{c0.x + o.x, mid_y, c0.z + o.z}, Vec3{c.x + o.x, mid_y, c.z + o.z}, wall_of, &h))
                 return false;
         }
-    // the swell: a slow pitch and roll and a little heave, the bow up with speed
-    const f32 pitch = 0.025f * std::sin(time * 1.3f) + 0.05f * speed_fraction();
-    const f32 roll = 0.03f * std::sin(time * 0.9f + 1.0f);
-    const f32 heave = 0.03f * height * std::sin(time * 1.7f + 0.4f);
+    *out = matrix(v, Vec3{side.x, 0, side.z}, Vec3{0, 1, 0}, fwd, Vec3{next.x, surface - draft - v.bbox[1] * v.scale.y, next.z});
+    return true;
+}
+
+// A boat where it is (`rest`) on the waves at `time`: lifted by the swell under its middle (*heave),
+// pitched by the swell's rise from its stern to its bow (and `pitch_up`, its bow raised with speed),
+// rolled by the rise from one side to the other: the World's sea (its waves as the grid draws them),
+// at its hull's middle and four points 0.4 of its length and width out.
+Mtx34 Vehicles::on_swell(const Vehicle& v, const Mtx34& rest, f32 time, f32 pitch_up, f32* heave) const {
+    const f32 fx = rest.m[0][2], fz = rest.m[2][2], fl = std::sqrt(fx * fx + fz * fz);
+    const Vec3 fwd = fl > 1e-6f ? Vec3{fx / fl, 0, fz / fl} : Vec3{0, 0, 1}, side{fwd.z, 0, -fwd.x};
+    const f32 hw = 0.4f * (v.bbox[3] - v.bbox[0]) * v.scale.x, hl = 0.4f * (v.bbox[5] - v.bbox[2]) * v.scale.z;
+    const Vec3 origin{rest.m[0][3], rest.m[1][3], rest.m[2][3]};
+    const Vec3 c = origin + side * (0.5f * (v.bbox[0] + v.bbox[3]) * v.scale.x) +
+                   fwd * (0.5f * (v.bbox[2] + v.bbox[5]) * v.scale.z);
+    const engine::g3d::Sea& sea = world_.sea();
+    const f32 level = sea.valid() ? sea.params().level : 0.0f;
+    auto at = [&](Vec3 p) { return world_.sea_height(p.x, p.z, time) - level; };
+    const f32 hc = sea.valid() ? at(c) : 0.0f;
+    const f32 pitch = (sea.valid() ? (at(c + fwd * hl) - at(c - fwd * hl)) / (2 * hl) : 0.0f) + pitch_up;
+    const f32 roll = sea.valid() ? (at(c + side * hw) - at(c - side * hw)) / (2 * hw) : 0.0f;
     const Vec3 z = normalize(fwd + Vec3{0, pitch, 0});
     const Vec3 yax = normalize(cross(z, side + Vec3{0, roll, 0}));
     const Vec3 x = normalize(cross(yax, z));
-    *out = matrix(v, x, yax, z, Vec3{next.x, surface - draft - v.bbox[1] * v.scale.y + heave, next.z});
+    if (heave)
+        *heave = hc;
+    return matrix(v, x, yax, z, origin + Vec3{0, hc, 0});
+}
+
+void Vehicles::float_moored(Vec3 eye, f32 time) {
+    const engine::g3d::Sea& sea = world_.sea();
+    if (!sea.valid())
+        return;
+    for (u32 i = 0; i < list_.size(); i++) {
+        Vehicle& v = list_[i];
+        if (!v.boat || i == driven_)
+            continue;
+        const Vec3 p{v.rest.m[0][3], v.rest.m[1][3], v.rest.m[2][3]};
+        const f32 dx = p.x - eye.x, dz = p.z - eye.z;
+        const bool sway = dx * dx + dz * dz < MOORED_RANGE * MOORED_RANGE && sea.amplitude(p.x, p.z) > MOORED_CALM;
+        if (sway)
+            world_.set_instance_transform(v.instance, on_swell(v, v.rest, time, 0.0f, nullptr));
+        else if (v.swaying)
+            world_.set_instance_transform(v.instance, v.rest);
+        v.swaying = sway;
+    }
+}
+
+bool Vehicles::wake(Mtx34* m, f32* strength) const {
+    if (driven_ == NONE || !list_[driven_].boat)
+        return false;
+    const Vehicle& v = list_[driven_];
+    // (the wake is made for the cruiser's hull: scaled to this boat's, from a cruiser's box)
+    f32 ref_w = v.bbox[3] - v.bbox[0], ref_l = v.bbox[5] - v.bbox[2];
+    for (const Vehicle& o : list_)
+        if (world_.instance_class(o.instance) == CLASS_CRUISER) {
+            ref_w = o.bbox[3] - o.bbox[0], ref_l = o.bbox[5] - o.bbox[2];
+            break;
+        }
+    const f32 sx = (v.bbox[3] - v.bbox[0]) * v.scale.x / ref_w, sz = (v.bbox[5] - v.bbox[2]) * v.scale.z / ref_l;
+    const Mtx34& r = v.rest;
+    const f32 fx = r.m[0][2], fz = r.m[2][2], fl = std::sqrt(fx * fx + fz * fz);
+    const Vec3 fwd = fl > 1e-6f ? Vec3{fx / fl, 0, fz / fl} : Vec3{0, 0, 1}, side{fwd.z, 0, -fwd.x};
+    *m = Mtx34{{{side.x * sx, 0, fwd.x * sz, r.m[0][3]},
+                {0, sx, 0, r.m[1][3] + heave_},
+                {side.z * sx, 0, fwd.z * sz, r.m[2][3]}}};
+    *strength = wake_;
     return true;
 }
 
@@ -307,7 +371,7 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
     if (frac > 0.01f)
         yaw_ = wrap_deg(yaw_ + steer * STEER * (0.15f + 0.85f * std::sqrt(frac)) * (speed_ < 0 ? 1.0f : -1.0f) * dt);
 
-    const Mtx34 old = world_.instance_transform(v.instance);
+    const Mtx34 old = v.rest;
     const Obstacle was = box_at(v, old);
     // in steps no longer than a quarter of its width, so it can't pass through a wall or a vehicle
     const f32 dist = std::fabs(speed_) * dt;
@@ -320,7 +384,7 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
         const Vec3 next = origin + fwd * (speed_ * dt / (f32)steps);
         Mtx34 t;
         const Obstacle from = box_at(v, m);
-        if (!(v.boat ? boat_move(v, next, time, &t) : car_move(v, next, &t)) || hits_other(from, box_at(v, t))) {
+        if (!(v.boat ? boat_move(v, next, &t) : car_move(v, next, &t)) || hits_other(from, box_at(v, t))) {
             speed_ = 0;
             if (!moved)
                 yaw_ = yaw_was;
@@ -328,14 +392,15 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
         }
         m = t, origin = next, moved = true;
     }
-    // (at rest a boat still rocks)
-    if (!moved && v.boat) {
-        Mtx34 t;
-        if (boat_move(v, Vec3{old.m[0][3], old.m[1][3], old.m[2][3]}, time, &t) && !hits_other(was, box_at(v, t)))
-            m = t, moved = true;
-    }
-    if (moved)
+    // (a boat on the waves, moving or not; its wake as strong as it goes forward, eased)
+    list_[driven_].rest = m;
+    if (v.boat) {
+        world_.set_instance_transform(v.instance, on_swell(v, m, time, BOW_UP * speed_fraction(), &heave_));
+        const f32 want = speed_ > 0 ? speed_fraction() : 0.0f;
+        wake_ += (want - wake_) * std::min(1.0f, dt / WAKE_EASE);
+    } else if (moved) {
         world_.set_instance_transform(v.instance, m);
+    }
     if (!v.boat) {
         // (how far it went along its facing, back negative)
         const f32 rolled = (origin.x - old.m[0][3]) * fwd.x + (origin.z - old.m[2][3]) * fwd.z;

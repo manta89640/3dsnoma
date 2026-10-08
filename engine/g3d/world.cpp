@@ -321,6 +321,10 @@ struct World::Impl {
     std::vector<Trail> trails;
     f32 trail_time = 0;  // the clock the trails were last sampled at (seconds)
     std::vector<std::pair<f32, u32>> trail_pick;  // (trail_vertices' choice: distance, trail)
+    // (sea_height's waves: the last time and centre asked about; the game's thread's, between jobs)
+    mutable SeaWaves asked;
+    mutable double asked_t = NAN;
+    mutable f32 asked_c[2] = {NAN, NAN};
     bool trails_ok = false;  // the trail batch's layout is the one the ribbons are written in
 
     explicit Impl(const Package& p) : pkg(p), sea(p) {}
@@ -1389,11 +1393,16 @@ f32 World::sea_height(f32 x, f32 z, double seconds, Vec3* normal) const {
             *normal = Vec3{0, 1, 0};
         return 0;
     }
-    // (about the grid's centre for the camera's last eye: where the waves' fades are measured from)
+    // (about the grid's centre for the camera's last eye: where the waves' fades are measured from;
+    // the waves made once for a time and a centre: a boat asks at five places)
     const fmt::Sea& sp = w.sea.params();
     const f32 cx = std::round(w.cam.eye.x / sp.grid_snap) * sp.grid_snap;
     const f32 cz = std::round(w.cam.eye.z / sp.grid_snap) * sp.grid_snap;
-    return w.sea.height(x, z, seconds, cx, cz, normal);
+    if (!(seconds == w.asked_t && cx == w.asked_c[0] && cz == w.asked_c[1])) {
+        sea_waves(sp, seconds, cx, cz, &w.asked);
+        w.asked_t = seconds, w.asked_c[0] = cx, w.asked_c[1] = cz;
+    }
+    return w.sea.height(x, z, w.asked, cx, cz, normal);
 }
 
 void World::set_lod_scale(f32 scale) {

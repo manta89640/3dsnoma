@@ -83,6 +83,10 @@ constexpr u32 NONE32 = 0xFFFFFFFFu;
 // shown over the Mii while it glides (Player::gliding)
 constexpr u16 PARACHUTE_CLASS = 0xFFFEu;
 const char* const PARACHUTE_MODEL = "WS2_omk_parachute_01";
+// WSR's wake under the boat the player drives (the stager's instance of WS2_common_cruiser_ef of its
+// own: shown and faded by the boat's speed, Vehicles::wake), its foam's alpha times its C0's
+constexpr u16 WAKE_CLASS = 0xFFFDu;
+const char* const WAKE_MODEL = "WS2_common_cruiser_ef#driven";
 // how the load's progress is shared: the file's reading, the rest of the worker's work, the Mii
 constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
 
@@ -191,6 +195,7 @@ private:
     bool leave_vehicle();
     void park_vehicle();
     void update_parachute();
+    void update_sea(const engine::g3d::Camera& cam);
     Vec3 controlled_position() const;
     f32 controlled_yaw() const;
     static void world_frame(void* self);
@@ -208,6 +213,10 @@ private:
     std::unique_ptr<SandTracks> sand_;
     u32 parachute_instance_ = NONE32;
     bool parachute_visible_ = false;
+    u32 wake_instance_ = NONE32;
+    u16 wake_material_ = fmt::NONE16;
+    bool wake_visible_ = false;
+    s16 wake_alpha_ = -1;
     bool ready_ = false, prepared_ = false;
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
@@ -300,6 +309,15 @@ void Island::finish_loading() {
             parachute_instance_ = i;
     if (parachute_instance_ != NONE32)
         world_->set_group_visible(PARACHUTE_MODEL, false);
+    for (u32 i = 0; i < world_->instance_count() && wake_instance_ == NONE32; i++)
+        if (world_->instance_class(i) == WAKE_CLASS) {
+            const fmt::Model& m = package_->models()[package_->instances()[i].model];
+            if (m.n_batches) {
+                wake_instance_ = i;
+                wake_material_ = package_->batches()[m.first_batch].material;
+                world_->set_group_visible(WAKE_MODEL, false);
+            }
+        }
     vehicles_ = std::make_unique<Vehicles>(*world_, *package_, *collision_);
     const u64 t1 = guest::host_time_us();
     // (the uploads themselves happen on the renderer's thread when it reaches the command)
@@ -377,7 +395,7 @@ void Island::finish_loading() {
 
 // The player at a marker: a spawn point, a warp place or a landmark facing its direction; a camera
 // preset at the point it looks at, facing away from its eye. The ground under it (or a step above
-// it), the camera behind it.
+// it), else the sea's surface there (swimming); the camera behind it.
 bool Island::place_at(const fmt::Marker& m) {
     Vec3 at{m.position[0], m.position[1], m.position[2]};
     f32 dx = m.dir[0], dz = m.dir[2];
@@ -386,7 +404,9 @@ bool Island::place_at(const fmt::Marker& m) {
         at = Vec3{m.dir[0], m.dir[1], m.dir[2]};
     }
     const f32 yaw = dx * dx + dz * dz > 1e-12f ? std::atan2(dx, dz) / DEG : 0.0f;
-    if (!player_->place(at, yaw)) {
+    // (a landmark out at sea -- a whale watch, a diving spot -- has no ground: the Mii swims there)
+    const f32 level = world_->sea().valid() ? world_->sea().params().level : 0.0f;
+    if (!player_->place(at, yaw) && !player_->place_swimming(Vec3{at.x, level, at.z}, yaw)) {
         guest::log("wuhu: no ground under the marker %s (%.0f, %.0f, %.0f)", package_->str(m.name), at.x, at.y,
                    at.z);
         return false;
@@ -484,6 +504,31 @@ void Island::update_parachute() {
     world_->set_instance_transform(parachute_instance_, m);
 }
 
+// The sea's part of a frame: the boats at anchor near the eye on the waves, the driven boat's wake
+// under it (hidden when it barely moves; its alpha in steps of 1/32, each a combiner translation the
+// World keeps a few of)
+void Island::update_sea(const engine::g3d::Camera& cam) {
+    vehicles_->float_moored(cam.eye, (f32)frame_ * TICK);
+    if (wake_instance_ == NONE32)
+        return;
+    Mtx34 m;
+    f32 strength = 0;
+    const bool show = vehicles_->wake(&m, &strength) && strength > 0.02f;
+    if (show != wake_visible_) {
+        world_->set_group_visible(WAKE_MODEL, show);
+        wake_visible_ = show;
+    }
+    if (!show)
+        return;
+    world_->set_instance_transform(wake_instance_, m);
+    const s16 a = (s16)std::lround(std::min(1.0f, strength) * 32.0f) * 255 / 32;
+    if (a != wake_alpha_) {
+        const s16 c0[4] = {255, 255, 255, a};
+        world_->set_material_register(wake_material_, fmt::CR_TEV0, c0);
+        wake_alpha_ = a;
+    }
+}
+
 void Island::warp(u32 marker) {
     if (!world_ || marker >= package_->markers().count)
         return;
@@ -542,6 +587,12 @@ void Island::update(const Controls& controls, bool frozen) {
     camera_->update(look, at, yaw, camera_speed, dt);
     const engine::g3d::Camera& cam = camera_->camera();
     update_parachute();
+    update_sea(cam);
+    // (a swimmer drawn on the waves: its body stays on the collision's surface; asked of the World
+    // here, before its job)
+    Vec3 drawn = at;
+    if (vehicles_->driven() == Vehicles::NONE && player_->swimming() && world_->sea().valid())
+        drawn.y += world_->sea_height(at.x, at.z, (f32)frame_ * TICK) - world_->sea().params().level;
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -567,7 +618,7 @@ void Island::update(const Controls& controls, bool frozen) {
         world_->set_camera(cam, ground);
         world_us_ += guest::host_time_us() - t0;
     }
-    mii_->update(engine::g3d::scaled(cam, k_), at * k_, yaw,
+    mii_->update(engine::g3d::scaled(cam, k_), drawn * k_, yaw,
                  vehicles_->driven() == Vehicles::NONE ? player_->state() : PlayerState::WAIT,
                  (player_->distance() - walked) * k_,
                  RUN_SPEED_MULTIPLIER * std::max(1.0f, player_->speed() / player_->params().run_speed));
@@ -634,12 +685,14 @@ void Island::log_frame() {
     static const char* const STATES[] = {"wait", "walk", "run", "fall", "jump", "swim"};
     static_assert(sizeof(STATES) / sizeof(STATES[0]) == (size_t)PlayerState::SWIM + 1, "a name a state");
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
-               "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, "
+               "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, sea grid %u, "
+               "trails %u, pos (%.1f, "
                "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
                fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
                (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
-               (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
+               (unsigned)s.translations, (unsigned)s.translations_cached, (unsigned)s.sea_grid, (unsigned)s.trails,
+               p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
 }
