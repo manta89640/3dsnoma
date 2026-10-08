@@ -185,6 +185,43 @@ def _depalette(tex, palette_raw, plt_fmt, lod):
 
 
 # a model drawn as a part of another (Converter.model's parts)
+class PaintedTexture:
+    """A brres texture with changes painted over it, as a texture source tex_override takes ({name:
+    (PaintedTexture, name)}): paint(rgba (h, w, 4) uint8) -> rgba, applied to level 0; the result is
+    written as GX RGBA8, its smaller levels box-filtered from it."""
+
+    def __init__(self, r, name, paint):
+        src = r.textures[name]
+        self.name, self.fmt = name, 6
+        self.width, self.height = src.width, src.height
+        rgba = np.ascontiguousarray(paint(np.array(r.texture_rgba(name, 0), np.uint8)), np.uint8)
+        self.rgba = [rgba]
+        while len(self.rgba) < src.levels:
+            a = self.rgba[-1].astype(np.float32)
+            a = (a[0::2, 0::2] + a[1::2, 0::2] + a[0::2, 1::2] + a[1::2, 1::2]) / 4
+            self.rgba.append(np.rint(a).astype(np.uint8))
+        self.levels = len(self.rgba)
+        self.min_lod, self.max_lod = getattr(src, "min_lod", 0), getattr(src, "max_lod", 0)
+        self.textures = {name: self}
+
+    def level_size(self, lod):
+        h, w = self.rgba[lod].shape[:2]
+        return w, h, w * h * 4
+
+    def level_data(self, lod):
+        # GX RGBA8: 4x4 tiles, each 32 bytes of AR pairs then 32 of GB pairs
+        img = self.rgba[lod]
+        h, w = img.shape[:2]
+        tiles = img.reshape(h // 4, 4, w // 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(-1, 16, 4)
+        out = np.empty((len(tiles), 64), np.uint8)
+        out[:, 0:32:2], out[:, 1:32:2] = tiles[:, :, 3], tiles[:, :, 0]
+        out[:, 32::2], out[:, 33::2] = tiles[:, :, 1], tiles[:, :, 2]
+        return out.tobytes()
+
+    def texture_rgba(self, name, lod=0):
+        return self.rgba[lod]
+
+
 Part = namedtuple("Part", "name brres model matrix hidden tex_override", defaults=(None, (), None))
 
 

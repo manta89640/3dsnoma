@@ -376,6 +376,23 @@ def wheel_pick(hub):
 
 
 CAR_WHEELS = [(n, hub, wheel_pick(hub)) for n, hub in WHEEL_HUBS.items()]
+
+
+def paint_hub_spokes(rgba):
+    """Spokes on the car's wheel faces, so that a wheel's turning shows (the user's choice: WSR's
+    face is rings about the hub, the same at any angle). The faces sample the quarter of
+    WS2_common_car at texels x 96..127, y 0..30 mirrored both ways about the hub at (128, 0), so a
+    spoke painted on that quarter's diagonal shows as four, 90 degrees apart: darkened to 55 %, from
+    5 to 19 texels out (the rim's inside), a texel and a half wide."""
+    out = rgba.astype(np.float32)
+    yy, xx = np.mgrid[0:31, 96:128]
+    px, py = 128.0 - (xx + 0.5), yy + 0.5          # (from the hub)
+    along = (px + py) / np.sqrt(2.0)              # on the 45-degree line
+    across = np.abs(px - py) / np.sqrt(2.0)
+    cover = np.clip(1.5 - 2.0 * np.maximum(across - 0.25, 0.0), 0.0, 1.0) * ((along >= 5) & (along <= 19))
+    region = out[0:31, 96:128, :3]
+    region *= (1.0 - 0.45 * cover)[..., None]
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
 # the "static" props at level 0 only (small next to the boats and the gates)
 NEAR_STATIC = {21}
 
@@ -1014,8 +1031,11 @@ class Stager:
             if (cls, extra_root) not in models:
                 path, mname = CLASSES[cls][2], CLASSES[cls][3][0]
                 r = w.brres(SA, path)
+                car = mname == "WS2_common_car"
+                tov = {"WS2_common_car": (convert.PaintedTexture(r, "WS2_common_car", paint_hub_spokes),
+                                          "WS2_common_car")} if car else None
                 mi, nm = self.cv.model(r, r.models[mname], name="%s#%d" % (mname, cls) if extra_root else mname,
-                                       extra_root=extra_root, split=CAR_WHEELS if mname == "WS2_common_car" else ())
+                                       extra_root=extra_root, split=CAR_WHEELS if car else (), tex_override=tov)
                 models[(cls, extra_root)] = (r, r.models[mname], mi, nm)
             return models[(cls, extra_root)]
 

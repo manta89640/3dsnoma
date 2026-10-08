@@ -86,6 +86,12 @@ FollowCamera::FollowCamera(const World& world, const FollowCameraParams& params)
 
 bool FollowCamera::blocks_view(u16 a, Vec3) { return !kcl_is_fence(a); }
 
+void FollowCamera::set_params(const FollowCameraParams& params) {
+    const f32 ratio = p_.distance > 0 ? want_dist_ / p_.distance : 1.0f;
+    p_ = params;
+    want_dist_ = clampf(p_.distance * ratio, p_.min_distance, p_.max_distance);
+}
+
 void FollowCamera::reset(Vec3 feet, f32 mii_yaw) {
     head_ = target_ = feet + Vec3{0, p_.head, 0};
     target_vel_ = {0, 0, 0};

@@ -27,6 +27,9 @@ constexpr f32 BOAT_DRAFT = 0.15f;    // of its height under the surface
 constexpr f32 WHEEL_RADIUS = 6.0f;   // WS2_common_car's (model units)
 constexpr f32 STEER_MAX = 28.0f;     // the front wheels' furthest turn (degrees), less with speed
 constexpr f32 STEER_EASE = 0.08f;    // seconds: how fast they follow the stick
+// the most a wheel is shown turning in an update (its spokes repeat every 90 degrees: more than 45 an
+// update and they would seem to turn backwards; past this the wheel blurs on regardless)
+constexpr f32 ROLL_STEP_MAX = 35.0f;
 const char* const WHEELS[4] = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"};
 
 f32 col_length(const Mtx34& m, int c) {
@@ -348,7 +351,8 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
 void Vehicles::turn_wheels(const Vehicle& v, f32 rolled, f32 steer, f32 dt) {
     if (v.wheels[0] < 0)
         return;
-    roll_ = std::fmod(roll_ + rolled / (WHEEL_RADIUS * v.scale.z) / DEG, 360.0f);
+    const f32 step = rolled / (WHEEL_RADIUS * v.scale.z) / DEG;
+    roll_ = std::fmod(roll_ + std::max(-ROLL_STEP_MAX, std::min(ROLL_STEP_MAX, step)), 360.0f);
     const f32 target = -steer * STEER_MAX * (1.0f - 0.4f * speed_fraction());
     steer_ += (target - steer_) * (1.0f - std::exp(-dt / STEER_EASE));
     for (int w = 0; w < 4; w++) {
