@@ -294,6 +294,12 @@ when the archive isn't staged: 5 animation files of 314,712 bytes then, against 
 (and 319,488 before, with Seal). NOMA_WUHU_FEET=1 logs the planted foot's slide measured on the
 posed body each second (NOMA_WUHU_FEET_TRACE=1 every node's place every frame).
 
+In a vehicle the Mii stands at a boat's helm (Vehicles::seat: a cruiser's flybridge, a yacht's
+cockpit) and isn't drawn in a car: WS2_common_car is closed and its windows opaque, so a seated Mii
+was a whole guest model drawn unseen. Gliding, WSR's parachute (WS2_omk_parachute_01) hangs from the
+Mii's shoulders at the Mii's size (its height over WSR's Mii's 15.24 units), its 30-frame clip (the
+canopy opening) played once from the glide's start and held open (World::set_instance_anim_frame).
+
 ## Materials and textures
 
 A material is GX's register image as its display lists leave it: TEV colour and alpha words,

@@ -129,6 +129,32 @@ void FollowCamera::update(const FollowCameraInput& in, Vec3 feet, f32 mii_yaw, f
     place_eye(dt, false);
 }
 
+// where the segment from `a` along `d` (0..1 of it) enters box `o`; -1 if it doesn't, or starts in it
+f32 FollowCamera::box_entry(const Obstacle& o, Vec3 a, Vec3 d) {
+    // (in the box's own frame: x along (cos, -sin) of its yaw, z along (sin, cos), y up)
+    const f32 ax = a.x - o.centre.x, az = a.z - o.centre.z;
+    const f32 p[3] = {o.cos_yaw * ax - o.sin_yaw * az, a.y, o.sin_yaw * ax + o.cos_yaw * az};
+    const f32 v[3] = {o.cos_yaw * d.x - o.sin_yaw * d.z, d.y, o.sin_yaw * d.x + o.cos_yaw * d.z};
+    const f32 lo[3] = {-o.half_width, o.bottom, -o.half_length}, hi[3] = {o.half_width, o.top, o.half_length};
+    f32 t0 = 0, t1 = 1;
+    bool inside = true;
+    for (int i = 0; i < 3; i++) {
+        inside = inside && p[i] >= lo[i] && p[i] <= hi[i];
+        if (std::fabs(v[i]) < 1e-9f) {
+            if (p[i] < lo[i] || p[i] > hi[i])
+                return -1;
+            continue;
+        }
+        f32 ta = (lo[i] - p[i]) / v[i], tb = (hi[i] - p[i]) / v[i];
+        if (ta > tb)
+            std::swap(ta, tb);
+        t0 = std::max(t0, ta), t1 = std::min(t1, tb);
+        if (t0 > t1)
+            return -1;
+    }
+    return inside ? -1 : t0;
+}
+
 void FollowCamera::place_eye(f32 dt, bool snap) {
     const f32 cy = std::cos(yaw_ * DEG), sy = std::sin(yaw_ * DEG);
     const f32 cp = std::cos(pitch_ * DEG), sp = std::sin(pitch_ * DEG);
@@ -139,6 +165,12 @@ void FollowCamera::place_eye(f32 dt, bool snap) {
     Hit hit;
     if (world_.cast(target_, target_ - fwd * reach, blocks_view, &hit))
         allowed = std::max(p_.min_pull, hit.t * reach - p_.margin);
+    // ... and short of a vehicle's box on the way (not one the target is in)
+    for (const Obstacle& o : boxes_) {
+        const f32 t = box_entry(o, target_, fwd * -reach);
+        if (t >= 0 && t <= 1)
+            allowed = std::min(allowed, std::max(p_.min_pull, t * reach - p_.margin));
+    }
     if (snap || allowed < dist_)
         dist_ = allowed, dist_vel_ = 0;
     else

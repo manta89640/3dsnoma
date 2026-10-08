@@ -9,6 +9,9 @@
 
 #include "engine/collision/kcl.h"
 #include "engine/g3d/world.h"
+#include "engine/wuhu/player.h"
+
+#include <vector>
 
 namespace engine::wuhu {
 
@@ -51,6 +54,9 @@ public:
     // another framing (FollowCameraParams::make for another height: a vehicle's), the distance the
     // player chose kept in proportion; the camera eases to it (no cut)
     void set_params(const FollowCameraParams& params);
+    // boxes it keeps out of as it keeps out of the terrain (the vehicles but the one driven: the
+    // collision doesn't have them)
+    void set_obstacles(std::vector<Obstacle> boxes) { boxes_ = std::move(boxes); }
     // speed: the Mii's speed over its run speed (0..1), how fast to swing behind it
     void update(const FollowCameraInput& in, Vec3 feet, f32 mii_yaw, f32 speed, f32 dt);
 
@@ -66,6 +72,7 @@ public:
 
 private:
     void place_eye(f32 dt, bool snap);
+    static f32 box_entry(const Obstacle& o, Vec3 a, Vec3 d);
 
     const engine::collision::World& world_;
     FollowCameraParams p_;
@@ -75,6 +82,7 @@ private:
     f32 want_yaw_ = 0, want_pitch_ = 0, want_dist_ = 0;  // as asked for
     f32 yaw_vel_ = 0, pitch_vel_ = 0, dist_vel_ = 0;
     f32 since_manual_ = 1e9f;
+    std::vector<Obstacle> boxes_;
 };
 
 }  // namespace engine::wuhu

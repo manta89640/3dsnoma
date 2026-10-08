@@ -131,7 +131,7 @@ std::vector<Obstacle> Vehicles::obstacles(u32 except) const {
     return out;
 }
 
-u32 Vehicles::nearest(Vec3 feet, f32 reach, bool swimming) const {
+u32 Vehicles::nearest(Vec3 feet, f32 reach, bool swimming, f32* distance) const {
     u32 best = NONE;
     f32 best_d = reach;
     for (u32 v = 0; v < list_.size(); v++) {
@@ -148,6 +148,8 @@ u32 Vehicles::nearest(Vec3 feet, f32 reach, bool swimming) const {
         if (d <= best_d)
             best_d = d, best = v;
     }
+    if (distance)
+        *distance = best_d;
     return best;
 }
 

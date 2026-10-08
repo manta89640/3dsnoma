@@ -46,7 +46,7 @@ public:
     // the boxes of every vehicle but `except`, for the player's body
     std::vector<Obstacle> obstacles(u32 except = NONE) const;
     // the vehicle whose box is nearest `feet`, within `reach` of it (a swimmer takes only boats); NONE
-    u32 nearest(Vec3 feet, f32 reach, bool swimming) const;
+    u32 nearest(Vec3 feet, f32 reach, bool swimming, f32* distance = nullptr) const;
 
     // into vehicle v (NONE: none); out again (it stays where it is)
     void enter(u32 v);

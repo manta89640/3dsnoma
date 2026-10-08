@@ -34,7 +34,7 @@
 // surface below it facing up, not a fence: the stager's floors), which says whether the eye's cell's
 // visibility row applies (world.h).
 //
-// NOMA_WUHU_AT=x,y,z[,yaw]: start on the ground at or below that place (host runs). NOMA_WUHU_START=
+// NOMA_WUHU_AT=x,y,z[,yaw]: start on the ground at or below that place, or swimming there (host runs). NOMA_WUHU_START=
 // <marker name>: start at another of the package's markers (a landmark, a warp place,
 // or a camera preset view_*, whose target the Mii then stands at, facing away from its eye: the
 // follow camera then sees about what the preset does). NOMA_WUHU_LOG_EVERY=N: the frame line every N
@@ -216,6 +216,7 @@ private:
     void update_shadows();
     void update_sea(const engine::g3d::Camera& cam);
     Vec3 controlled_position() const;
+    bool in_car() const { return vehicles_ && vehicles_->driven() != Vehicles::NONE && !vehicles_->boat(); }
     f32 controlled_yaw() const;
     static void world_frame(void* self);
     void take_job();
@@ -397,11 +398,12 @@ void Island::finish_loading() {
         if (!start && m.kind == fmt::MK_SPAWN)
             start = &m;
     // NOMA_WUHU_AT=x,y,z[,yaw]: a place of one's own instead (host runs: a ledge, a shore), the ground
-    // at or below it
+    // at or below it, or the water there
     f32 at[4] = {0, 0, 0, 0};
     const char* at_env = std::getenv("NOMA_WUHU_AT");
     if (at_env && std::sscanf(at_env, "%f,%f,%f,%f", &at[0], &at[1], &at[2], &at[3]) >= 3 &&
-        player_->place(Vec3{at[0], at[1], at[2]}, at[3])) {
+        (player_->place(Vec3{at[0], at[1], at[2]}, at[3]) ||
+         player_->place_swimming(Vec3{at[0], at[1], at[2]}, at[3]))) {
         camera_->reset(player_->position(), player_->yaw());
         guest::log("wuhu: NOMA_WUHU_AT: at (%.1f, %.1f, %.1f) facing %.0f", player_->position().x,
                    player_->position().y, player_->position().z, player_->yaw());
@@ -482,9 +484,15 @@ bool Island::enter_vehicle() {
     if (player_->airborne())
         return false;
     const PlayerParams& pp = player_->params();
-    const u32 v = vehicles_->nearest(player_->position(), pp.radius + 0.4f * pp.height, player_->swimming());
-    if (v == Vehicles::NONE)
+    const f32 reach = pp.radius + 0.4f * pp.height;
+    const u32 v = vehicles_->nearest(player_->position(), reach, player_->swimming());
+    if (v == Vehicles::NONE) {
+        f32 d = 0;
+        const u32 near = vehicles_->nearest(player_->position(), 1e9f, player_->swimming(), &d);
+        if (near != Vehicles::NONE)
+            guest::log("wuhu: no vehicle within reach (%.1f): the nearest, %u, is %.1f off", reach, (unsigned)near, d);
         return false;
+    }
     vehicles_->enter(v);
     player_->set_obstacles(vehicles_->obstacles(v));
     sand_->end_trail();
@@ -693,6 +701,7 @@ void Island::update(const Controls& controls, bool frozen) {
     const f32 yaw = controlled_yaw();
     const f32 camera_speed = vehicles_->driven() == Vehicles::NONE ? player_->speed() / player_->params().run_speed
                                                                    : vehicles_->speed_fraction();
+    camera_->set_obstacles(vehicles_->obstacles(vehicles_->driven()));
     camera_->update(look, at, yaw, camera_speed, dt);
     const engine::g3d::Camera& cam = camera_->camera();
     update_parachute();
@@ -840,7 +849,10 @@ void Island::draw_opaque() {
         set_clear(clear_);
     mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
     emit(engine::g3d::Pass::OPAQUE);
-    mii_->draw_opaque();
+    // (in a car the Mii isn't drawn: WSR's car is closed, its windows opaque, and the seated Mii
+    // only a draw no one sees; at a boat's helm it shows)
+    if (!in_car())
+        mii_->draw_opaque();
     sand_->draw(camera_->camera(), k_, frame_);
 }
 
@@ -850,7 +862,8 @@ void Island::draw_translucent() {
     // (the projection again: the Mii's opaque pass may have loaded another)
     mii_->view();
     emit(engine::g3d::Pass::TRANSLUCENT);
-    mii_->draw_translucent();
+    if (!in_car())
+        mii_->draw_translucent();
 }
 
 }  // namespace

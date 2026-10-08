@@ -203,7 +203,8 @@ Sections (v1):
   the octree with neighbouring cells (the octree only lists triangles within its build radius).
 - Camera: third person, orbit yaw/pitch/distance around the Mii's head (island units: distance ~35,
   pitch 15 deg default); auto-turn behind the Mii while walking (slowly), manual orbit overrides for
-  2 s; terrain avoidance (ray from target to camera against the KCL, pull in); FOV 45 deg;
+  2 s; terrain avoidance (ray from target to camera against the KCL, pull in; and against the vehicles'
+  boxes, which the KCL doesn't have: FollowCamera::set_obstacles); FOV 45 deg;
   near 1.5 / far 80,000 island units (×k in guest units).
 - Controls. 3DS: circle pad = move and swim (stick mode: no pointer nudge while the island runs); X
   enters or leaves a nearby car or anchored boat (engine/wuhu/vehicles.h). In a car or boat, pad
