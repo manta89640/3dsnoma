@@ -2127,7 +2127,8 @@ void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
         P.pal.rows[i][i] = 1.0f;
     P.pal.dirty = 7;
     upload_palette();
-    float z = -(float)(bp[BP_CLEAR_Z] & 0xFFFFFF) / 16777215.0f;
+    // (clip z = GX depth - 1: begin_frame's depth map, scale 1 offset 1, adds the one back)
+    float z = (float)(bp[BP_CLEAR_Z] & 0xFFFFFF) / 16777215.0f - 1.0f;
     auto clip = [&](u32 ex, u32 ey, PVertex& v) {
         float X = ((s32)ex + efb_off_x) * 400.0f / FRAME_W, Y = ((s32)ey + efb_off_y) * 240.0f / FRAME_H;
         memset(&v, 0, sizeof(v));
