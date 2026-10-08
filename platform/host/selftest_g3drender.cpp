@@ -25,7 +25,7 @@
 // The camera: NOMA_G3D_FOV (degrees, default 45), near 1.5 and far 80,000 package units, the
 // world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views; the shadow map
 // NOMA_G3D_SHADOW_MAP texels a side (default 512, 0: none) about each view's target;
-// NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz puts the views' camera there instead.
+// NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz adds a view of one's own, view_camera (eye, target).
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -522,8 +522,18 @@ void test_views() {
     const HostEfb e = gx_host_efb();
     double worst_ms = 0;
     u32 n_views = 0;
-    for (const fm::Marker& m : pkg->markers()) {
-        const char* name = pkg->str(m.name);
+    // (the package's views, and NOMA_G3D_CAMERA's as view_camera)
+    std::vector<fm::Marker> shown(pkg->markers().begin(), pkg->markers().end());
+    f32 c6[6];
+    if (const char* e = getenv("NOMA_G3D_CAMERA"))
+        if (sscanf(e, "%f,%f,%f,%f,%f,%f", &c6[0], &c6[1], &c6[2], &c6[3], &c6[4], &c6[5]) == 6) {
+            fm::Marker m = {};
+            m.name = 0xFFFFFFFFu, m.kind = fm::MK_CAMERA;
+            memcpy(m.position, c6, 12), memcpy(m.dir, c6 + 3, 12);
+            shown.push_back(m);
+        }
+    for (const fm::Marker& m : shown) {
+        const char* name = m.name == 0xFFFFFFFFu ? "view_camera" : pkg->str(m.name);
         if (strncmp(name, "view_", 5) != 0)
             continue;
         if (views && !strstr(views, name))
@@ -532,12 +542,6 @@ void test_views() {
         g3::Camera cam;
         cam.eye = {m.position[0], m.position[1], m.position[2]};
         cam.target = m.kind == 2 ? Vec3{m.dir[0], m.dir[1], m.dir[2]} : cam.eye + Vec3{m.dir[0], m.dir[1], m.dir[2]};
-        // NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz: every view picked from there instead (a look at a place)
-        if (const char* c = getenv("NOMA_G3D_CAMERA")) {
-            float e[6];
-            if (sscanf(c, "%f,%f,%f,%f,%f,%f", &e[0], &e[1], &e[2], &e[3], &e[4], &e[5]) == 6)
-                cam.eye = {e[0], e[1], e[2]}, cam.target = {e[3], e[4], e[5]};
-        }
         cam.fovy_deg = fov, cam.aspect = (f32)W / H, cam.near_ = NEAR, cam.far_ = FAR;
         g3::Packet opa, xlu;
         opa.reset(), xlu.reset();

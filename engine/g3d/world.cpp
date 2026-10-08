@@ -142,6 +142,16 @@ constexpr f32 ANIM_HALF_PX = 20, ANIM_QUARTER_PX = 6, ANIM_STEP_PX = 1.5f;
 // an animated prop under a pixel across isn't drawn (WF_DETAIL)
 constexpr f32 SIZE_CULL_PX = 1.0f;
 
+// The trails' ribbons (the trail batch's vertices, DRAW_DYNAMIC): position (f32 x 3, from the item's
+// origin), colour (u8 x 4: white, the alpha the trail's strength), texture coordinates (f32 x 2: across
+// the ribbon 0-1, along it the path's length over TRAIL_REPEAT, so that the foam stays on the water as
+// the boat goes); a ribbon's vertices TRAIL_LIFT over the waves under them (an overlay, drawn pulled
+// toward the eye as the others); its first stretch fades in over TRAIL_FADE_IN seconds behind the stern
+// (where the boat's own wake model lies); the trails of boats further than TRAIL_RANGE from the eye
+// aren't drawn
+constexpr u32 TRAIL_STRIDE = 24;
+constexpr f32 TRAIL_REPEAT = 160.0f, TRAIL_LIFT = 0.4f, TRAIL_FADE_IN = 0.8f, TRAIL_RANGE = 4000.0f;
+
 // depth tested (less, less or equal, or their opposites) and written, colour written, neither blended
 // nor a logic op: where it comes among its kind changes nothing but the state the GPU is given (the
 // PICA tests depth after the combiners: no early test that front to back would feed). (ALWAYS, EQUAL
@@ -306,7 +316,43 @@ struct World::Impl {
     };
     std::vector<CastRef> casts;
 
-    explicit Impl(const Package& p) : pkg(p) {}
+    // ---- the sea (sea.h): its waves; the grid -- whether this frame draws it, its centre on the
+    // lattice, its vertices' amplitudes there (made again when the centre moves), the stencil value of
+    // the frame --; the flat surface's materials (fmt::MAT_SEA); the boats' trails
+    Sea sea;
+    bool grid_on = false, grid_any = false;
+    f32 grid_c[2] = {0, 0}, grid_amp_c[2] = {NAN, NAN};
+    std::vector<u8> grid_amp;
+    u8 stencil = 0;
+    std::vector<u8> mat_sea;
+    struct TrailSample {
+        f32 x, z;        // the stern where it was
+        f32 dx, dz;      // its heading (unit)
+        f32 t;           // when (seconds)
+        f32 dist;        // the path's length there
+        f32 strength;    // the boat's speed then, of Sea::trail_speed (0-1)
+        f32 half;        // half its width
+    };
+    struct Trail {
+        u32 inst;
+        f32 half;        // half the boat's width
+        f32 back;        // its stern from its origin, along its heading (model space times its scale)
+        std::vector<TrailSample> samples;  // the oldest first
+        TrailSample head{};                // the stern now
+        bool started = false;
+        f32 last_t = 0;
+        f32 speed = 0;   // units a second, smoothed
+    };
+    std::vector<Trail> trails;
+    f32 trail_time = 0;  // the clock the trails were last sampled at (seconds)
+    std::vector<std::pair<f32, u32>> trail_pick;  // (trail_vertices' choice: distance, trail)
+    // (sea_height's waves: the last time and centre asked about; the game's thread's, between jobs)
+    mutable SeaWaves asked;
+    mutable double asked_t = NAN;
+    mutable f32 asked_c[2] = {NAN, NAN};
+    bool trails_ok = false;  // the trail batch's layout is the one the ribbons are written in
+
+    explicit Impl(const Package& p) : pkg(p), sea(p) {}
 
     void init();
     void shadow_frame();
@@ -325,6 +371,10 @@ struct World::Impl {
     void sort_pass(u32 pi);
     void build(Pass pass, Packet* p);
     void refresh_combiners(Dyn& d);
+    Mtx34 root_now(u32 i) const;
+    void sample_trails();
+    u32 trail_vertices(Packet* p, const f32 origin[3]);
+    Dyn& dyn_for(u32 m);
 };
 
 void World::Impl::init() {
@@ -349,39 +399,12 @@ void World::Impl::init() {
         if (a != NONE && std::find(mat_anims.begin(), mat_anims.end(), a) == mat_anims.end())
             mat_anims.push_back(a);
     dyn_of.assign(mats.size(), -1);
-    auto dyn_for = [&](u32 m) -> Dyn& {
-        if (dyn_of[m] < 0) {
-            const fmt::Material& fm = pkg.materials()[m];
-            Dyn d;
-            d.d = MatDynamic();
-            d.d.material = (u16)m;
-            memcpy(d.d.tev_reg, fm.tev_reg, sizeof(d.d.tev_reg));
-            memcpy(d.d.tev_konst, fm.tev_konst, sizeof(d.d.tev_konst));
-            memcpy(d.d.mat_color, fm.mat_color, 4);
-            memcpy(d.d.amb_color, fm.amb_color, 4);
-            memcpy(d.d.tex_mtx, mats[m].tex_mtx, sizeof(d.d.tex_mtx));
-            d.d.comb = mats[m].comb;
-            for (u32 i = 0; i < 3; i++) {
-                if (i < fm.n_tex_mtx) {
-                    const fmt::TexMtx& t = pkg.tex_mtx()[fm.tex_mtx_first + i];
-                    const f32 v[5] = {t.scale[0], t.scale[1], t.rotate, t.translate[0], t.translate[1]};
-                    memcpy(d.srt[i], v, sizeof(v));
-                } else {
-                    const f32 v[5] = {1, 1, 0, 0, 0};
-                    memcpy(d.srt[i], v, sizeof(v));
-                }
-            }
-            // (the packaged registers' translation is the first one kept)
-            CombEntry& e = d.cache[0];
-            memcpy(e.reg, d.d.tev_reg, sizeof(e.reg));
-            memcpy(e.konst, d.d.tev_konst, sizeof(e.konst));
-            e.comb = d.d.comb;
-            e.valid = true;
-            dyn_of[m] = (int)dyn.size();
-            dyn.push_back(d);
-        }
-        return dyn[(u32)dyn_of[m]];
-    };
+    // (and every material the scene sets registers of: fmt::MAT_RUNTIME)
+    dyn.reserve(mats.size());
+    for (u32 m = 0; m < mats.size(); m++)
+        if (pkg.materials()[m].flags & fmt::MAT_RUNTIME)
+            dyn_for(m);
+
     for (u16 a : mat_anims) {
         const fmt::Anim& an = pkg.anims()[a];
         for (u32 t = an.first_track; t < an.first_track + an.n_tracks; t++) {
@@ -509,10 +532,70 @@ void World::Impl::init() {
             cast_spheres.push_back({ctr, length(Vec3{c.bbox[3], c.bbox[4], c.bbox[5]} - ctr)});
         }
     }
+    // the sea: the flat surface's materials, the grid's amplitudes, a trail for each boat that leaves one
+    // (its width and stern from its model's box), if the trail batch has the ribbons' layout
+    mat_sea.assign(mats.size(), 0);
+    for (u32 m = 0; m < mats.size(); m++)
+        mat_sea[m] = (pkg.materials()[m].flags & fmt::MAT_SEA) != 0;
+    if (sea.valid()) {
+        const fmt::Sea& sp = sea.params();
+        grid_amp.resize(4 * (size_t)sea.grid_vertices());
+        if (sp.trail_batch != NONE) {
+            const fmt::VertexBuffer& vb = pkg.vertex_buffers()[pkg.batches()[sp.trail_batch].vbuf];
+            trails_ok = vb.attrs == (fmt::VA_POS | fmt::VA_CLR | fmt::VA_UV0) && (vb.flags & fmt::VB_UV_FLOAT) &&
+                        vb.stride == TRAIL_STRIDE;
+        }
+        for (u32 i = 0; i < insts.size() && trails_ok; i++) {
+            if (!(pkg.instances()[i].flags & fmt::INST_TRAIL))
+                continue;
+            const fmt::Model& m = pkg.models()[pkg.instances()[i].model];
+            Trail t;
+            t.inst = i;
+            // (model space: times the scale its root has as it goes)
+            t.half = 0.5f * (m.bbox[3] - m.bbox[0]);
+            t.back = m.bbox[2];
+            trails.push_back(t);
+        }
+    }
     matrix_of.reserve(slots);
     state_of.reserve(mats.size());
     vis_cells.reserve(pkg.cells().count);
     vis_insts.reserve(insts.size() + 2);
+}
+
+// a material's dynamic block (made at its first want: at init only, while the blocks' vector may grow)
+World::Impl::Dyn& World::Impl::dyn_for(u32 m) {
+    if (dyn_of[m] < 0) {
+        const fmt::Material& fm = pkg.materials()[m];
+        Dyn d;
+        d.d = MatDynamic();
+        d.d.material = (u16)m;
+        memcpy(d.d.tev_reg, fm.tev_reg, sizeof(d.d.tev_reg));
+        memcpy(d.d.tev_konst, fm.tev_konst, sizeof(d.d.tev_konst));
+        memcpy(d.d.mat_color, fm.mat_color, 4);
+        memcpy(d.d.amb_color, fm.amb_color, 4);
+        memcpy(d.d.tex_mtx, mats[m].tex_mtx, sizeof(d.d.tex_mtx));
+        d.d.comb = mats[m].comb;
+        for (u32 i = 0; i < 3; i++) {
+            if (i < fm.n_tex_mtx) {
+                const fmt::TexMtx& t = pkg.tex_mtx()[fm.tex_mtx_first + i];
+                const f32 v[5] = {t.scale[0], t.scale[1], t.rotate, t.translate[0], t.translate[1]};
+                memcpy(d.srt[i], v, sizeof(v));
+            } else {
+                const f32 v[5] = {1, 1, 0, 0, 0};
+                memcpy(d.srt[i], v, sizeof(v));
+            }
+        }
+        // (the packaged registers' translation is the first one kept)
+        CombEntry& e = d.cache[0];
+        memcpy(e.reg, d.d.tev_reg, sizeof(e.reg));
+        memcpy(e.konst, d.d.tev_konst, sizeof(e.konst));
+        e.comb = d.d.comb;
+        e.valid = true;
+        dyn_of[m] = (int)dyn.size();
+        dyn.push_back(d);
+    }
+    return dyn[(u32)dyn_of[m]];
 }
 
 const World::Impl::NodeMap* World::Impl::node_map(u16 anim, u16 model) const {
@@ -776,6 +859,28 @@ void World::Impl::cull() {
         pose(env.sky_model, translation(eye), NONE, 0, sky_slot);
         vis_insts.push_back({~1u, env.sky_model, 0, sky_slot});
     }
+    // the sea's wave grid: centred under the eye on its lattice; drawn while the eye is low enough
+    // over the sea, its box (its waves' reach up and down) in view, and with waves somewhere in it (its
+    // vertices' amplitudes, made again when the centre moves)
+    grid_on = false;
+    if (sea.valid() && sea.params().grid_batch != NONE) {
+        const fmt::Sea& sp = sea.params();
+        grid_c[0] = std::round(eye.x / sp.grid_snap) * sp.grid_snap;
+        grid_c[1] = std::round(eye.z / sp.grid_snap) * sp.grid_snap;
+        if (eye.y - sp.level <= sp.grid_height) {
+            if (grid_c[0] != grid_amp_c[0] || grid_c[1] != grid_amp_c[1]) {
+                grid_amp_c[0] = grid_c[0], grid_amp_c[1] = grid_c[1];
+                grid_any = sea.grid_amplitudes(grid_c[0], grid_c[1], grid_amp.data());
+            }
+            f32 reach = 0;
+            for (const fmt::SeaWave& wv : sp.waves)
+                reach += std::fabs(wv.amplitude);
+            const f32 r = sp.grid_radius;
+            const f32 box[6] = {grid_c[0] - r, sp.level - reach, grid_c[1] - r, grid_c[0] + r, sp.level + reach, grid_c[1] + r};
+            grid_on = grid_any && box_visible(fr, box);
+        }
+    }
+    stats->sea_grid = grid_on;
     collect();
 }
 
@@ -887,6 +992,134 @@ void World::Impl::shadow_frame() {
     stats->shadow_casters = (u32)casts.size();
 }
 
+// an instance's root node where it is now (its matrix; an animated one's root posed at this frame)
+Mtx34 World::Impl::root_now(u32 i) const {
+    const Inst& n = insts[i];
+    const fmt::Instance& in = pkg.instances()[i];
+    const fmt::Model& m = pkg.models()[in.model];
+    const NodeMap* map = n.animated ? node_map(in.anim, in.model) : nullptr;
+    if (!map || !m.n_nodes || map->of_node.empty() || map->of_node[0] < 0)
+        return m.n_nodes ? concat(n.mtx, to_mtx(pkg.nodes()[m.first_node].bind)) : n.mtx;
+    const fmt::Node& nd = pkg.nodes()[m.first_node];
+    f32 sv[3], rv[3], tv[3];
+    memcpy(sv, nd.scale, sizeof(sv)), memcpy(rv, nd.rotate, sizeof(rv)), memcpy(tv, nd.translate, sizeof(tv));
+    const fmt::Anim& an = pkg.anims()[in.anim];
+    const f32 f = anim_frame(frame + in.anim_offset, an.frames, an.loop);
+    for (u32 ti : anim_nodes[in.anim][(u32)map->of_node[0]].tracks) {
+        const fmt::Track& tr = pkg.tracks()[ti];
+        const u32 c = tr.target;
+        (c < 3 ? sv : c < 6 ? rv : tv)[c % 3] = eval_track(tr, pkg.keys().data, f);
+    }
+    return concat(n.mtx, srt_matrix(sv, rv, tv));
+}
+
+// The boats' trails at this update: each one's stern now (its root's place less its model's back along
+// its heading), its speed (smoothed over a quarter second), a sample each Sea::trail_spacing of its path
+// while it moves, the samples older than Sea::trail_life or beyond its ribbon's length dropped. A jump
+// (a warp, a boat put somewhere) starts its path again.
+void World::Impl::sample_trails() {
+    if (trails.empty())
+        return;
+    const fmt::Sea& sp = sea.params();
+    const f32 now = frame / 60.0f, dt = now - trail_time;
+    trail_time = now;
+    for (Trail& t : trails) {
+        const Mtx34 M = root_now(t.inst);
+        const f32 fx = M.m[0][2], fz = M.m[2][2], fl = std::sqrt(fx * fx + fz * fz);
+        if (!(fl > 1e-6f))
+            continue;
+        const f32 sc = max_scale(M);
+        TrailSample h;
+        h.dx = fx / fl, h.dz = fz / fl;
+        h.x = M.m[0][3] + h.dx * t.back * sc, h.z = M.m[2][3] + h.dz * t.back * sc;
+        h.t = now;
+        h.half = t.half * sc;
+        const f32 d = t.started ? std::sqrt((h.x - t.head.x) * (h.x - t.head.x) + (h.z - t.head.z) * (h.z - t.head.z)) : 0.0f;
+        if (!t.started || d > 10 * sp.trail_spacing + 400.0f * std::max(dt, 0.0f)) {
+            t.samples.clear();
+            t.speed = 0;
+            h.dist = 0;
+        } else {
+            h.dist = t.head.dist + d;
+            if (dt > 0)
+                t.speed += (d / dt - t.speed) * std::min(1.0f, dt / 0.25f);
+        }
+        t.started = true;
+        h.strength = std::min(1.0f, t.speed / std::max(sp.trail_speed, 1e-3f));
+        t.head = h;
+        if (h.strength > 0.02f && (t.samples.empty() || h.dist - t.samples.back().dist >= sp.trail_spacing))
+            t.samples.push_back(h);
+        while (!t.samples.empty() && (now - t.samples.front().t > sp.trail_life || t.samples.size() + 1 > sp.trail_samples))
+            t.samples.erase(t.samples.begin());
+    }
+}
+
+// The trails' ribbons into the packet's vertices (the trail batch's layout and order: ribbon k's point
+// j's two sides at vertices 2 (k samples + j) and + 1), about `origin`: the nearest Sea::trail_boats
+// trails with samples, each from its stern now back along its samples, half the boat's width wider a
+// little more each second, fading with age (and in behind the stern), on the waves under them. The
+// rest of a ribbon's vertices repeat its last point, unseen (no area); a ribbon not used is all at
+// the origin. The ribbons drawn, 0 if none.
+u32 World::Impl::trail_vertices(Packet* p, const f32 origin[3]) {
+    const fmt::Sea& sp = sea.params();
+    const u32 nb = sp.trail_boats, ns = sp.trail_samples;
+    // (the nearest, by their sterns)
+    trail_pick.clear();
+    for (u32 i = 0; i < trails.size(); i++) {
+        const Trail& t = trails[i];
+        const f32 dx = t.head.x - cam.eye.x, dz = t.head.z - cam.eye.z, d = std::sqrt(dx * dx + dz * dz);
+        if (!t.samples.empty() && d <= TRAIL_RANGE)
+            trail_pick.push_back({d, i});
+    }
+    const u32 n = std::min<u32>((u32)trail_pick.size(), nb);
+    if (!n)
+        return 0;
+    std::partial_sort(trail_pick.begin(), trail_pick.begin() + n, trail_pick.end());
+    p->dynamic.assign((size_t)2 * nb * ns * TRAIL_STRIDE, 0);
+    const f32 now = frame / 60.0f;
+    SeaWaves w;
+    sea_waves(sp, now, grid_c[0], grid_c[1], &w);
+    u8* out = p->dynamic.data();
+    auto put = [&](u32 v, f32 x, f32 y, f32 z, f32 a, f32 s, f32 tt) {
+        u8* q = out + (size_t)v * TRAIL_STRIDE;
+        const f32 pos[3] = {x - origin[0], y - origin[1], z - origin[2]};
+        memcpy(q, pos, 12);
+        q[12] = q[13] = q[14] = 255;
+        q[15] = (u8)std::min(255.0f, std::max(0.0f, a * 255.0f + 0.5f));
+        const f32 uv[2] = {s, tt};
+        memcpy(q + 16, uv, 8);
+    };
+    for (u32 k = 0; k < n; k++) {
+        const Trail& t = trails[trail_pick[k].second];
+        u32 j = 0;
+        const u32 base = 2 * k * ns;
+        auto point = [&](const TrailSample& q) {
+            const f32 age = now - q.t;
+            const f32 a = q.strength * std::max(0.0f, 1.0f - age / sp.trail_life) * std::min(1.0f, age / TRAIL_FADE_IN);
+            const f32 half = q.half + sp.trail_spread * age;
+            const f32 sx = q.dz * half, sz = -q.dx * half;
+            for (int e = 0; e < 2; e++) {
+                const f32 x = q.x + (e ? -sx : sx), z = q.z + (e ? -sz : sz);
+                f32 h, ddx, ddz;
+                sea_wave(w, x - grid_c[0], z - grid_c[1], sea.amplitude(x, z), &h, &ddx, &ddz);
+                put(base + 2 * j + e, x, sp.level + h + TRAIL_LIFT, z, a, (f32)e, std::fmod(q.dist / TRAIL_REPEAT, 4096.0f));
+            }
+            j++;
+        };
+        point(t.head);
+        for (size_t i = t.samples.size(); i-- > 0 && j < ns;)
+            point(t.samples[i]);
+        // (the rest: the last point again, unseen)
+        for (; j < ns; j++)
+            for (int e = 0; e < 2; e++) {
+                memcpy(out + (size_t)(base + 2 * j + e) * TRAIL_STRIDE, out + (size_t)(base + 2 * (j - 1) + e) * TRAIL_STRIDE,
+                       TRAIL_STRIDE);
+                out[(size_t)(base + 2 * j + e) * TRAIL_STRIDE + 15] = 0;
+            }
+    }
+    return n;
+}
+
 // a model's batches as candidates of their passes (the sky's all in the opaque pass, first)
 void World::Impl::add_model_items(const VisInst& v, f32 detail) {
     const fmt::Model& m = pkg.models()[v.model];
@@ -916,7 +1149,8 @@ void World::Impl::add_model_items(const VisInst& v, f32 detail) {
         c.material = bt.material;
         c.coords = coords_of[bt.vbuf];
         c.plain = !sky && is_plain(mat);
-        c.item = {(u16)b, 0, 0xFFFF, (u16)(sky ? DRAW_SKY : shadow_flags(mat, box))};
+        c.item = {(u16)b, 0, 0xFFFF,
+                  (u16)(sky ? DRAW_SKY : shadow_flags(mat, box) | (grid_on && mat_sea[bt.material] ? DRAW_SEA_MASKED : 0))};
         c.tris = bt.n_indices / 3;
         out.push_back(c);
     }
@@ -957,7 +1191,7 @@ void World::Impl::collect() {
             cd.material = bt.material;
             cd.coords = coords_of[bt.vbuf];
             cd.plain = is_plain(mat);
-            cd.item = {b, 0, 0xFFFF, shadow_flags(mat, bt.bbox)};
+            cd.item = {b, 0, 0xFFFF, (u16)(shadow_flags(mat, bt.bbox) | (grid_on && mat_sea[bt.material] ? DRAW_SEA_MASKED : 0))};
             cd.tris = bt.n_indices / 3;
             out.push_back(cd);
         }
@@ -1108,9 +1342,58 @@ void World::Impl::build(Pass pass, Packet* p) {
     p->matrices.assign(k_identity, k_identity + 12);
     p->mat_states.clear();
     p->items.clear();
-    p->items.reserve(cs.size());
+    p->items.reserve(cs.size() + 2);
+    p->sea.amp.clear();
+    p->dynamic.clear();
     u32 tris = 0;
-    for (const Cand& c : cs) {
+    // (a material's dynamic state into the packet at its first use)
+    auto state = [&](u16 material) -> u16 {
+        if (dyn_of[material] < 0)
+            return 0xFFFF;
+        int& si = state_of[material];
+        if (si < 0) {
+            Dyn& d = dyn[(u32)dyn_of[material]];
+            if (d.comb_stale)
+                refresh_combiners(d);
+            si = (int)p->mat_states.size();
+            p->mat_states.push_back(d.d);
+        }
+        return (u16)si;
+    };
+    auto translated = [&](f32 x, f32 y, f32 z) {
+        const f32 m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+        p->matrices.insert(p->matrices.end(), m, m + 12);
+        return (u16)(p->matrices.size() / 12 - 1);
+    };
+    // the sea's wave grid (after the sky: before the flat surface it masks), and its frame's waves
+    const fmt::Sea* sp = sea.valid() ? &sea.params() : nullptr;
+    auto add_grid = [&] {
+        const fmt::Batch& bt = pkg.batches()[sp->grid_batch];
+        Packet::SeaDraw& sd = p->sea;
+        sd.origin[0] = grid_c[0], sd.origin[1] = sp->level, sd.origin[2] = grid_c[1];
+        sea_waves(*sp, frame / 60.0, grid_c[0], grid_c[1], &sd.waves);
+        sd.eye[0] = cam.eye.x - grid_c[0], sd.eye[1] = cam.eye.y - sp->level, sd.eye[2] = cam.eye.z - grid_c[1];
+        stencil = (u8)(stencil % 255 + 1);
+        sd.stencil = stencil;
+        sd.amp.assign(grid_amp.begin(), grid_amp.end());
+        p->items.push_back({sp->grid_batch, translated(grid_c[0], sp->level, grid_c[1]), state(bt.material), DRAW_SEA_GRID});
+        tris += bt.n_indices / 3;
+    };
+    if (pi == 0 && grid_on && n_sky == 0)
+        add_grid();
+    // the boats' trails (first in the translucent pass: on the water, under whatever is over it)
+    stats->trails = 0;
+    if (pi == 1 && sp && trails_ok) {
+        const f32 o[3] = {grid_c[0], sp->level, grid_c[1]};
+        if (const u32 n = trail_vertices(p, o)) {
+            const fmt::Batch& bt = pkg.batches()[sp->trail_batch];
+            p->items.push_back({sp->trail_batch, translated(o[0], o[1], o[2]), state(bt.material), DRAW_DYNAMIC});
+            tris += n * 2 * (sp->trail_samples - 1u);
+            stats->trails = n;
+        }
+    }
+    for (u32 ci = 0; ci < cs.size(); ci++) {
+        const Cand& c = cs[ci];
         DrawItem it = c.item;
         if (c.final != ~0u) {
             int& mi = matrix_of[c.final];
@@ -1121,19 +1404,11 @@ void World::Impl::build(Pass pass, Packet* p) {
             }
             it.matrix = (u16)mi;
         }
-        if (dyn_of[c.material] >= 0) {
-            int& si = state_of[c.material];
-            if (si < 0) {
-                Dyn& d = dyn[(u32)dyn_of[c.material]];
-                if (d.comb_stale)
-                    refresh_combiners(d);
-                si = (int)p->mat_states.size();
-                p->mat_states.push_back(d.d);
-            }
-            it.mat_state = (u16)si;
-        }
+        it.mat_state = state(c.material);
         p->items.push_back(it);
         tris += c.tris;
+        if (pi == 0 && grid_on && ci + 1 == n_sky)
+            add_grid();
     }
     // the shadow map: both passes sample it, the opaque one draws it (its casters, before its items)
     p->casters.clear();
@@ -1262,6 +1537,59 @@ void World::set_shadow_focus(Vec3 focus) {
     impl_->dirty = true;
 }
 
+void World::set_material_register(u16 material, u8 reg, const s16 rgba[4]) {
+    Impl& w = *impl_;
+    if (material >= w.mats.size() || w.dyn_of[material] < 0)
+        return;
+    Impl::Dyn& dy = w.dyn[(u32)w.dyn_of[material]];
+    MatDynamic& d = dy.d;
+    for (int c = 0; c < 4; c++) {
+        switch (reg) {
+        case fmt::CR_MAT0: d.mat_color[c] = clamp_u8(rgba[c]); break;
+        case fmt::CR_AMB0: d.amb_color[c] = clamp_u8(rgba[c]); break;
+        case fmt::CR_TEV0:
+        case fmt::CR_TEV1:
+        case fmt::CR_TEV2: {
+            s16& r = d.tev_reg[1 + reg - fmt::CR_TEV0][c];
+            dy.comb_stale |= r != rgba[c];
+            r = rgba[c];
+            break;
+        }
+        case fmt::CR_KONST0:
+        case fmt::CR_KONST1:
+        case fmt::CR_KONST2:
+        case fmt::CR_KONST3: {
+            s16& r = d.tev_konst[reg - fmt::CR_KONST0][c];
+            dy.comb_stale |= r != rgba[c];
+            r = rgba[c];
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
+const Sea& World::sea() const { return impl_->sea; }
+
+f32 World::sea_height(f32 x, f32 z, double seconds, Vec3* normal) const {
+    const Impl& w = *impl_;
+    if (!w.sea.valid()) {
+        if (normal)
+            *normal = Vec3{0, 1, 0};
+        return 0;
+    }
+    // (about the grid's centre for the camera's last eye: where the waves' fades are measured from;
+    // the waves made once for a time and a centre: a boat asks at five places)
+    const fmt::Sea& sp = w.sea.params();
+    const f32 cx = std::round(w.cam.eye.x / sp.grid_snap) * sp.grid_snap;
+    const f32 cz = std::round(w.cam.eye.z / sp.grid_snap) * sp.grid_snap;
+    if (!(seconds == w.asked_t && cx == w.asked_c[0] && cz == w.asked_c[1])) {
+        sea_waves(sp, seconds, cx, cz, &w.asked);
+        w.asked_t = seconds, w.asked_c[0] = cx, w.asked_c[1] = cz;
+    }
+    return w.sea.height(x, z, w.asked, cx, cz, normal);
+}
+
 void World::set_lod_scale(f32 scale) {
     impl_->lod_scale = scale;
     impl_->dirty = true;
@@ -1278,6 +1606,7 @@ void World::update(f32 frame) {
     w.frame = frame;
     w.tick++;
     w.dirty = true;  // (instance poses)
+    w.sample_trails();
     if (w.dyn.empty())
         return;
     const Package& pkg = package_;

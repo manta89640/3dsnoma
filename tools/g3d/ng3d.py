@@ -107,6 +107,14 @@ STRUCTS = {
     "ShadowEnv": [("light", "u16", ()), ("decal_texture", "u16", ()), ("darkness", "f32", ()),
                   ("map_extent", "f32", ()), ("map_depth", "f32", ()), ("map_floor", "f32", ()),
                   ("reserved", "u32", (3,))],
+    "SeaWave": [("dir", "f32", (2,)), ("wavelength", "f32", ()), ("amplitude", "f32", ()), ("speed", "f32", ()),
+                ("phase", "f32", ()), ("fade", "f32", (2,))],
+    "Sea": [("waves", "SeaWave", (4,)), ("level", "f32", ()), ("amp_box", "f32", (4,)), ("amp_size", "u16", (2,)),
+            ("grid_batch", "u16", ()), ("trail_batch", "u16", ()), ("grid_radius", "f32", ()),
+            ("grid_snap", "f32", ()), ("grid_height", "f32", ()), ("uv_map", "f32", (2, 3)), ("sun", "f32", (3,)),
+            ("shade", "f32", (4,)), ("trail_boats", "u16", ()), ("trail_samples", "u16", ()),
+            ("trail_spacing", "f32", ()), ("trail_life", "f32", ()), ("trail_spread", "f32", ()),
+            ("trail_speed", "f32", ()), ("reserved", "u32", (4,))],
 }
 
 # section tags, in the order this writer lays them out (small tables first, bulk data last)
@@ -119,7 +127,7 @@ SECTIONS = [
     ("SEC_LITE", "LITE", "Light"), ("SEC_LSET", "LSET", "LightSet"), ("SEC_FOGS", "FOGS", "Fog"),
     ("SEC_MARK", "MARK", "Marker"), ("SEC_COLL", "COLL", "Collision"), ("SEC_CYLS", "CYLS", "Cylinder"),
     ("SEC_CVIS", "CVIS", None), ("SEC_CAST", "CAST", "Caster"), ("SEC_SHDW", "SHDW", "ShadowEnv"),
-    ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
+    ("SEC_SEAW", "SEAW", "Sea"), ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
     ("SEC_BLOB", "BLOB", None),
 ]
 # the Package attribute holding each array section's records
@@ -136,13 +144,14 @@ ENUMS = {
     "TexFormat": dict(TF_RGBA8=0, TF_RGB8=1, TF_RGBA5551=2, TF_RGB565=3, TF_RGBA4=4, TF_LA8=5, TF_HILO8=6,
                       TF_L8=7, TF_A8=8, TF_LA4=9, TF_L4=10, TF_A4=11, TF_ETC1=12, TF_ETC1A4=13),
     "TexFlags": dict(TEX_GX_RAW=1, TEX_ALPHA=2, TEX_CUTOUT=4),
-    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8, MAT_PRELIT=16, MAT_SHADOW_DECAL=128,
-                     MAT_SHADOW_RECEIVER=256),
+    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8, MAT_PRELIT=16, MAT_SEA=32,
+                     MAT_RUNTIME=64, MAT_SHADOW_DECAL=128, MAT_SHADOW_RECEIVER=256),
     "VtxAttr": dict(VA_POS=1, VA_NRM=2, VA_CLR=4, VA_UV0=8, VA_UV1=16, VA_POS16=32),
     "VbFlags": dict(VB_UV_FLOAT=1),
-    "BatchFlags": dict(BATCH_DETAIL=1, BATCH_CASTER=4),
+    "BatchFlags": dict(BATCH_DETAIL=1, BATCH_DYNAMIC=2, BATCH_CASTER=4),
     "NodeFlags": dict(NODE_VISIBLE=1, NODE_BILLBOARD=2),
-    "InstFlags": dict(INST_STATIC=1, INST_COLLIDE=2, INST_ANIMATED=4, INST_CASTER_ONLY=16, INST_NO_CAST=32),
+    "InstFlags": dict(INST_STATIC=1, INST_COLLIDE=2, INST_ANIMATED=4, INST_TRAIL=8, INST_CASTER_ONLY=16,
+                      INST_NO_CAST=32),
     "TrackTarget": dict(TT_NODE_SCALE_X=0, TT_NODE_SCALE_Y=1, TT_NODE_SCALE_Z=2, TT_NODE_ROT_X=3,
                         TT_NODE_ROT_Y=4, TT_NODE_ROT_Z=5, TT_NODE_TRANS_X=6, TT_NODE_TRANS_Y=7,
                         TT_NODE_TRANS_Z=8, TT_TEXMTX_SCALE_S=16, TT_TEXMTX_SCALE_T=17, TT_TEXMTX_ROTATE=18,
@@ -155,7 +164,7 @@ ENUMS = {
     "FogType": dict(FOG_NONE=0, FOG_LINEAR=2),
     "MarkerKind": dict(MK_SPAWN=0, MK_LANDMARK=1, MK_CAMERA=2, MK_WARP=3),
 }
-CONSTANTS = dict(MAX_TEV_STAGES=16, MAX_TEX_MAPS=8, MAX_TEXGENS=8, MAX_CELL_LODS=3)
+CONSTANTS = dict(MAX_TEV_STAGES=16, MAX_TEX_MAPS=8, MAX_TEXGENS=8, MAX_CELL_LODS=3, SEA_WAVES=4)
 # every enum value as a module constant (ng3d.TF_ETC1, ng3d.MAT_XLU, ...)
 for _e in ENUMS.values():
     globals().update(_e)
@@ -320,7 +329,8 @@ class Package:
     SECTION_LISTS), `env` (one Env), the string table, and the payloads the records point to:
     texture_data[i] (Texture i's bytes, all its levels), vertex_data[i] (VertexBuffer i's bytes),
     blobs[i] (Collision i's bytes). `indices` and `cell_batches` are lists of ints (u16); `cvis` is the
-    CVIS section's bytes (Env.pvs_row_bytes a cell, bit j of row i at byte j >> 3, bit j & 7)."""
+    CVIS section's bytes (Env.pvs_row_bytes a cell, bit j of row i at byte j >> 3, bit j & 7); `sea` the
+    SEAW section's Sea record (None: no section) and `sea_amp` its amplitude map's bytes."""
 
     def __init__(self):
         for attr in SECTION_LISTS.values():
@@ -331,6 +341,7 @@ class Package:
         self._str_index = {"": 0}
         self.texture_data, self.vertex_data, self.blobs = [], [], []
         self.cvis = b""
+        self.sea, self.sea_amp = None, b""
 
     # strings: offset in STRS, deduplicated
     def str(self, s):
@@ -360,6 +371,8 @@ class Package:
             return (self.env.pack(), 1) if self.env is not None else (b"", 0)
         if tag4 == "SHDW":
             return (self.shadow_env.pack(), 1) if self.shadow_env is not None else (b"", 0)
+        if tag4 == "SEAW":
+            return (self.sea.pack() + bytes(self.sea_amp), 1) if self.sea is not None else (b"", 0)
         if tag4 == "CVIS":
             rb = self.env.pvs_row_bytes if self.env is not None else 0
             return bytes(self.cvis), (len(self.cvis) // rb if rb else 0)
@@ -464,6 +477,9 @@ class Package:
                 p.shadow_env = Rec.unpack("ShadowEnv", data, s.offset)
             elif t4 == "CVIS":
                 p.cvis = bytes(data[s.offset:s.offset + s.size])
+            elif t4 == "SEAW":
+                p.sea = Rec.unpack("Sea", data, s.offset)
+                p.sea_amp = bytes(data[s.offset + sizeof("Sea"):s.offset + s.size])
             elif t4 in SECTION_LISTS:
                 kind = kinds[t4]
                 n = sizeof(kind)
@@ -536,7 +552,7 @@ class Package:
                 bad.append("vertex buffer %d: position origin %s, scale %g" % (i, v.pos_origin, v.pos_scale))
             in_sec("vertex buffer %d" % i, "VDAT", v.data, v.count * v.stride)
         for i, b in enumerate(self.batches):
-            if b.flags & ~(BATCH_DETAIL | BATCH_CASTER):
+            if b.flags & ~(BATCH_DETAIL | BATCH_DYNAMIC | BATCH_CASTER):
                 bad.append("batch %d: flags %04x" % (i, b.flags))
             if b.material >= nm or b.vbuf >= len(self.vertex_buffers) or b.n_indices % 3 or \
                     b.first_index + b.n_indices > ni:
@@ -639,6 +655,22 @@ class Package:
                     not 0 <= se.darkness <= 1 or not se.map_extent > 0 or not se.map_depth > 0 or not se.map_floor >= 0:
                 bad.append("shadow env: light %d, decal texture %d, darkness %g, map %g x %g + %g" % (
                     se.light, se.decal_texture, se.darkness, se.map_extent, se.map_depth, se.map_floor))
+        if self.sea is not None:
+            sw = self.sea
+            if len(self.sea_amp) != sw.amp_size[0] * sw.amp_size[1] or (len(self.sea_amp) and not (
+                    sw.amp_box[2] > sw.amp_box[0] and sw.amp_box[3] > sw.amp_box[1])):
+                bad.append("sea: an amplitude map of %d bytes, %dx%d over %s" % (len(self.sea_amp), sw.amp_size[0],
+                                                                                  sw.amp_size[1], sw.amp_box))
+            for what, b in (("grid", sw.grid_batch), ("trail", sw.trail_batch)):
+                if b != NONE16 and b >= nb:
+                    bad.append("sea: %s batch %d" % (what, b))
+            if sw.trail_batch != NONE16 and sw.trail_batch < nb:
+                tb = self.batches[sw.trail_batch]
+                if not tb.flags & BATCH_DYNAMIC or tb.n_indices != 6 * sw.trail_boats * max(sw.trail_samples - 1, 0):
+                    bad.append("sea: trail batch %d: flags %04x, %d indices for %d ribbons of %d" % (
+                        sw.trail_batch, tb.flags, tb.n_indices, sw.trail_boats, sw.trail_samples))
+            if not (sw.grid_radius > 0 and sw.grid_snap > 0):
+                bad.append("sea: grid radius %g, snap %g" % (sw.grid_radius, sw.grid_snap))
         for i, m in enumerate(self.markers):
             s_ok("marker %d" % i, m.name)
             if m.kind > MK_WARP:
@@ -659,7 +691,8 @@ class Package:
         out = {lst: [strip(r, LIST_KIND[lst]) if isinstance(r, Rec) else r for r in getattr(self, lst)]
                for lst in SECTION_LISTS.values()}
         out.update(env=self.env, shadow_env=self.shadow_env, strs=bytes(self.strs), texture_data=self.texture_data,
-                   vertex_data=self.vertex_data, blobs=self.blobs, cvis=bytes(self.cvis))
+                   vertex_data=self.vertex_data, blobs=self.blobs, cvis=bytes(self.cvis), sea=self.sea,
+                   sea_amp=bytes(self.sea_amp))
         return out
 
     def summary(self):

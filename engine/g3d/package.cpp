@@ -169,7 +169,7 @@ bool Package::check(std::string* error) {
         return fail(error, "SHDW holds %u records (one expected)", shdw->count);
     shadow_env_ = shdw && shdw->count ? (const fmt::ShadowEnv*)(data_ + shdw->offset) : nullptr;
     return check_textures(error) && check_geometry(error) && check_models(error) && check_world(error) &&
-           check_anims(error) && check_env(error);
+           check_anims(error) && check_env(error) && check_sea(error);
 }
 
 // a name: 0, or the start of a string in STRS (after a NUL)
@@ -298,7 +298,7 @@ bool Package::check_geometry(std::string* error) {
             return fail(error, "batch %u: its box", i);
         if (b.node != fmt::NONE16 && b.node >= nodes().count)
             return fail(error, "batch %u: node %u", i, b.node);
-        if (b.flags & ~(u32)(fmt::BATCH_DETAIL | fmt::BATCH_CASTER))
+        if (b.flags & ~(u32)(fmt::BATCH_DETAIL | fmt::BATCH_DYNAMIC | fmt::BATCH_CASTER))
             return fail(error, "batch %u: flags %04X", i, b.flags);
     }
     return true;
@@ -493,6 +493,49 @@ bool Package::check_env(std::string* error) {
                         ls.count, se->decal_texture, (double)se->darkness, (double)se->map_extent,
                         (double)se->map_depth, (double)se->map_floor);
     }
+    return true;
+}
+
+// the sea (SEAW, optional): one record and its amplitude map, the section exactly that size; its
+// batches in range, the trails' a dynamic batch with the indices of its ribbons
+bool Package::check_sea(std::string* error) {
+    const fmt::Section* s = section(fmt::SEC_SEAW);
+    if (!s || !s->size)
+        return true;
+    if (s->count != 1 || s->size < sizeof(fmt::Sea))
+        return fail(error, "SEAW: %u records in %u bytes (one expected)", s->count, s->size);
+    const fmt::Sea& sea = *(const fmt::Sea*)(data_ + s->offset);
+    if ((uint64_t)sea.amp_size[0] * sea.amp_size[1] != s->size - sizeof(fmt::Sea))
+        return fail(error, "SEAW: an amplitude map of %ux%u in %u bytes", sea.amp_size[0], sea.amp_size[1],
+                    (u32)(s->size - sizeof(fmt::Sea)));
+    if (sea.amp_size[0] && !(sea.amp_box[2] > sea.amp_box[0] && sea.amp_box[3] > sea.amp_box[1]))
+        return fail(error, "SEAW: the amplitude map's box");
+    for (const fmt::SeaWave& w : sea.waves)
+        if (!finite(w.dir, 2) || !(w.wavelength > 0) || !finite(&w.amplitude, 3) || !finite(w.fade, 2) ||
+            !(w.fade[1] > w.fade[0]))
+            return fail(error, "SEAW: a wave (length %g, fade %g..%g)", (double)w.wavelength, (double)w.fade[0],
+                        (double)w.fade[1]);
+    if (!(sea.grid_radius > 0) || !(sea.grid_snap > 0) || !finite(&sea.grid_radius, 3) || !finite(&sea.uv_map[0][0], 6) ||
+        !finite(sea.sun, 3) || !finite(sea.shade, 4) || !std::isfinite(sea.level) ||
+        !finite(&sea.trail_spacing, 3))
+        return fail(error, "SEAW: the grid's, the shading's or the trails' measures");
+    const u32 nb = batches().count;
+    if ((sea.grid_batch != fmt::NONE16 && sea.grid_batch >= nb) || (sea.trail_batch != fmt::NONE16 && sea.trail_batch >= nb))
+        return fail(error, "SEAW: batch %u / %u of %u", sea.grid_batch, sea.trail_batch, nb);
+    if (sea.grid_batch != fmt::NONE16) {
+        const fmt::VertexBuffer& vb = vertex_buffers()[batches()[sea.grid_batch].vbuf];
+        if (!(vb.attrs & fmt::VA_POS))
+            return fail(error, "SEAW: the grid's vertices aren't f32 positions");
+    }
+    if (sea.trail_batch != fmt::NONE16) {
+        const fmt::Batch& b = batches()[sea.trail_batch];
+        if (!(b.flags & fmt::BATCH_DYNAMIC) || sea.trail_samples < 2 ||
+            b.n_indices != 6u * sea.trail_boats * (sea.trail_samples - 1u) ||
+            vertex_buffers()[b.vbuf].count < 2u * sea.trail_boats * sea.trail_samples)
+            return fail(error, "SEAW: the trails' batch %u (%u indices for %u ribbons of %u)", sea.trail_batch,
+                        b.n_indices, sea.trail_boats, sea.trail_samples);
+    }
+    sea_ = &sea;
     return true;
 }
 

@@ -104,6 +104,8 @@ void Packet::reset() {
     items.clear();
     shadow = ShadowMap();
     casters.clear();
+    sea.amp.clear();
+    dynamic.clear();
 }
 
 GxView native_draw_view() {

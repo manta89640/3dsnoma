@@ -289,16 +289,18 @@ class Converter:
         return i
 
     # ---------------------------------------------------------------- materials
-    def material(self, r, mdl, mat, tex_override=None, priority=0, name=None):
+    def material(self, r, mdl, mat, tex_override=None, priority=0, name=None, variant=None):
         """The package material for `mat` (a brres Material of model `mdl` in `r`). tex_override
-        maps a texture name to (brres, name) to use instead (runtime swaps)."""
+        maps a texture name to (brres, name) to use instead (runtime swaps). variant: a name for a
+        material of its own made from the same one (the stager changes it afterwards: the sea's
+        surface at its level, a wake faded at run time), named "model/material#variant"."""
         ov = tuple(sorted((k, id(v[0]), v[1]) for k, v in (tex_override or {}).items()))
-        key = (id(r), mdl.name, mat.index, ov)
+        key = (id(r), mdl.name, mat.index, ov) + ((variant,) if variant else ())
         if key in self.mat:
             return self.mat[key]
         bp = mat.regs.bp
         M = Rec("Material")
-        M.name = self.pkg.str(name or "%s/%s" % (mdl.name, mat.name))
+        M.name = self.pkg.str(name or "%s/%s%s" % (mdl.name, mat.name, "#" + variant if variant else ""))
         flags = 0
         if mat.xlu:
             flags |= ng3d.MAT_XLU
@@ -422,7 +424,7 @@ class Converter:
 
     # ---------------------------------------------------------------- models
     def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None, parts=(), detail=None,
-              select=None, split=()):
+              select=None, split=(), variant=None):
         """A Model of `mdl`: its nodes (rest SRT, bind matrix, visibility, billboard) and a batch per
         draw (opaque list, then translucent), vertices in the space of the node they hang from.
         Draws whose visibility node is in `hidden` are left out (the node stays, invisible).
@@ -441,7 +443,8 @@ class Converter:
         own (a car's wheels, to turn at run time): each a node under the model's root, at `pivot`
         (model space, unrotated), taking the triangles pick((n, 3, 3) in the model's space) -> bool
         says (the first that picks one has it), their positions about the pivot; at rest the piece is
-        where it was, lit as it was.
+        where it was, lit as it was. variant: the model's own draws get materials of their own
+        (Converter.material's variant), not the ones another conversion of it made.
         Returns (model index, {node name: index within the model})."""
         pkg = self.pkg
         shift = 1 if extra_root else 0
@@ -512,7 +515,7 @@ class Converter:
                 self.stats["model draws hidden"] += 1
                 continue
             W, mats, shapes = rest[id(sm)]
-            mi = self.material(sr, sm, mats[d.mat], tov, d.prio)
+            mi = self.material(sr, sm, mats[d.mat], tov, d.prio, variant=variant if sm is mdl else None)
             shape = shapes[d.shape]
             t = sm.shape_triangles(shape, world=False)
             if not t or "pos" not in t:
@@ -997,13 +1000,14 @@ def curve_keys(curve, time_scale=1.0, frames=None):
 
 def repeat_keys(keys, period, times):
     """Keys of a loop of `period` frames laid end to end `times` times (a key on a seam that
-    repeats the one before it is kept once)."""
+    repeats the one before it is kept once; one on a seam that steps to the loop's start stays at
+    the seam's frame, never an ulp before the key it follows)."""
     if len(keys) == 1 or times <= 1:
         return keys
     out = []
     for r in range(times):
         for f, v, s in keys:
-            k = (f + r * period, v, s)
+            k = (max(f + r * period, out[-1][0]) if out else f + r * period, v, s)
             if out and abs(out[-1][0] - k[0]) < 1e-6 and out[-1][1] == k[1] and out[-1][2] == k[2]:
                 continue
             out.append(k)

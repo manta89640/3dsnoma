@@ -147,6 +147,8 @@ struct Item {
     bool fog = false;
     f32 fog_a = 0, fog_b = 0;  // fog amount = clamp(w fog_a + fog_b, 0, 1) (w: view depth, guest units)
     s32 fog_rgb[3] = {};
+    // the sea (native_draw.h DRAW_SEA_*): the grid marks the pixels it draws, the flat sea skips them
+    bool stencil_write = false, stencil_masked = false;
 };
 
 // a vertex transformed and lit, in clip space
@@ -179,6 +181,12 @@ struct SoftBackend::Impl {
     // the draw: its items and their triangles, set up
     std::vector<Item> items;
     std::vector<Tri> tris;
+    // the sea: the wave grid's vertices as the vertex program makes them (displaced, shaded, their
+    // texture coordinates the sea's at their place: sea_grid), and the stencil marks it leaves (a
+    // value a pixel of the frame buffer; this packet's value, a frame's own)
+    std::vector<u8> grid_vertices;
+    mutable std::vector<u8> stencil;
+    u8 stencil_ref = 0;
     // the vertex cache of the item being set up: stamp[i] == gen when vcache[i] holds vertex i
     std::vector<u32> stamp;
     std::vector<Vtx> vcache;
@@ -223,6 +231,7 @@ struct SoftBackend::Impl {
     }
 
     void setup(const Packet& p, const GxView& view, Stats& st);
+    void sea_grid(const Packet& p, const fmt::Batch& b, fmt::VertexBuffer* vb);
     void make_item(const Packet& p, const DrawItem& di, const Prepared& prep, Item& it);
     const Vtx& vertex(const Item& it, const fmt::VertexBuffer& vb, const u8* data, u32 i);
     void triangle(u32 item_index, const Item& it, const Vtx& a, const Vtx& b, const Vtx& c, Stats& st);
@@ -579,7 +588,7 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
     // compact positions (fmt::VA_POS16): s16 x the buffer's scale + its origin, folded in (the
     // vertices are then exact)
     const fmt::VertexBuffer& vb = pkg.vertex_buffers()[b.vbuf];
-    it.pos16 = vb.attrs & fmt::VA_POS16;
+    it.pos16 = (vb.attrs & fmt::VA_POS16) && !(di.flags & (DRAW_SEA_GRID | DRAW_DYNAMIC));
     if (it.pos16)
         for (int r = 0; r < 4; r++) {
             it.pmv[r][3] += it.pmv[r][0] * vb.pos_origin[0] + it.pmv[r][1] * vb.pos_origin[1] +
@@ -715,6 +724,8 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
     it.logic = px.logic, it.logic_op = px.logic_op;
     it.color_write = px.color_write, it.alpha_write = px.alpha_write;
     it.const_alpha = px.const_alpha, it.const_alpha_value = px.const_alpha_value;
+    it.stencil_write = di.flags & DRAW_SEA_GRID;
+    it.stencil_masked = di.flags & DRAW_SEA_MASKED;
     if (m.fog && m.fog_index < p.fogs.size() && p.fogs[m.fog_index].type != fmt::FOG_NONE) {
         const fmt::Fog& f = p.fogs[m.fog_index];
         const f32 span = (f.end - f.start) * k;
@@ -1056,14 +1067,25 @@ void SoftBackend::Impl::setup(const Packet& p, const GxView& view, Stats& st) {
         const Material& m = p.materials[b.material];
         if (m.pixel.cull_gx == 3)
             continue;
-        const fmt::VertexBuffer& vb = pkg.vertex_buffers()[b.vbuf];
+        // (its vertices: the package's; the packet's for a dynamic item; the wave grid's made here)
+        fmt::VertexBuffer vb = pkg.vertex_buffers()[b.vbuf];
+        const u8* data = pkg.at(vb.data);
+        if (di.flags & DRAW_DYNAMIC) {
+            if (p.dynamic.size() < (size_t)vb.count * vb.stride)
+                continue;
+            data = p.dynamic.data();
+        } else if (di.flags & DRAW_SEA_GRID) {
+            sea_grid(p, b, &vb);
+            if (!vb.count)
+                continue;
+            data = grid_vertices.data();
+        }
         if (stamp.size() < vb.count)
             stamp.resize(vb.count, 0), vcache.resize(vb.count);
         if (++gen == 0) {
             std::fill(stamp.begin(), stamp.end(), 0);
             gen = 1;
         }
-        const u8* data = pkg.at(vb.data);
         const u16* idx = pkg.indices().data + b.first_index;
         st.items++;
         for (u32 k = 0; k + 2 < b.n_indices; k += 3) {
@@ -1073,6 +1095,47 @@ void SoftBackend::Impl::setup(const Packet& p, const GxView& view, Stats& st) {
             triangle(i, it, v0, v1, v2, st);
         }
     }
+}
+
+// The wave grid's vertices, as the PICA backend's vertex program (platform/3ds/shaders/g3d_sea.v.pica)
+// makes them, into grid_vertices with `vb` describing them (position f32, colour, uv0 f32): each the
+// grid's own (about its centre: the item's matrix) raised by the waves (sea.h sea_wave, its amplitude
+// the packet's), its colour channel the shade (half of it) and the brightening (sea_shade), its uv0
+// the sea's texture coordinates at its place (fmt::Sea::uv_map: the material's matrices do the rest,
+// as on the flat sea). vb's count 0 if the packet has no grid.
+void SoftBackend::Impl::sea_grid(const Packet& p, const fmt::Batch& b, fmt::VertexBuffer* vb) {
+    const Package& pkg = *p.package;
+    const fmt::Sea* sp = pkg.sea();
+    const fmt::VertexBuffer& src = pkg.vertex_buffers()[b.vbuf];
+    if (!sp || !(src.attrs & fmt::VA_POS) || p.sea.amp.size() < 4 * (size_t)src.count) {
+        vb->count = 0;
+        return;
+    }
+    constexpr u32 STRIDE = 24;
+    grid_vertices.resize((size_t)src.count * STRIDE);
+    const u8* in = pkg.at(src.data);
+    const Packet::SeaDraw& sd = p.sea;
+    for (u32 i = 0; i < src.count; i++) {
+        f32 q[3];
+        memcpy(q, in + (size_t)i * src.stride, 12);
+        f32 h, dx, dz, shade, bright;
+        sea_wave(sd.waves, q[0], q[2], sd.amp[4 * (size_t)i] * (1.0f / 255.0f), &h, &dx, &dz);
+        sea_shade(*sp, q[0], h, q[2], dx, dz, sd.eye, &shade, &bright);
+        u8* o = grid_vertices.data() + (size_t)i * STRIDE;
+        const f32 pos[3] = {q[0], h, q[2]};
+        memcpy(o, pos, 12);
+        const u8 c = (u8)clampf(0.5f * shade * 255.0f + 0.5f, 0, 255);
+        o[12] = o[13] = o[14] = c;
+        o[15] = (u8)clampf(bright * 255.0f + 0.5f, 0, 255);
+        const f64 wx = (f64)sd.origin[0] + q[0], wz = (f64)sd.origin[2] + q[2];
+        const f32 uv[2] = {(f32)(sp->uv_map[0][0] * wx + sp->uv_map[0][1] * wz + sp->uv_map[0][2]),
+                           (f32)(sp->uv_map[1][0] * wx + sp->uv_map[1][1] * wz + sp->uv_map[1][2])};
+        memcpy(o + 16, uv, 8);
+    }
+    vb->count = src.count;
+    vb->attrs = fmt::VA_POS | fmt::VA_CLR | fmt::VA_UV0;
+    vb->flags = fmt::VB_UV_FLOAT;
+    vb->stride = STRIDE;
 }
 
 // the triangles' pixels on this band's rows (rows in blocks of 4, block j to band j % bands)
@@ -1114,11 +1177,14 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
                 a[k] = t.a[k] + t.dadx[k] * sx0 + t.dady[k] * sy;
             u32* color = efb.color + (size_t)y * W;
             u32* depth = efb.depth + (size_t)y * W;
+            u8* mark = stencil.data() + (size_t)y * W;
             for (s32 x = xl; x <= xr; x++, z += t.dzdx, iw += t.diwdx) {
                 if (x != xl)
                     for (int k = 0; k < NA; k++)
                         a[k] += t.dadx[k];
                 st.fragments++;
+                if (it.stencil_masked && mark[x] == stencil_ref)
+                    continue;
                 const u32 zi = z <= 0 ? 0u : z >= 16777215.0 ? 0xFFFFFFu : (u32)z;
                 if (it.depth_test && !test(it.depth_func, zi, depth[x]))
                     continue;
@@ -1168,6 +1234,8 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
                     continue;
                 if (it.depth_write)
                     depth[x] = zi;
+                if (it.stencil_write)
+                    mark[x] = stencil_ref;
                 if (it.fog) {
                     const f32 f = clampf(w * it.fog_a + it.fog_b, 0, 1);
                     const s32 fi = (s32)(f * 256.0f);
@@ -1413,6 +1481,15 @@ void SoftBackend::draw(const Packet& packet, const GxView& view, const guest::Ho
         m.smap_size = 0;
     else if (packet.pass == Pass::OPAQUE)
         m.draw_shadow_map(packet, *(const Prepared*)packet.package->backend_data, stats_);
+    // (the stencil marks: a value a pixel, this packet's the grid's; cleared when the values come
+    // round again, so that an old mark never counts)
+    if (m.stencil.size() != (size_t)m.efb.width * m.efb.height)
+        m.stencil.assign((size_t)m.efb.width * m.efb.height, 0);
+    if (packet.pass == Pass::OPAQUE) {
+        if (packet.sea.stencil != m.stencil_ref && packet.sea.stencil == 1)
+            std::fill(m.stencil.begin(), m.stencil.end(), 0);
+        m.stencil_ref = packet.sea.stencil;
+    }
     m.setup(packet, view, stats_);
     if (m.tris.empty())
         return;

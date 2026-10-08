@@ -69,6 +69,7 @@ set(ENGINE_SOURCES
   engine/g3d/material.cpp
   engine/g3d/native_draw.cpp
   engine/g3d/package.cpp
+  engine/g3d/sea.cpp
   engine/g3d/texture.cpp
   engine/g3d/world.cpp
   engine/input/remote.cpp
@@ -208,10 +209,21 @@ if(NINTENDO_3DS)
     DEPENDS ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/g3d.v.pica ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
     COMMENT "Assembling g3d.v.pica"
     VERBATIM)
+  # ... and its sea's wave grid's (a program of its own)
+  set(G3D_SEA_SHBIN ${CMAKE_CURRENT_BINARY_DIR}/g3d_sea.shbin)
+  set(G3D_SEA_SHBIN_C ${CMAKE_CURRENT_BINARY_DIR}/g3d_sea_shbin.c)
+  add_custom_command(
+    OUTPUT ${G3D_SEA_SHBIN_C}
+    COMMAND ${PICASSO} -o ${G3D_SEA_SHBIN} ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/g3d_sea.v.pica
+    COMMAND ${CMAKE_COMMAND} -DIN=${G3D_SEA_SHBIN} -DOUT=${G3D_SEA_SHBIN_C} -DNAME=g3d_sea_shbin
+            -P ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
+    DEPENDS ${CMAKE_SOURCE_DIR}/platform/3ds/shaders/g3d_sea.v.pica ${CMAKE_SOURCE_DIR}/platform/3ds/cmake/bin2c.cmake
+    COMMENT "Assembling g3d_sea.v.pica"
+    VERBATIM)
   # memcpy/memmove/memset for the ARM11 (LDM/STM, PLD): devkitARM's newlib has the generic C ones
   enable_language(ASM)
   add_executable(noma ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/3ds/main.cpp platform/3ds/gx_pica.cpp
-                 platform/3ds/g3d_pica.cpp platform/3ds/mem_arm11.S ${GX_SHBIN_C} ${G3D_SHBIN_C})
+                 platform/3ds/g3d_pica.cpp platform/3ds/mem_arm11.S ${GX_SHBIN_C} ${G3D_SHBIN_C} ${G3D_SEA_SHBIN_C})
   target_include_directories(noma PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/platform/3ds ${DECOMP_DIR}/include ${CTRULIB}/include)
   target_link_libraries(noma noma_decomp citro3d ctru m)

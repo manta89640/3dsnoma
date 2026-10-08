@@ -1,0 +1,186 @@
+; The native g3d's sea: the wave grid's vertex program (platform/3ds/g3d_pica.cpp draws the grid's item
+; with it; engine/g3d/sea.h has the waves and the shading, which the host's software backend computes
+; the same way on the CPU).
+;
+; A vertex arrives as two attributes: its place on the grid about the grid's centre (f32, y 0: the
+; package's buffer) and its amplitude factor (u8, 0-255: the amplitude map at its place, which the CPU
+; writes when the grid's centre moves). The CPU folds what is the same for the whole grid: the
+; model-view-projection with the grid's centre, the GX projection and the 3DS's rotated target in it,
+; the waves' phases at the centre now (in double precision, wrapped: the GPU's 24-bit floats only add
+; the few radians a vertex is from the centre), the texture rows with the sea's texture coordinates
+; at the vertex's place, and the eye and the sun about the centre. Here:
+;   * the four waves (a lane each): the phase k . (x, z) + phase, brought into [-pi, pi) (flr) for a
+;     sine and a cosine by polynomials (within 1e-5); each wave's amplitude times its fade with the
+;     distance from the centre, clamp(fa - fb r, 0, 1), and the vertex's factor; the height, the sum
+;     of amplitude x sine, and the slopes, the sums of amplitude x k x cosine;
+;   * the position raised by the height; the normal from the slopes;
+;   * the colour: half the shade -- 1 + kd (N.L - L.y) + kf min(dF, 0) -- in rgb and the brightening
+;     -- kf max(dF, 0) + ks max(glint, 0) -- in alpha, dF Schlick's Fresnel term of the face less the
+;     flat surface's, the glint (R.L)^n of the face less the flat surface's (R the view reflected);
+;     the combiners double the shade and add a sky colour times the brightening (sea.h);
+;   * unit 0: the position through rows s, t, q (the camera projection of the glare spot: the GPU
+;     divides per pixel, texcoord0w); units 1 and 2: the position through rows s and t (the sea's
+;     texture coordinates at the vertex's place through the material's matrices).
+; No branches: every output written whole on every path (tools/check_shader_outputs.py). The PICA has 16
+; temporaries: those of the waves are used again for the shading once the height and slopes are made.
+
+; ---- uniforms (the CPU finds them by name)
+.fvec mvp[4]               ; clip-space rows
+.fvec tmtx[7]              ; unit 0: s, t, q; unit 1: s, t; unit 2: s, t (of the raised position)
+.fvec wkx, wkz             ; the waves' vectors: x and z components (radians a unit)
+.fvec wph                  ; their phases at the grid's centre now
+.fvec wamp                 ; their amplitudes
+.fvec wfa, wfb             ; their fades: clamp(wfa - wfb r, 0, 1) at r from the centre
+.fvec eye                  ; the eye from the grid's centre
+.fvec sun                  ; toward the sun (unit)
+.fvec sunr                 ; the same mirrored by the flat surface: (-x, y, -z)
+.fvec shade                ; kd, kf, ks, the glint's exponent
+
+.constf consts(0.0, 1.0, 0.5, 0.00392156862745098)
+.constf turn(0.15915494309189535, 6.283185307179586, 0.98, 1e-6)
+.constf sinc(-0.16664432658498596, 0.008315022765015388, -0.0001933728365166178, 2.1777642958252607e-06)
+.constf cosc(-0.499995811826004, 0.04166068427874895, -0.0013860888115717538, 2.422418924731914e-05)
+.constf cosd(-2.2051208048026753e-07, 0.0, 0.0, 1e-18)
+
+; ---- inputs
+.alias pos v0              ; on the grid about its centre (y 0)
+.alias amp v1              ; x: the amplitude factor, 0-255
+
+; ---- outputs
+.out opos position
+.out oclr color
+.out otc0 texcoord0.xy
+.out -    texcoord0w otc0.z
+.out otc1 texcoord1
+.out otc2 texcoord2
+
+.proc main
+  ; ---- the distance from the centre, and each wave's amplitude there (fade x amplitude x factor)
+  mul r1, pos, pos
+  add r1.x, r1.x, r1.z
+  max r1.x, cosd.wwww, r1.x
+  rsq r1.y, r1.x
+  mul r1.x, r1.x, r1.y
+  mul r2, wfb, r1.xxxx
+  add r2, wfa, -r2
+  max r2, consts.xxxx, r2
+  min r2, consts.yyyy, r2
+  mul r3, wamp, r2
+  mul r4.x, consts.wwww, amp.x
+  mul r3, r3, r4.xxxx
+
+  ; ---- the phases, brought into [-pi, pi): (frac(p / 2 pi + 0.5) - 0.5) 2 pi
+  mul r5, wkx, pos.xxxx
+  mul r6, wkz, pos.zzzz
+  add r5, r5, r6
+  add r5, wph, r5
+  mul r6, turn.xxxx, r5
+  add r6, consts.zzzz, r6
+  flr r7, r6
+  add r6, r6, -r7
+  add r6, -consts.zzzz, r6
+  mul r6, turn.yyyy, r6
+  mul r7, r6, r6
+
+  ; ---- sine (odd, degree 9) and cosine (even, degree 10), a lane a wave
+  mov r8, sinc.wwww
+  mad r8, r8, r7, sinc.zzzz
+  mad r8, r8, r7, sinc.yyyy
+  mad r8, r8, r7, sinc.xxxx
+  mad r8, r8, r7, consts.yyyy
+  mul r8, r8, r6
+  mov r9, cosd.xxxx
+  mad r9, r9, r7, cosc.wwww
+  mad r9, r9, r7, cosc.zzzz
+  mad r9, r9, r7, cosc.yyyy
+  mad r9, r9, r7, cosc.xxxx
+  mad r9, r9, r7, consts.yyyy
+
+  ; ---- the height (y) and the slopes (x: d/dx, z: d/dz)
+  dp4 r10.y, r3, r8
+  mul r11, wkx, r3
+  dp4 r10.x, r11, r9
+  mul r11, wkz, r3
+  dp4 r10.z, r11, r9
+
+  ; ---- the raised position
+  mov r0, pos
+  mov r0.y, r10.y
+  mov r0.w, consts.yyyy
+  dp4 opos.x, mvp[0], r0
+  dp4 opos.y, mvp[1], r0
+  dp4 opos.z, mvp[2], r0
+  dp4 opos.w, mvp[3], r0
+
+  ; ---- the normal (-dx, 1, -dz), and the view (toward the eye), normalised
+  mov r1, -r10
+  mov r1.y, consts.yyyy
+  dp3 r2.x, r1, r1
+  rsq r2.x, r2.x
+  mul r1, r1, r2.xxxx
+  add r2, eye, -r0
+  dp3 r3.x, r2, r2
+  max r3.x, cosd.wwww, r3.x
+  rsq r3.x, r3.x
+  mul r2, r2, r3.xxxx
+
+  ; ---- the sun's side lighter: kd (N.L - L.y)
+  dp3 r3.x, sun, r1
+  add r3.x, -sun.yyyy, r3.x
+  mul r3.x, shade.xxxx, r3.x
+
+  ; ---- the sky's reflection: Schlick's (1 - c)^5 of the face (x) and of the flat surface (y),
+  ; c = N.V and V.y (no less than 0); their difference times 0.98
+  dp3 r4.x, r2, r1
+  mov r4.y, r2.y
+  max r4, consts.xxxx, r4
+  add r5, consts.yyyy, -r4
+  mul r6, r5, r5
+  mul r6, r6, r6
+  mul r6, r6, r5
+  mul r6, turn.zzzz, r6
+  add r6.x, r6.x, -r6.y
+
+  ; ---- the sun's glint: (R.L)^n with R = 2 (N.V) N - V, less the flat surface's (V mirrored)
+  dp3 r7.x, r2, r1
+  mul r8, r1, r7.xxxx
+  add r8, r8, r8
+  add r8, r8, -r2
+  dp3 r9.x, sun, r8
+  dp3 r9.y, sunr, r2
+  max r9, turn.wwww, r9
+  lg2 r11.x, r9.x
+  lg2 r11.y, r9.y
+  mul r11, shade.wwww, r11
+  ex2 r12.x, r11.x
+  ex2 r12.y, r11.y
+  add r12.x, r12.x, -r12.y
+  max r12.x, consts.xxxx, r12.x
+  mul r12.x, shade.zzzz, r12.x
+
+  ; ---- the colour: rgb half the shade, alpha the brightening
+  min r13.x, consts.xxxx, r6.x
+  max r13.y, consts.xxxx, r6.x
+  mul r13, shade.yyyy, r13
+  add r14.x, consts.yyyy, r3.x
+  add r14.x, r14.x, r13.x
+  mul r15, consts.zzzz, r14.xxxx
+  add r15.w, r13.y, r12.x
+  mov oclr, r15
+
+  ; ---- the texture coordinates
+  dp4 r1.x, tmtx[0], r0
+  dp4 r1.y, tmtx[1], r0
+  dp4 r1.z, tmtx[2], r0
+  mov r1.w, consts.xxxx
+  mov otc0, r1
+  dp4 r2.x, tmtx[3], r0
+  dp4 r2.y, tmtx[4], r0
+  mov r2.zw, consts.xxxx
+  mov otc1, r2
+  dp4 r3.x, tmtx[5], r0
+  dp4 r3.y, tmtx[6], r0
+  mov r3.zw, consts.xxxx
+  mov otc2, r3
+  end
+.end
