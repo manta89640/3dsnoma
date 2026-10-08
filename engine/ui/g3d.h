@@ -284,4 +284,55 @@ inline void anim_set_rate(u32 obj, f32 rate) {
     gcall<u32>(guest::load32(guest::load32(obj) + 0x28), obj, (f64)rate);
 }
 
+// The body's crossfade. When a behaviour's clip changes, the BodyController attaches the new one
+// (fn_80193BB0: its frame 0, the counter at the body's mii::BodyCallback +0x68 back to 0) and sets
+// the fade's length (fn_801940A0: the callback's +0x64; 10 frames, 30 from or to the Message_Genre
+// emotes, 60 for the TV caster). Every body calc after it counts the counter up by one and slerps
+// each node from a snapshot of the pose at the change toward the new clip by counter / length (at
+// most 1; the root's translation lerped the same way). The length is read at every calc, so a length
+// written after the actor manager's update in the frame the clip changed is the one the fade takes.
+// It counts calcs: game frames, not sixtieths of a second.
+inline void body_set_blend_frames(u32 body, u32 n) { g::fn_801940A0(body, n); }
+// the body's model (nw4r::g3d::ScnMdl, its +0xE8 the ResMdl) and a node's world matrix (3x4 f32s at
+// `mtx`) as the last CalcWorld left it (ScnMdlSimple::GetScnMtxPos, type 1: world)
+inline u32 body_model(u32 body) { return guest::load32(body + 0x1C); }
+inline bool body_node_world(u32 body, u32 node, u32 mtx) {
+    return g::nw4r_g3d_ScnMdlSimple_GetScnMtxPos(body_model(body), mtx, 1, node) != 0;
+}
+
+// ---- an animation file of the actor manager's Mii resources (mii::ModelRes, the manager's +0x14,
+// mii_ModelRes_sInstance): an AnimFile (0x18 bytes) is +0x00 its short name (a std::string: the
+// content path less "g3d/Mii/Animation/" and ".lex", e.g. "Move", what a behaviour's file name
+// matches), +0x0C its file's bytes and size, +0x14 its nw4r::g3d::ResFile (the bytes, initialised and
+// bound). The ModelRes's +0x0C is a vector of AnimFile* (data, size, capacity); its dtor
+// (fn_80192294) frees each file's bytes (operator_delete), its name and the AnimFile. The ctor makes
+// one for each list entry found in the content's g3d/Mii/Animation (fn_80192520 reads the file
+// through wii::Cnt, decompressing a .lex); anim_file_add makes one from bytes the native side has, in
+// the current heap, as that does: the bytes (an uncompressed BRRES, `size` of them at host `data`)
+// copied into a 32-byte aligned block, the name (a guest string) assigned, the ResFile's Init and
+// Bind (fn_8010CD5C), the vector's push_back (fn_8006C048). Only before the actor manager spawns a
+// Mii: a body makes the animation objects of every CHR0 of every file when it is made. The AnimFile,
+// or 0 (no room: nothing is kept).
+inline u32 anim_file_add(u32 actors, u32 name, const void* data, u32 size) {
+    const u32 bytes = new_aligned(size);
+    if (!bytes)
+        return 0;
+    const u32 file = g::operator_new(0x18);
+    if (!file) {
+        g::operator_delete(bytes);
+        return 0;
+    }
+    guest::write_g(bytes, data, size);
+    g::fn_80012994(file);  // (std::string's ctor: empty)
+    g::std_string_assign(file, name);
+    guest::store32(file + 0xC, bytes);
+    guest::store32(file + 0x10, size);
+    guest::store32(file + 0x14, bytes);
+    g::fn_8010CD5C(file + 0x14);
+    GFRAME(0x10);
+    GS(u32, 0x8) = file;
+    g::fn_8006C048(actors + 0x14 + 0xC, (u32)&GS(u32, 0x8));
+    return file;
+}
+
 }  // namespace engine::ui::g3d
