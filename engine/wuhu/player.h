@@ -11,6 +11,7 @@
 
 #include "engine/collision/kcl.h"
 
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -105,6 +106,12 @@ public:
     // gliding down from a sprint off a ledge (a Mii height and more below where it left the ground)
     bool gliding() const { return airborne_ && run_leap_ && last_ground_.y - pos_.y > p_.height; }
     f32 vertical_speed() const { return vy_; }  // island units a second, up
+    // (for the Mii's animation) in the air from a jump; off a ledge at a sprint; ticks since the feet
+    // left the ground; a jump's take-off speed (island units a second)
+    bool jumping() const { return airborne_ && jumping_; }
+    bool leaping() const { return airborne_ && run_leap_; }
+    int air_ticks() const { return airborne_ ? air_ticks_ : 0; }
+    f32 jump_speed() const { return std::sqrt(2.0f * p_.gravity * p_.jump_height); }
     bool swimming() const { return swimming_; }
     void set_obstacles(std::vector<Obstacle> obstacles) { obstacles_ = std::move(obstacles); }
     u16 ground_attribute() const { return ground_attr_; }

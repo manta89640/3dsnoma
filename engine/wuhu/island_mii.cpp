@@ -4,25 +4,51 @@
 // programme screen's caster), without a set: the 3D sound and a ScnRoot as g3d::Stage makes them
 // (engine/ui/g3d.h; g3d_Stage_sInstance stays 0: no code a Mii runs reads it, and the room's code that
 // does isn't running), the Mii shadow's resource and the 3D sound handles' list (two globals every
-// Mii body and BodyController reads), the actor manager over the root with the room's walking, waiting,
-// head and colour animation files only, and the household's first member spawned and given a
+// Mii body and BodyController reads), the actor manager over the root with the animation files the
+// island plays (and the BodyController's Wait and Head, the Mii light's Color_Anim) only, the island's
+// clip archive added to them if it is staged, and the household's first member spawned and given a
 // SpecialAnim behaviour at once (a Mii without one would get the room's AI). The first member is the
 // Mii registered first, the player's own (research port.md §4.2).
 //
-// The walk. A SpecialAnim plays the clip its names give (the BodyController crossfades when they
-// change): Wait from Wait.lex at its own pace, Walk and Run from Move.lex (Female_Walk, Female_Run for
-// a woman, as the room's Move state picks them) with their update rate 0 and their frame set every
-// frame from the distance walked: a clip goes one frame on for every `speed` guest units walked, the
-// speed the room's Move state walks or runs at (room_BodyController_Move_Enter: 1.593 and 4.31 units a
-// frame for a man, 1.687 and 5.343 for a woman), so at that speed it plays at its own pace and at any
-// other the stride keeps to the ground. (That the clips were made for those speeds is an inference:
-// player.h's stride lengths make the same one.) Both walking clips are driven all the time, so that the
-// one being crossfaded from keeps step too. A jump or ledge fall uses Seal.lex's one-frame Jump pose;
-// the imported WSR parachute supplies the animated falling silhouette.
+// The clips. A SpecialAnim plays the clip its names give; the BodyController crossfades when they
+// change, for as long as island.cpp's motion asks (set_clip: a fade's length in sixtieths of a
+// second, written after the actor manager's update as so many of this frame rate's frames: g3d.h
+// body_set_blend_frames). Every clip's update rate is 0 and its frame set natively after that update,
+// for the root's calc that follows to pose (no frame late):
+//   - the gaits (Walk, Male_Walk_Fast, Run, Run_A; a woman's Female_Walk, Female_Run, Female_Run_A)
+//     by the distance gone: a frame for every `foot` units, the planted foot's speed over the ground
+//     at the clip's own pace (measured on the clips: research anim report §1) times the body's
+//     height scale, so the planted foot keeps to the ground whatever the speed. Which gait by the
+//     speed (bands with some hysteresis), and all of them share one phase -- 0 at the left foot's
+//     strike, 0.5 at the right's -- so that a change of gait keeps the step. A run faster than its
+//     clip's pace takes too many steps a second (the room's runs were made for 4.3 and 5.3 units a
+//     frame; the island's are 2.5 times that): over `cadence` steps a second the feet still go by
+//     the distance while they are down, and the time in the air between is stretched to make up the
+//     step (longer bounds, not quicker ones).
+//   - a jump (Send_DSi's Jump, frames 12..47: take-off, rise, apex, fall, landing squat) by its
+//     rise: the take-off speed over the jump's speed picks the frame from the feet leaving the ground
+//     to their reaching it; on landing it plays on from its touchdown by time. A fall off a ledge
+//     (Vote's Male_Land or Female_Land: falling, arms up, then the landing) the same way by time. The
+//     room's clips have their own rise in them (the feet 30 units up at a jump's apex); where they are
+//     played the body is lowered by it (LIFT tables, the lowest ankle's height over its rest by FK of
+//     the clips), the archive's have it taken out.
+//   - Wait, Turn_Simple, the parachute's hang, a long fall's windmill, treading water by time;
+//     after 8 to 15 s of standing a pass of one of Wait_A..D (fidgets).
+//   - the driving poses (the archive's: a pilot's seat, a jet ski's hands on the bars) by the stick:
+//     frame 10 + 10 x its x, eased.
+// Where a clip's archive source isn't there (no archive staged, or an older one), its content source
+// stands in; with neither, Wait does.
+//
+// NOMA_WUHU_FEET=1: the foot's slide measured on the posed body -- the ankles' world matrices after
+// the root's calc: of the updates where the lower ankle is down (within 0.8 units of its rest height
+// over the feet, times the height scale) in this update and the last, how far it moved over the
+// ground against how far the body went -- logged a second at a time with the gait and its speed.
 #include "engine/wuhu/island_mii.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -33,23 +59,30 @@
 namespace engine::wuhu {
 
 namespace g3d = engine::ui::g3d;
+using engine::math::load_f32;
 using engine::math::store_f32;
+using engine::math::Vec3;
+using Clip = IslandMii::Clip;
 
 namespace {
 
 const u32 FACE_RESOLUTION = 0x80;
-// the animation files the actor manager loads (Wait and Head the BodyController's own; Color_Anim the
-// Mii light's)
+// The animation files the actor manager loads: always Move (the gaits, turning), Wait (standing; the
+// BodyController's own, with Head) and Color_Anim (the Mii light's); the content's Vote, Send_DSi and
+// Sit_Sofa only when the island's archive isn't there to stand in for them.
 const char* const ANIM_FILES[] = {
-    "g3d/Mii/Animation/Move.lex",
-    "g3d/Mii/Animation/Wait.lex",
-    "g3d/Mii/Animation/Head.lex",
-    "g3d/Mii/Animation/Color_Anim.lex",
-    "g3d/Mii/Animation/Seal.lex",
+    "g3d/Mii/Animation/Move.lex",       "g3d/Mii/Animation/Wait.lex",     "g3d/Mii/Animation/Head.lex",
+    "g3d/Mii/Animation/Color_Anim.lex", "g3d/Mii/Animation/Vote.lex",     "g3d/Mii/Animation/Send_DSi.lex",
+    "g3d/Mii/Animation/Sit_Sofa.lex",
 };
-const u32 N_ANIM_FILES = sizeof(ANIM_FILES) / sizeof(ANIM_FILES[0]);
+const u32 N_ANIM_FILES = sizeof(ANIM_FILES) / sizeof(ANIM_FILES[0]), N_ANIM_FILES_ALWAYS = 4;
+// the island's clip archive (tools/wuhu/mii_anims.py), and its short name among the animation files
+const char* const ARCHIVE = "/wuhu/mii_anim.brres";
+const char* const ARCHIVE_NAME = "Island";
 // a blink every 3.5 s, for a tenth of a second
 const u32 BLINK_EVERY = 210, BLINK_FRAMES = 6;
+// the ankle's rest height over the sole (Wii no Ma units), and what over it still counts as down
+const f32 ANKLE_REST = 10.0f, ANKLE_DOWN = 0.8f;
 
 // the guest strings, made into one block
 struct Strings {
@@ -61,15 +94,232 @@ struct Strings {
     }
 };
 
+// How a clip's frame goes.
+enum Drive : u8 {
+    BY_TIME,      // a frame a sixtieth of a second, looped
+    ONCE,         // a frame a sixtieth, one pass (then back to IDLE)
+    BY_TURN,      // by time, quicker or slower with the turn
+    BY_DISTANCE,  // a gait: by the distance gone
+    BY_RISE,      // a jump: by its rise, then (landed) by time from its touchdown
+    BY_FALL,      // a fall: by time to just before its touchdown, then (landed) on from it
+    BY_STEER,     // a steering axis: 10 + 10 x the stick
+    HELD,         // one frame
+};
+enum Who : u8 { ANY, MAN, WOMAN };
+
+// The feet's height over the ground in the room's clips that rise (units at height scale 1, a frame
+// from the clip's frame 0; none after the last): the lowest ankle over its rest height, by FK of the
+// clip on the body (it is the same for a man's and a woman's). Send_DSi_Jump's feet leave the ground
+// at 15 and are down again at 39; the landings' are down at 14 (Male_Land) and 10 (Female_Land).
+const f32 JUMP_LIFT[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5.7f, 11.3f, 16.1f, 19.9f, 23.0f,
+                         25.4f, 27.1f, 28.4f, 29.2f, 29.6f, 29.9f, 30.0f, 30.1f, 30.1f, 29.7f, 29.0f, 27.8f,
+                         26.0f, 23.4f, 19.9f, 15.4f, 10.0f, 3.4f, 0.8f, 0};
+const f32 MALE_LAND_LIFT[] = {26.5f, 24.5f, 22.5f, 20.5f, 18.6f, 16.7f, 14.8f, 12.9f, 11.1f, 9.2f, 7.1f, 4.9f, 2.9f,
+                              1.0f, 0};
+const f32 FEMALE_LAND_LIFT[] = {13.5f, 11.9f, 10.4f, 8.9f, 7.5f, 6.0f, 4.5f, 3.3f, 2.1f, 1.1f, 0};
+template <size_t N>
+constexpr u8 count(const f32 (&)[N]) {
+    return (u8)N;
+}
+
+}  // namespace
+
+// A clip's source: one of the archive's or the content's clips, and how it plays.
+struct IslandMii::Source {
+    Clip clip;
+    Who who;
+    bool archive;          // the island's archive's (else the content's)
+    const char* file;      // the animation file's short name
+    const char* anim;
+    u16 first, frames;     // the frames played: the clip's first .. first + frames - 1
+    Drive drive;
+    f32 foot;              // BY_DISTANCE: the planted foot's speed (units a frame at height scale 1)
+    u8 strike, right;      // BY_DISTANCE: the left and right feet's strikes (frames from first)
+    u8 down;               //   and the frames a foot is down for (the stretched run's)
+    f32 cadence;           //   the most steps a second at which the flight isn't stretched (0: never)
+    u8 touchdown;          // BY_RISE, BY_FALL: the frame the feet are down again (from first)
+    const f32* lift;       // the feet's height in the clip's own rise, by the clip's own frame (0: none)
+    u8 lift_n;
+    f32 surface;           // SWIM, TREAD: the water's surface over the feet in the clip (0: none)
+};
+
+namespace {
+
+using S = IslandMii::Source;
+constexpr S timed(Clip c, Who w, bool ar, const char* f, const char* a, u16 n, Drive d = BY_TIME, f32 surface = 0) {
+    return S{c, w, ar, f, a, 0, n, d, 0, 0, 0, 0, 0, 0, nullptr, 0, surface};
+}
+constexpr S held(Clip c, Who w, bool ar, const char* f, const char* a, u16 first, const f32* lift = nullptr,
+                 u8 lift_n = 0) {
+    return S{c, w, ar, f, a, first, 1, HELD, 0, 0, 0, 0, 0, 0, lift, lift_n, 0};
+}
+constexpr S gait(Clip c, Who w, bool ar, const char* f, const char* a, u16 n, f32 foot, u8 strike, u8 right, u8 down,
+                 f32 cadence, f32 surface = 0) {
+    return S{c, w, ar, f, a, 0, n, BY_DISTANCE, foot, strike, right, down, cadence, 0, nullptr, 0, surface};
+}
+constexpr S landing(Clip c, Who w, bool ar, const char* f, const char* a, u16 first, u16 n, Drive d, u8 touchdown,
+                    const f32* lift = nullptr, u8 lift_n = 0) {
+    return S{c, w, ar, f, a, first, n, d, 0, 0, 0, 0, 0, touchdown, lift, lift_n, 0};
+}
+
+// The clips' sources, the archive's before the content's (the first one the body has is played). The
+// gaits' numbers are measured on the clips (research anim report §1: the planted foot's median speed,
+// the feet's strikes and how long they are down); the cadences are a sprinter's.
+const S SOURCES[] = {
+    timed(IslandMii::IDLE, ANY, false, "Wait", "Wait", 120),
+    timed(IslandMii::FIDGET_A, ANY, false, "Wait", "Wait_A", 200, ONCE),
+    timed(IslandMii::FIDGET_B, ANY, false, "Wait", "Wait_B", 340, ONCE),
+    timed(IslandMii::FIDGET_C, ANY, false, "Wait", "Wait_C", 400, ONCE),
+    timed(IslandMii::FIDGET_D, ANY, false, "Wait", "Wait_D", 400, ONCE),
+    timed(IslandMii::TURN, ANY, false, "Move", "Turn_Simple", 36, BY_TURN),
+    gait(IslandMii::WALK, MAN, false, "Move", "Walk", 60, 1.475f, 12, 42, 21, 0),
+    gait(IslandMii::WALK, WOMAN, false, "Move", "Female_Walk", 60, 1.581f, 12, 43, 20, 0),
+    gait(IslandMii::WALK_FAST, MAN, false, "Move", "Male_Walk_Fast", 40, 2.66f, 16, 36, 6, 0),
+    // (a woman's Female_Walk_Fast is a mincing shuffle of half the stride: she walks on into her run)
+    gait(IslandMii::WALK_FAST, WOMAN, false, "Move", "Female_Walk", 60, 1.581f, 12, 43, 20, 0),
+    gait(IslandMii::RUN, MAN, false, "Move", "Run", 40, 4.29f, 17, 37, 5, 4.6f),
+    gait(IslandMii::RUN, WOMAN, false, "Move", "Female_Run", 30, 5.38f, 14, 29, 4, 4.6f),
+    gait(IslandMii::SPRINT, MAN, false, "Move", "Run_A", 40, 4.2f, 17, 37, 5, 5.2f),
+    gait(IslandMii::SPRINT, WOMAN, false, "Move", "Female_Run_A", 30, 5.38f, 14, 29, 4, 5.2f),
+    // the archive's: the jump and the landings without their rise, WSR's poses
+    landing(IslandMii::JUMP, ANY, true, "Island", "Jump", 0, 36, BY_RISE, 26),
+    landing(IslandMii::DROP, MAN, true, "Island", "Land_M", 0, 31, BY_FALL, 14),
+    landing(IslandMii::DROP, WOMAN, true, "Island", "Land_F", 0, 31, BY_FALL, 10),
+    timed(IslandMii::FALL, ANY, true, "Island", "Fall", 20),
+    held(IslandMii::SLIDE, ANY, true, "Island", "Slide", 0),
+    timed(IslandMii::GLIDE, ANY, true, "Island", "Glide", 99),
+    gait(IslandMii::SWIM, ANY, true, "Island", "Swim", 48, 4.0f, 0, 24, 0, 0, 98.0f),
+    timed(IslandMii::TREAD, ANY, true, "Island", "Tread", 60, BY_TIME, 98.0f),
+    timed(IslandMii::DRIVE, ANY, true, "Island", "Drive", 21, BY_STEER),
+    timed(IslandMii::HELM, ANY, true, "Island", "Helm", 21, BY_STEER),
+    // the content's, where there is no archive: the room's jump and landings lowered by their rise;
+    // a fall, the parachute's hang and a slide held on a frame of a landing; swimming as walking,
+    // treading water and the helm as standing, a sofa for the driving seat
+    landing(IslandMii::JUMP, ANY, false, "Send_DSi", "Send_DSi_Jump", 12, 36, BY_RISE, 26, JUMP_LIFT,
+            count(JUMP_LIFT)),
+    landing(IslandMii::DROP, MAN, false, "Vote", "Male_Land", 0, 31, BY_FALL, 14, MALE_LAND_LIFT,
+            count(MALE_LAND_LIFT)),
+    landing(IslandMii::DROP, WOMAN, false, "Vote", "Female_Land", 0, 31, BY_FALL, 10, FEMALE_LAND_LIFT,
+            count(FEMALE_LAND_LIFT)),
+    held(IslandMii::FALL, MAN, false, "Vote", "Male_Land", 4, MALE_LAND_LIFT, count(MALE_LAND_LIFT)),
+    held(IslandMii::FALL, WOMAN, false, "Vote", "Female_Land", 4, FEMALE_LAND_LIFT, count(FEMALE_LAND_LIFT)),
+    held(IslandMii::SLIDE, ANY, false, "Vote", "Male_Land", 17),
+    held(IslandMii::GLIDE, MAN, false, "Vote", "Male_Land", 0, MALE_LAND_LIFT, count(MALE_LAND_LIFT)),
+    held(IslandMii::GLIDE, WOMAN, false, "Vote", "Female_Land", 0, FEMALE_LAND_LIFT, count(FEMALE_LAND_LIFT)),
+    gait(IslandMii::SWIM, MAN, false, "Move", "Walk", 60, 1.475f, 12, 42, 21, 0),
+    gait(IslandMii::SWIM, WOMAN, false, "Move", "Female_Walk", 60, 1.581f, 12, 43, 20, 0),
+    timed(IslandMii::TREAD, ANY, false, "Wait", "Wait", 120),
+    timed(IslandMii::DRIVE, ANY, false, "Sit_Sofa", "Sit_Sofa", 120),
+    timed(IslandMii::HELM, ANY, false, "Wait", "Wait", 120),
+};
+const u32 N_SOURCES = sizeof(SOURCES) / sizeof(SOURCES[0]);
+
+const char* const CLIP_NAMES[] = {"idle", "fidget A", "fidget B", "fidget C", "fidget D", "turn",  "walk",
+                                  "walk fast", "run", "sprint", "jump", "drop", "fall", "slide", "glide", "swim",
+                                  "tread", "drive", "helm"};
+static_assert(sizeof(CLIP_NAMES) / sizeof(CLIP_NAMES[0]) == IslandMii::N_CLIPS, "a name a clip");
+
+// The gaits' speed bands (guest units a sixtieth over the height scale): walk, walk fast, run, then
+// sprint (from its speed or with the sprint button held, running); a change up needs the speed HYST
+// over a band's top, down HYST under it. A woman has no fast walk (the band is her walk's).
+const f32 WALK_TOP = 1.4f, WALK_FAST_TOP = 3.2f, RUN_TOP = 8.0f, WOMAN_WALK_TOP = 1.6f, WOMAN_RUN_TOP = 10.0f;
+const f32 HYST = 0.08f;
+// moving at all: from START, stopped under STOP (the same units); turning on the spot from TURN_RATE
+// degrees a sixtieth, held on for TURN_HOLD sixtieths after the turn stops
+const f32 START = 0.12f, STOP = 0.05f, TURN_RATE = 0.8f, TURN_HOLD = 10.0f;
+// a fall (not a jump) takes the falling clip after DROP_AFTER s falling faster than DROP_RISE (of a
+// jump's take-off speed), the long fall's after FALL_AFTER s (a leap's after LEAP_AFTER)
+const f32 DROP_AFTER = 0.1f, DROP_RISE = -0.25f, FALL_AFTER = 0.6f, LEAP_AFTER = 0.25f;
+// a swimmer strokes from SWIM_START (guest units a sixtieth), treads water under SWIM_STOP
+const f32 SWIM_START = 0.8f, SWIM_STOP = 0.4f;
+// a landing gives way to a gait once the Mii moves, LAND_HOLD sixtieths after its touchdown
+const f32 LAND_HOLD = 5.0f;
+// the steering poses follow the stick with this time constant (s)
+const f32 STEER_EASE = 0.15f;
+
+// Crossfades (sixtieths of a second) from one clip to another.
+f32 fade_between(int from, Clip to) {
+    auto gait = [](int c) { return c >= IslandMii::WALK && c <= IslandMii::SPRINT; };
+    auto idle = [](int c) { return c >= IslandMii::IDLE && c <= IslandMii::FIDGET_D; };
+    if (from < 0 || to == IslandMii::DRIVE || to == IslandMii::HELM || from == IslandMii::DRIVE ||
+        from == IslandMii::HELM)
+        return 1;  // (in or out of a vehicle: the Mii is put there)
+    if (to == IslandMii::JUMP)
+        return 2;
+    if (gait(from) && gait(to))
+        return 6;
+    if (idle(from) && idle(to))
+        return 15;
+    if (to == IslandMii::TURN || from == IslandMii::TURN)
+        return 6;
+    if (from == IslandMii::JUMP || from == IslandMii::DROP)
+        return idle(to) ? 10 : 6;
+    if (from == IslandMii::FALL && to == IslandMii::DROP)
+        return 4;
+    if (to == IslandMii::DROP)
+        return 8;
+    if (to == IslandMii::FALL)
+        return from == IslandMii::DROP ? 12 : 10;
+    if (to == IslandMii::GLIDE)
+        return 18;
+    if (to == IslandMii::SLIDE)
+        return 6;
+    if (to == IslandMii::SWIM || to == IslandMii::TREAD)
+        return from == IslandMii::SWIM || from == IslandMii::TREAD ? 15 : 12;
+    return 8;
+}
+
+f32 lift_at(const S& s, f32 frame) {
+    if (!s.lift)
+        return 0;
+    const f32 f = (f32)s.first + frame;
+    const int i = (int)f;
+    if (i < 0 || i + 1 >= (int)s.lift_n)
+        return i >= 0 && i < (int)s.lift_n ? s.lift[i] : 0;
+    const f32 t = f - (f32)i;
+    return s.lift[i] * (1 - t) + s.lift[i + 1] * t;
+}
+
+f32 wrap(f32 f, f32 n) {
+    f = std::fmod(f, n);
+    return f < 0 ? f + n : f;
+}
+
+// A gait's frame `f` on by `ticks` sixtieths at `rate_down` frames a sixtieth while a foot is down
+// (the distance's) and `rate_up` while neither is
+f32 stretched(const S& s, f32 f, f32 ticks, f32 rate_down, f32 rate_up) {
+    const f32 n = (f32)s.frames, down = (f32)s.down;
+    for (int guard = 0; ticks > 1e-6f && guard < 16; guard++) {
+        const f32 from_l = wrap(f - s.strike, n), from_r = wrap(f - s.right, n);
+        f32 rate, edge;
+        if (from_l < down)
+            rate = rate_down, edge = down - from_l;
+        else if (from_r < down)
+            rate = rate_down, edge = down - from_r;
+        else
+            rate = rate_up, edge = std::min(n - from_l, n - from_r);
+        if (!(rate > 0))
+            break;
+        const f32 t = edge / rate;
+        if (t >= ticks) {
+            f += rate * ticks;
+            break;
+        }
+        f += edge + 1e-4f;
+        ticks -= t;
+    }
+    return wrap(f, n);
+}
+
 }  // namespace
 
 IslandMii::IslandMii() {}
 
 IslandMii::~IslandMii() {
     // the reverse of make_step's order (nothing was made if the block couldn't be had: step_ is
-    // then STEPS, the addresses 0)
+    // then STEPS, the addresses 0); the archive's AnimFile goes with the actor manager's resources
     if (block_) {
-        if (step_ >= 5)
+        if (step_ >= 6)
             g3d::sound_handles_dtor(handles_);
         if (step_ >= 4)
             g3d::actors_dtor(actors_);
@@ -98,6 +348,27 @@ bool IslandMii::make_step() {
     case 0: {
         std::string heap;
         heap_before_ = g3d::heap_free(&heap);
+        feet_log_ = std::getenv("NOMA_WUHU_FEET") && std::atoi(std::getenv("NOMA_WUHU_FEET"));
+        // the island's archive, if it is staged (an uncompressed BRRES: "bres", big-endian, its size)
+        const std::string path = guest::data_dir() + ARCHIVE;
+        if (FILE* f = std::fopen(path.c_str(), "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            const long n = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (n > 0x40 && n < (1 << 22)) {
+                archive_.resize((size_t)n);
+                if (std::fread(archive_.data(), 1, (size_t)n, f) != (size_t)n)
+                    archive_.clear();
+            }
+            std::fclose(f);
+            const u8* b = archive_.data();
+            if (!archive_.empty() &&
+                (std::memcmp(b, "bres", 4) != 0 || b[4] != 0xFE || b[5] != 0xFF ||
+                 (u32)(b[8] << 24 | b[9] << 16 | b[10] << 8 | b[11]) != (u32)n)) {
+                guest::log("wuhu: Mii: %s isn't a BRRES as the stager writes them: the content's clips", path.c_str());
+                archive_.clear();
+            }
+        }
         // the household's first member's RFLCreateID (model::Family reads the channel's save:
         // model_Family_ctor, model_Family_GetCount, model_Family_GetPerson (0x48 bytes, +0 the ID),
         // model_Family_dtor; it lives on the guest stack only for this)
@@ -114,14 +385,25 @@ bool IslandMii::make_step() {
             }
             g::model_Family_dtor(family, (u32)-1);
         }
-        // the strings: the files, the clips' names (a woman's or a man's: both, as the sex is known
-        // only once the Mii is made)
+        // the strings: the files, the clips' names (a woman's and a man's: the sex is known only
+        // once the Mii is made), the archive's short name, the ankles' (NOMA_WUHU_FEET)
+        const u32 n_files = archive_.empty() ? N_ANIM_FILES : N_ANIM_FILES_ALWAYS;
         Strings s;
         std::vector<u32> paths;
-        for (const char* p : ANIM_FILES)
-            paths.push_back(s.add(p));
-        u32 wait = s.add("Wait"), move = s.add("Move"), seal = s.add("Seal"), jump = s.add("Jump");
-        u32 walk = s.add("Walk"), run = s.add("Run"), f_walk = s.add("Female_Walk"), f_run = s.add("Female_Run");
+        for (u32 i = 0; i < n_files; i++)
+            paths.push_back(s.add(ANIM_FILES[i]));
+        std::vector<u32> names;
+        size_t longest_file = 0, longest_anim = 0;
+        u32 o_longest_file = 0, o_longest_anim = 0;
+        for (const S& src : SOURCES) {
+            names.push_back(s.add(src.file));
+            names.push_back(s.add(src.anim));
+            if (std::strlen(src.file) > longest_file)
+                longest_file = std::strlen(src.file), o_longest_file = names[names.size() - 2];
+            if (std::strlen(src.anim) > longest_anim)
+                longest_anim = std::strlen(src.anim), o_longest_anim = names.back();
+        }
+        const u32 o_archive = s.add(ARCHIVE_NAME), o_ankle_l = s.add("Ankle_L"), o_ankle_r = s.add("Ankle_R");
         // the block's layout
         u32 size = 0;
         auto take = [&](u32 n) {
@@ -131,7 +413,7 @@ bool IslandMii::make_step() {
         };
         u32 o_sound = take(g3d::SOUND3D_SIZE), o_shadow = take(g3d::SHADOW_RES_SIZE);
         u32 o_handles = take(g3d::SOUND_HANDLES_SIZE), o_actors = take(g3d::ACTORS_SIZE), o_root = take(4);
-        u32 o_list = take(8 + 4 * N_ANIM_FILES), o_expr = take(4), o_id = take(8);
+        u32 o_list = take(8 + 4 * n_files), o_expr = take(4), o_id = take(8);
         u32 o_strings = take((u32)s.bytes.size());
         block_ = g::operator_new(size);
         if (!block_) {
@@ -146,17 +428,16 @@ bool IslandMii::make_step() {
         guest::write_g(strings_, s.bytes.data(), (u32)s.bytes.size());
         guest::write_g(create_id_, id, 8);
         guest::store32(anim_list_, anim_list_ + 8);
-        guest::store32(anim_list_ + 4, N_ANIM_FILES);
-        for (u32 i = 0; i < N_ANIM_FILES; i++)
+        guest::store32(anim_list_ + 4, n_files);
+        for (u32 i = 0; i < n_files; i++)
             guest::store32(anim_list_ + 8 + 4 * i, strings_ + paths[i]);
         guest::store32(expression_, g3d::FACE_NORMAL);
-        // the clips' names, a man's for now (the walking ones are a woman's once she is known)
-        clip_file_[WAIT] = strings_ + wait, clip_anim_[WAIT] = strings_ + wait;
-        clip_file_[WALK] = clip_file_[RUN] = strings_ + move;
-        clip_anim_[WALK] = strings_ + walk, clip_anim_[RUN] = strings_ + run;
-        clip_file_[JUMP] = strings_ + seal, clip_anim_[JUMP] = strings_ + jump;
-        longest_file_ = strings_ + move, longest_anim_ = strings_ + f_walk;
-        female_walk_ = strings_ + f_walk, female_run_ = strings_ + f_run;
+        for (u32 o : names)
+            name_at_.push_back(strings_ + o);
+        name_at_.push_back(strings_ + o_archive);
+        name_at_.push_back(strings_ + o_ankle_l);
+        name_at_.push_back(strings_ + o_ankle_r);
+        longest_file_ = strings_ + o_longest_file, longest_anim_ = strings_ + o_longest_anim;
         // the 3D sound first, as g3d::Stage's ctor makes it before its root
         g3d::sound3d_ctor(sound3d_);
         break;
@@ -171,8 +452,11 @@ bool IslandMii::make_step() {
         break;
     }
     case 2: g3d::shadow_res_ctor(shadow_res_); break;
-    case 3: g3d::actors_ctor(actors_, guest::load32(root_word_), 1, FACE_RESOLUTION, anim_list_); break;
-    case 4: {
+    case 3:
+        g3d::actors_ctor(actors_, guest::load32(root_word_), 1, FACE_RESOLUTION, anim_list_);
+        break;
+    case 4: add_archive(); break;
+    case 5: {
         g3d::sound_handles_ctor(handles_);
         actor_ = have_id_ ? g3d::spawn_mii(create_id_) : 0;
         if (!actor_) {
@@ -181,8 +465,6 @@ bool IslandMii::make_step() {
             break;
         }
         female_ = g3d::actor_female(actor_);
-        if (female_)
-            clip_anim_[WALK] = female_walk_, clip_anim_[RUN] = female_run_;
         behavior_ = g3d::give_special_anim(actor_);
         {
             // the names' std::strings in the actor's own heap, first as long as the longest names (an
@@ -192,16 +474,9 @@ bool IslandMii::make_step() {
             g3d::assign_string(g3d::behavior_anim(behavior_), longest_anim_);
         }
         g3d::behavior_set_expression(behavior_, expression_);
-        // the clips: their animation objects (made with the body), loops and own speeds
-        const Gait gt = gait();
-        const f32 loops[N_CLIPS] = {120, 60, female_ ? 30.0f : 40.0f, 1};
-        const f32 speeds[N_CLIPS] = {0, gt.walk, gt.run, 0};
-        for (int c = 0; c < N_CLIPS; c++) {
-            anim_[c] = g3d::body_anim(g3d::actor_body(actor_), clip_file_[c], clip_anim_[c]);
-            frames_[c] = loops[c], speed_[c] = speeds[c];
-        }
         height_scale_ = g3d::body_height_scale(g3d::actor_body(actor_));
-        set_clip(WAIT);
+        resolve_clips();
+        set_clip(IDLE, 1);
         // what it costs: the block, the Mii model and the animation files (the actor manager's
         // resources, +0x14: +0x4 Model.lex's size, +0xC the AnimFile* vector, count at +0x10; an
         // AnimFile's +0x10 its file's size), the shadow's file, the actor's slot
@@ -210,15 +485,20 @@ bool IslandMii::make_step() {
             files += guest::load32(guest::load32(guest::load32(res + 0xC) + 4 * i) + 0x10);
         std::string heap;
         u32 free_now = g3d::heap_free(&heap);
-        guest::log("wuhu: Mii: %s, height scale %.2f; memory: Mii model %u, %u animation files %u, Mii shadow "
-                   "%u, actor slot %u; heap %s: %u bytes taken, %u free",
+        guest::log("wuhu: Mii: %s, height scale %.2f; memory: Mii model %u, %u animation files %u (the island's "
+                   "archive %u), Mii shadow %u, actor slot %u; heap %s: %u bytes taken, %u free",
                    female_ ? "female" : "male", height_scale_, (unsigned)guest::load32(res + 4), (unsigned)n_files,
-                   (unsigned)files, (unsigned)guest::load32(shadow_res_ + 4), (unsigned)g3d::actor_slot_size(actors_),
-                   heap.c_str(), (unsigned)(heap_before_ - free_now), (unsigned)free_now);
-        for (int c = 0; c < N_CLIPS; c++)
-            if (!anim_[c])
-                guest::log("wuhu: Mii: no animation %s/%s", guest::read_string(clip_file_[c]).c_str(),
-                           guest::read_string(clip_anim_[c]).c_str());
+                   (unsigned)files, archive_file_ ? (unsigned)archive_.size() : 0u,
+                   (unsigned)guest::load32(shadow_res_ + 4), (unsigned)g3d::actor_slot_size(actors_), heap.c_str(),
+                   (unsigned)(heap_before_ - free_now), (unsigned)free_now);
+        if (feet_log_) {
+            const u32 n = (u32)name_at_.size(), model = g3d::body_model(g3d::actor_body(actor_));
+            for (int k = 0; k < 2; k++) {
+                const u32 node = g3d::model_node(model, name_at_[n - 2 + k]);
+                ankle_[k] = node ? guest::load32(node + 0xC) : 0;
+            }
+            feet_log_ = ankle_[0] && ankle_[1];
+        }
         break;
     }
     }
@@ -226,14 +506,249 @@ bool IslandMii::make_step() {
     return step_ < STEPS;
 }
 
-// the clip the behaviour plays (the BodyController crossfades to it)
-void IslandMii::set_clip(Clip c) {
+// The island's archive into the actor manager's animation files (before the Mii is spawned: its body
+// makes the animation objects of the files there are then), as the one named "Island".
+void IslandMii::add_archive() {
+    if (archive_.empty())
+        return;
+    // (the files the body reads are mii_ModelRes_sInstance's: the manager's own)
+    if (guest::load32(GA_mii_ModelRes_sInstance) != actors_ + 0x14) {
+        guest::log("wuhu: Mii: the Mii resources aren't the island's actor manager's: no archive");
+        return;
+    }
+    archive_file_ = g3d::anim_file_add(actors_, name_at_[name_at_.size() - 3], archive_.data(), (u32)archive_.size());
+    if (!archive_file_)
+        guest::log("wuhu: Mii: no room for the island's archive (%u bytes): the content's clips",
+                   (unsigned)archive_.size());
+}
+
+// Each clip's source: the first of its sources (the archive's first) the body has, for the Mii's
+// sex; else IDLE's.
+void IslandMii::resolve_clips() {
+    const u32 body = g3d::actor_body(actor_);
+    u32 from_archive = 0, from_content = 0;
+    std::string missing;
+    for (int c = 0; c < N_CLIPS; c++) {
+        for (u32 i = 0; i < N_SOURCES && !anim_[c]; i++) {
+            const S& s = SOURCES[i];
+            if (s.clip != c || (s.who == MAN && female_) || (s.who == WOMAN && !female_) ||
+                (s.archive && !archive_file_))
+                continue;
+            const u32 file = name_at_[2 * i], anim = name_at_[2 * i + 1];
+            if (const u32 obj = g3d::body_anim(body, file, anim)) {
+                anim_[c] = obj, source_[c] = &s, clip_file_[c] = file, clip_anim_[c] = anim;
+                (s.archive ? from_archive : from_content)++;
+            }
+        }
+        if (!anim_[c] && c != IDLE) {
+            missing += missing.empty() ? "" : ", ";
+            missing += CLIP_NAMES[c];
+        }
+    }
+    for (int c = 0; c < N_CLIPS; c++)
+        if (!anim_[c] && anim_[IDLE])
+            anim_[c] = anim_[IDLE], source_[c] = source_[IDLE], clip_file_[c] = clip_file_[IDLE],
+            clip_anim_[c] = clip_anim_[IDLE];
+    guest::log("wuhu: Mii: clips: %u from the island's archive, %u from the content%s%s", (unsigned)from_archive,
+               (unsigned)from_content, missing.empty() ? "" : "; standing for ", missing.c_str());
+}
+
+// The clip the behaviour plays, crossfaded to over `fade` sixtieths of a second (written after the
+// actor manager's update: update()). From its first frame; the same names as the clip playing (a
+// content clip standing for two) change nothing in the body.
+void IslandMii::set_clip(Clip c, f32 fade) {
     if ((int)c == clip_)
         return;
+    const bool same = clip_ >= 0 && clip_file_[c] == clip_file_[clip_] && clip_anim_[c] == clip_anim_[clip_];
     clip_ = c;
+    frame_ = 0, played_ = 0;
+    landed_ = false;
+    if (same || !clip_file_[c])
+        return;
+    fade_ = fade;
     g3d::ScopedHeap heap(g3d::actor_heap(actor_));
     g3d::assign_string(g3d::behavior_file(behavior_), clip_file_[c]);
     g3d::assign_string(g3d::behavior_anim(behavior_), clip_anim_[c]);
+}
+
+// the gait for a speed (guest units a sixtieth), with the band the playing gait is in kept a little
+// past its edges
+IslandMii::Clip IslandMii::gait_for(f32 speed, bool sprint) const {
+    const f32 v = speed / std::max(height_scale_, 0.1f);
+    const int now = clip_ >= WALK && clip_ <= SPRINT ? clip_ : WALK;
+    const f32 tops[3] = {female_ ? WOMAN_WALK_TOP : WALK_TOP, female_ ? WOMAN_WALK_TOP : WALK_FAST_TOP,
+                         female_ ? WOMAN_RUN_TOP : RUN_TOP};
+    int g = WALK;
+    for (int i = 0; i < 3; i++) {
+        // (the edge between band i and i + 1: crossed upward HYST over it, downward HYST under it)
+        const f32 edge = tops[i] * (now > WALK + i ? 1.0f - HYST : 1.0f + HYST);
+        if (v > edge)
+            g = WALK + i + 1;
+    }
+    if (female_ && g == WALK_FAST)
+        g = WALK;
+    if (sprint && g == RUN)
+        g = SPRINT;
+    return (Clip)g;
+}
+
+// A gait's frame on by `walked` guest units in `frames` sixtieths, from the common phase; the phase
+// from the new frame.
+void IslandMii::move_gait(Clip c, f32 walked, u32 frames) {
+    const S& s = *source_[c];
+    if (s.drive != BY_DISTANCE || !(s.foot > 0))
+        return;
+    const f32 n = (f32)s.frames, hs = std::max(height_scale_, 0.1f);
+    f32 f = wrap(phase_ * n + s.strike, n);
+    if (walked > 0) {
+        const f32 rate_down = walked / (f32)frames / (s.foot * hs);  // frames a sixtieth, foot down
+        // the cycle's time at that rate, and the shortest the cadence allows (two steps a cycle)
+        const f32 cycle = n / rate_down, shortest = s.cadence > 0 ? 120.0f / s.cadence : 0;
+        if (cycle >= shortest || s.down == 0) {
+            f = wrap(f + rate_down * (f32)frames, n);
+        } else {
+            // the feet down at the distance's rate; the time in the air what is left of the shortest
+            // cycle (it is more than nothing: the feet are down less than the whole cycle)
+            const f32 down = 2.0f * s.down, air = n - down;
+            const f32 rate_up = air / std::max(shortest - down / rate_down, 1.0f);
+            f = stretched(s, f, (f32)frames, rate_down, rate_up);
+        }
+    }
+    frame_ = f;
+    phase_ = wrap(f - s.strike, n) / n;
+}
+
+// The clip for what the Mii is doing, and its frame on by this update.
+void IslandMii::choose(const MiiMotion& m) {
+    const f32 ticks = (f32)m.frames;
+    const f32 speed = m.walked / ticks, hs = std::max(height_scale_, 0.1f);
+    const bool moving = speed > (clip_ >= WALK && clip_ <= SPRINT ? STOP : START) * hs;
+    const bool air_clip = clip_ == JUMP || clip_ == DROP || clip_ == FALL || clip_ == GLIDE || clip_ == SLIDE;
+    // the clip
+    Clip want = (Clip)std::max(clip_, 0);
+    switch (m.kind) {
+    case MiiMotion::CAR: want = DRIVE; break;
+    case MiiMotion::BOAT: want = HELM; break;
+    case MiiMotion::SWIM:
+        want = speed > (clip_ == SWIM ? SWIM_STOP : SWIM_START) ? SWIM : TREAD;
+        break;
+    case MiiMotion::GLIDE: want = GLIDE; break;
+    case MiiMotion::SLIDE:
+        if (m.air_time > DROP_AFTER || air_clip)
+            want = SLIDE;
+        break;
+    case MiiMotion::AIR:
+        if (m.jump) {
+            // (a jump from a landing begins again: the same clip, from its take-off)
+            if (clip_ == JUMP && landed_)
+                frame_ = 0, played_ = 0, landed_ = false;
+            want = JUMP;
+        } else if (m.leap) {
+            if (m.air_time > LEAP_AFTER)
+                want = FALL;
+        } else if (clip_ == DROP && m.air_time > FALL_AFTER) {
+            want = FALL;
+        } else if (clip_ != FALL && m.air_time > DROP_AFTER && m.rise < DROP_RISE) {
+            want = DROP;
+        }
+        break;
+    case MiiMotion::GROUND: {
+        if (clip_ == FALL || clip_ == GLIDE || clip_ == SLIDE) {
+            // down from a long fall, the parachute or a slide: the drop's landing
+            set_clip(DROP, fade_between(clip_, DROP));
+            landed_ = true;
+            frame_ = source_[DROP]->touchdown;
+            want = DROP;
+        } else if ((clip_ == JUMP || clip_ == DROP) && !landed_) {
+            landed_ = true, played_ = 0;
+            frame_ = std::max(frame_, (f32)source_[clip_]->touchdown);
+            want = (Clip)clip_;
+        }
+        if ((clip_ == JUMP || clip_ == DROP) && landed_) {
+            // the landing plays on, until its end or (moving) a moment after its touchdown
+            const bool done = frame_ + ticks >= (f32)source_[clip_]->frames - 1;
+            if ((moving && played_ >= LAND_HOLD) || done)
+                want = moving ? gait_for(speed, m.sprint) : IDLE;
+            else
+                want = (Clip)clip_;
+        } else if (moving) {
+            want = gait_for(speed, m.sprint);
+            turning_ = TURN_HOLD + 1;
+        } else {
+            turning_ = std::fabs(m.turned) > TURN_RATE * ticks ? 0 : turning_ + ticks;
+            if (turning_ <= TURN_HOLD)
+                want = TURN;
+            else if (clip_ < FIDGET_A || clip_ > FIDGET_D)
+                want = IDLE;
+        }
+        break;
+    }
+    }
+    if (clip_ < 0)
+        want = IDLE;
+    // (a gait's frame goes on from the common phase)
+    const bool gait_change = want != clip_ && want >= WALK && want <= SPRINT;
+    set_clip(want, fade_between(clip_, want));
+    if (gait_change)
+        move_gait(want, 0, m.frames);
+
+    // its frame
+    const S& s = *source_[clip_];
+    const f32 n = (f32)s.frames;
+    switch (s.drive) {
+    case BY_TIME: frame_ = wrap(frame_ + ticks, n); break;
+    case ONCE:
+        frame_ += ticks;
+        if (frame_ >= n - 1) {
+            set_clip(IDLE, fade_between(clip_, IDLE));
+            idle_ = 0;
+        }
+        break;
+    case BY_TURN: {
+        const f32 rate = std::min(std::max(std::fabs(m.turned) / ticks / 3.5f, 0.7f), 1.3f);
+        frame_ = wrap(frame_ + rate * ticks, n);
+        break;
+    }
+    case BY_DISTANCE: move_gait((Clip)clip_, m.walked, m.frames); break;
+    case BY_RISE:
+        if (!landed_) {
+            // the feet leave the ground at 3 and are down again at the touchdown: between, the rise
+            // (1 at take-off, 0 at the apex, -1 as fast down as it went up); its first frames (the
+            // push off the ground) a frame a sixtieth while the body goes up
+            const f32 t = std::min(std::max((1.0f - m.rise) * 0.5f, 0.0f), 1.0f);
+            const f32 air = 3.0f + ((f32)s.touchdown - 5.0f) * t;
+            frame_ = std::max(frame_, std::min(air, played_));
+        } else {
+            frame_ = std::min(frame_ + ticks, n - 1);
+        }
+        break;
+    case BY_FALL:
+        if (!landed_)
+            frame_ = std::min((f32)s.touchdown - 2.0f, played_ * 0.6f);
+        else
+            frame_ = std::min(frame_ + ticks, n - 1);
+        break;
+    case BY_STEER: {
+        const f32 k = 1.0f - std::exp(-ticks / 60.0f / STEER_EASE);
+        steer_ += (std::min(std::max(m.steer, -1.0f), 1.0f) - steer_) * k;
+        frame_ = std::min(std::max(10.0f + 10.0f * steer_, 0.0f), n - 1);
+        break;
+    }
+    case HELD: frame_ = 0; break;
+    }
+    played_ += ticks;
+    // standing: now and then a fidget
+    if (clip_ == IDLE) {
+        idle_ += ticks;
+        const f32 wait = 480.0f + (f32)((fidgets_ * 271u) % 420u);
+        const Clip fidget = (Clip)(FIDGET_A + fidgets_ % 4);
+        if (idle_ > wait && source_[fidget] != source_[IDLE]) {
+            fidgets_++;
+            set_clip(fidget, fade_between(IDLE, fidget));
+        }
+    } else if (clip_ < FIDGET_A || clip_ > FIDGET_D) {
+        idle_ = 0;
+    }
 }
 
 // camera 1, the root's current one: a look-at and a perspective (no off-axis frustum here)
@@ -252,44 +767,95 @@ void IslandMii::write_camera(const engine::g3d::Camera& c) {
     g3d::camera_set_perspective(cam, c.fovy_deg, c.aspect, c.near_, c.far_);
 }
 
-void IslandMii::update(const engine::g3d::Camera& camera, engine::math::Vec3 at, f32 yaw, PlayerState state,
-                       f32 walked, f32 run_pace_multiplier) {
+void IslandMii::update(const engine::g3d::Camera& camera, Vec3 at, f32 yaw, const MiiMotion& m) {
     if (step_ < STEPS || !block_)
         return;
     const u32 root = guest::load32(root_word_);
-    if (actor_) {
-        frame_count_++;
-        switch (state) {
-        case PlayerState::WAIT: set_clip(WAIT); break;
-        case PlayerState::WALK: set_clip(WALK); break;
-        case PlayerState::RUN: set_clip(RUN); break;
-        case PlayerState::FALL: set_clip(JUMP); break;
-        case PlayerState::JUMP: set_clip(JUMP); break;
-        case PlayerState::SWIM: set_clip(RUN); break;
-        }
-        for (int c = WALK; c <= RUN; c++)
-            if (speed_[c] > 0) {
-                const f32 pace = c == RUN ? std::max(1.0f, run_pace_multiplier) : 1.0f;
-                frame_[c] = std::fmod(frame_[c] + walked / (speed_[c] * pace), frames_[c]);
-            }
-        guest::store32(expression_,
-                       frame_count_ % BLINK_EVERY < BLINK_FRAMES ? g3d::FACE_BLINK : g3d::FACE_NORMAL);
-        // the behaviour and the BodyController first; then the body where the player is and the
-        // walking clips at their frames, for the root's calc that follows to pose (no frame late)
+    if (actor_ && source_[IDLE]) {
+        ticks_ += m.frames;
+        choose(m);
+        guest::store32(expression_, ticks_ % BLINK_EVERY < BLINK_FRAMES ? g3d::FACE_BLINK : g3d::FACE_NORMAL);
+        // the behaviour and the BodyController first (a changed clip attached, its fade begun); then
+        // the fade's length, the body where the feet are (less the clip's own rise; a swimmer's by
+        // the water's surface) and the clip at its frame, for the root's calc that follows to pose
         g3d::actors_update(actors_);
-        g3d::actor_place(actor_, at.x, at.y, at.z, yaw);
-        for (int c = WALK; c <= RUN; c++)
-            if (anim_[c]) {
-                g3d::anim_set_rate(anim_[c], 0);  // (the BodyController's PlayAnim never sets it back)
-                g3d::anim_set_frame(anim_[c], frame_[c]);
-            }
+        const u32 body = g3d::actor_body(actor_);
+        if (fade_ >= 0) {
+            g3d::body_set_blend_frames(body, (u32)std::max(1.0f, std::round(fade_ / (f32)m.frames)));
+            fade_ = -1;
+        }
+        const S& s = *source_[clip_];
+        f32 y = at.y - lift_at(s, frame_) * height_scale_;
+        if (s.surface > 0 && m.kind == MiiMotion::SWIM)
+            y = at.y + m.depth - s.surface * height_scale_;
+        g3d::actor_place(actor_, at.x, y, at.z, yaw);
+        g3d::anim_set_rate(anim_[clip_], 0);  // (the BodyController's PlayAnim never sets it back)
+        g3d::anim_set_frame(anim_[clip_], (f32)s.first + frame_);
     }
     write_camera(camera);
     g3d::invalidate_gx_state();
     g3d::root_calc(root);
+    if (actor_ && source_[IDLE] && feet_log_)
+        measure_feet(Vec3{at.x, at.y, at.z}, m.kind == MiiMotion::GROUND ? m.walked : 0);
     GFRAME(0x10);
     GS(u32, 0x8) = g3d::camera(root, 1);
     g3d::sound3d_listen(sound3d_, (u32)&GS(u32, 0x8));
+}
+
+// NOMA_WUHU_FEET: the lower ankle's move over the ground while it is down (in this update and the
+// last), against the body's
+void IslandMii::measure_feet(Vec3 at, f32 walked) {
+    const u32 body = g3d::actor_body(actor_);
+    Vec3 p[2];
+    {
+        GFRAME(0x40);
+        const u32 mtx = (u32)&GS(u32, 0x8);
+        for (int k = 0; k < 2; k++) {
+            if (!g3d::body_node_world(body, ankle_[k], mtx))
+                return;
+            p[k] = Vec3{load_f32(mtx + 0xC), load_f32(mtx + 0x1C), load_f32(mtx + 0x2C)};
+        }
+    }
+    if (std::getenv("NOMA_WUHU_FEET_TRACE")) {
+        GFRAME(0x40);
+        const u32 mtx = (u32)&GS(u32, 0x8);
+        std::string nodes;
+        for (u32 k = 0; k < 21; k++) {
+            g3d::body_node_world(body, k, mtx);
+            char b[48];
+            std::snprintf(b, sizeof(b), " %u:(%.1f %.1f %.1f)", (unsigned)k, load_f32(mtx + 0xC) - at.x,
+                          load_f32(mtx + 0x1C) - at.y, load_f32(mtx + 0x2C) - at.z);
+            nodes += b;
+        }
+        guest::log("wuhu: feet trace: %s frame %.1f:%s", CLIP_NAMES[clip_], frame_, nodes.c_str());
+    }
+    const int low = p[0].y <= p[1].y ? 0 : 1;
+    const bool down = p[low].y - at.y < (ANKLE_REST + ANKLE_DOWN) * height_scale_;
+    if (feet_had_ && down && walked > 0) {
+        const f32 dx = p[low].x - ankle_was_[low].x, dz = p[low].z - ankle_was_[low].z;
+        feet_slid_ += std::sqrt(dx * dx + dz * dz);
+        feet_walked_ += walked;
+        feet_samples_++;
+        // (in the body: the ankle's move against the feet's, over the clip's frames gone)
+        const f32 bx = dx - (at.x - at_was_.x), bz = dz - (at.z - at_was_.z);
+        const f32 gone = wrap(frame_ - frame_was_, (f32)source_[clip_]->frames);
+        if (gone > 0 && gone < 0.5f * source_[clip_]->frames)
+            feet_body_ += std::sqrt(bx * bx + bz * bz), feet_frames_ += gone;
+    }
+    feet_had_ = down;
+    ankle_was_[0] = p[0], ankle_was_[1] = p[1];
+    at_was_ = at, frame_was_ = frame_;
+    feet_top_ = std::max(feet_top_, walked);
+    if (++feet_updates_ >= 60) {
+        guest::log("wuhu: feet: %s, up to %.2f units an update: the planted foot slid %.1f while the body went "
+                   "%.1f (%.0f%%; %u updates with a foot down); in the body it went %.2f a clip frame (%.2f "
+                   "expected)",
+                   CLIP_NAMES[clip_], feet_top_, feet_slid_, feet_walked_,
+                   feet_walked_ > 0 ? 100.0f * feet_slid_ / feet_walked_ : 0.0f, (unsigned)feet_samples_,
+                   feet_frames_ > 0 ? feet_body_ / feet_frames_ : 0.0f, source_[clip_]->foot * height_scale_);
+        feet_slid_ = feet_walked_ = feet_top_ = feet_body_ = feet_frames_ = 0;
+        feet_samples_ = feet_updates_ = 0;
+    }
 }
 
 void IslandMii::view() {

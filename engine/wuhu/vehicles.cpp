@@ -31,6 +31,18 @@ constexpr f32 STEER_EASE = 0.08f;    // seconds: how fast they follow the stick
 // update and they would seem to turn backwards; past this the wheel blurs on regardless)
 constexpr f32 ROLL_STEP_MAX = 35.0f;
 const char* const WHEELS[4] = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"};
+// Where the driver's feet are, in model units (+z the bow or the bonnet, +x the left), by each
+// model's geometry (its upward faces' heights): WS2_common_car's floor under the right-hand seat
+// (its cabin's roof is at 28, the body closed, its glass opaque: a driver isn't seen); the top of
+// WS2_common_cruiser's cabin (30 over z -25..5, the radar arch behind it at z -30) before the arch,
+// where a flybridge's helm is; WS2_common_yacht's cockpit well (5, its deck 8 to 13 round it) aft of
+// the mast (z 10).
+struct Seat {
+    u16 cls;
+    f32 x, y, z;
+};
+const Seat SEATS[] = {{CLASS_CAR, -5.5f, 7.0f, -3.0f}, {CLASS_CRUISER, 0.0f, 30.0f, -16.0f},
+                      {CLASS_YACHT, 0.0f, 5.0f, -16.0f}};
 
 f32 col_length(const Mtx34& m, int c) {
     return std::sqrt(m.m[0][c] * m.m[0][c] + m.m[1][c] * m.m[1][c] + m.m[2][c] * m.m[2][c]);
@@ -155,6 +167,17 @@ Vec3 Vehicles::position() const {
         return Vec3{0, 0, 0};
     const Mtx34 m = world_.instance_transform(list_[driven_].instance);
     return Vec3{m.m[0][3], m.m[1][3], m.m[2][3]};
+}
+
+Vec3 Vehicles::seat() const {
+    if (driven_ == NONE)
+        return Vec3{0, 0, 0};
+    const u16 cls = world_.instance_class(list_[driven_].instance);
+    Vec3 p{0, 0, 0};
+    for (const Seat& s : SEATS)
+        if (s.cls == cls)
+            p = Vec3{s.x, s.y, s.z};
+    return transform(world_.instance_transform(list_[driven_].instance), p);
 }
 
 f32 Vehicles::speed_fraction() const {

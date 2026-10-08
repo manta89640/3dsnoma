@@ -53,6 +53,9 @@ public:
     void drive(f32 throttle, f32 steer, f32 dt, f32 time);
 
     Vec3 position() const;  // the driven one's origin (its matrix's translation)
+    // where the driven one's driver is (its feet): a car's driving seat, a cruiser's flybridge helm, a
+    // yacht's cockpit (vehicles.cpp SEATS: places on the models, by their geometry) under its matrix
+    Vec3 seat() const;
     f32 yaw() const { return yaw_; }
     f32 speed() const { return speed_; }              // island units a second, along its facing (- back)
     f32 speed_fraction() const;                       // |speed| over its top speed

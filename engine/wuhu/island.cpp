@@ -611,7 +611,7 @@ void Island::update(const Controls& controls, bool frozen) {
         look.zoom = controls.zoom;
         look.behind = controls.behind;
     }
-    const f32 walked = player_->distance();
+    const f32 walked = player_->distance(), yaw_before = player_->yaw();
     const Vec3 before = controlled_position();
     if (vehicles_->driven() == Vehicles::NONE) {
         player_->update(move, dt);
@@ -660,10 +660,31 @@ void Island::update(const Controls& controls, bool frozen) {
         world_->set_shadow_focus(at);
         world_us_ += guest::host_time_us() - t0;
     }
-    mii_->update(engine::g3d::scaled(cam, k_), at * k_, yaw,
-                 vehicles_->driven() == Vehicles::NONE ? player_->state() : PlayerState::WAIT,
-                 (player_->distance() - walked) * k_,
-                 RUN_SPEED_MULTIPLIER * std::max(1.0f, player_->speed() / player_->params().run_speed));
+    // what the Mii is doing, for its clip: on foot the player's state; in a vehicle at its seat
+    MiiMotion motion;
+    motion.frames = frames;
+    Vec3 feet = at;
+    if (vehicles_->driven() != Vehicles::NONE) {
+        motion.kind = vehicles_->boat() ? MiiMotion::BOAT : MiiMotion::CAR;
+        motion.steer = frozen ? 0.0f : controls.move_x;
+        feet = vehicles_->seat();
+    } else {
+        const Player& p = *player_;
+        motion.kind = p.swimming() ? MiiMotion::SWIM
+                      : p.gliding() ? MiiMotion::GLIDE
+                      : p.sliding() ? MiiMotion::SLIDE
+                      : p.airborne() ? MiiMotion::AIR
+                                     : MiiMotion::GROUND;
+        motion.walked = (p.distance() - walked) * k_;
+        motion.turned = wrap_deg(p.yaw() - yaw_before);
+        motion.sprint = move.fast_run;
+        motion.jump = p.jumping();
+        motion.leap = p.leaping();
+        motion.rise = p.vertical_speed() / std::max(p.jump_speed(), 1e-3f);
+        motion.air_time = (f32)p.air_ticks() * TICK;
+        motion.depth = p.water_depth() * k_;
+    }
+    mii_->update(engine::g3d::scaled(cam, k_), feet * k_, yaw, motion);
 }
 
 // The job (on the helper): the World's frame and both passes' packets, as update() and the two
@@ -750,8 +771,7 @@ void Island::draw_opaque() {
         set_clear(clear_);
     mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
     emit(engine::g3d::Pass::OPAQUE);
-    if (vehicles_->driven() == Vehicles::NONE)
-        mii_->draw_opaque();
+    mii_->draw_opaque();
     sand_->draw(camera_->camera(), k_, frame_);
 }
 
@@ -761,8 +781,7 @@ void Island::draw_translucent() {
     // (the projection again: the Mii's opaque pass may have loaded another)
     mii_->view();
     emit(engine::g3d::Pass::TRANSLUCENT);
-    if (vehicles_->driven() == Vehicles::NONE)
-        mii_->draw_translucent();
+    mii_->draw_translucent();
 }
 
 }  // namespace
