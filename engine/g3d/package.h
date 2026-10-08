@@ -10,8 +10,9 @@
 // fogs) and every offset (texel data in TDAT and 128-byte aligned, vertex data in VDAT, KCL files
 // in BLOB), every index buffer entry against its vertex buffer, the formats (texture formats and
 // sizes, GX -> PICA conversions, vertex layouts and strides, compact positions' origin and scale),
-// node trees (a parent comes before its children), LOD chains (no loops), keys (in frame order) and
-// the cells' visibility rows (CVIS: a row a cell, a bit for every cell). The first problem found is
+// node trees (a parent comes before its children), LOD chains (no loops), keys (in frame order),
+// the cells' visibility rows (CVIS: a row a cell, a bit for every cell) and the shadows (CAST: each
+// caster a run of a caster batch's indices; SHDW: one, its light in LITE). The first problem found is
 // the reason given. A version 1 package (from before compact positions, prelit materials and the
 // visibility rows) is refused with that reason: the island is staged again.
 #pragma once
@@ -77,6 +78,10 @@ public:
     Span<fmt::Collision> collisions() const { return array<fmt::Collision>(fmt::SEC_COLL); }
     Span<fmt::Cylinder> cylinders() const { return array<fmt::Cylinder>(fmt::SEC_CYLS); }
     Span<u16> indices() const { return array<u16>(fmt::SEC_IDAT); }
+    // the placed objects that cast into the shadow map (none if the package has no CAST), and the
+    // shadows' setting (nullptr if it has no SHDW: no shadow map)
+    Span<fmt::Caster> casters() const { return array<fmt::Caster>(fmt::SEC_CAST); }
+    const fmt::ShadowEnv* shadow_env() const { return shadow_env_; }
     // the environment (if the package has none: no sky or sea, no animations, k = 1, no grid)
     const fmt::Env& env() const { return *env_; }
     // cell i's visibility row (bit j, LSB first: cell j may be seen from cell i's walkable space, at
@@ -132,10 +137,11 @@ private:
         case fmt::SEC_TRAK: return 15;  case fmt::SEC_KEYS: return 16;  case fmt::SEC_ENVR: return 17;
         case fmt::SEC_LITE: return 18;  case fmt::SEC_LSET: return 19;  case fmt::SEC_FOGS: return 20;
         case fmt::SEC_MARK: return 21;  case fmt::SEC_COLL: return 22;  case fmt::SEC_CYLS: return 23;
-        case fmt::SEC_BLOB: return 24;  case fmt::SEC_CVIS: return 25;  default: return -1;
+        case fmt::SEC_BLOB: return 24;  case fmt::SEC_CVIS: return 25;  case fmt::SEC_CAST: return 26;
+        case fmt::SEC_SHDW: return 27;  default: return -1;
         }
     }
-    static constexpr int N_SLOTS = 26;
+    static constexpr int N_SLOTS = 28;
     const fmt::Section* section(u32 tag) const {
         const int i = tag_slot(tag);
         return i >= 0 ? slot_[i] : find_section(tag);
@@ -155,6 +161,7 @@ private:
     u32 size_ = 0;
     const fmt::Section* slot_[N_SLOTS] = {};  // (tag_slot's sections: nullptr where there's none)
     const fmt::Env* env_ = nullptr;
+    const fmt::ShadowEnv* shadow_env_ = nullptr;
     // textures converted at load: index -> its image (texels in `converted_`)
     struct Converted {
         u32 texture;

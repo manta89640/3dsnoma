@@ -102,6 +102,11 @@ STRUCTS = {
             ("mii_units_per_unit", "f32", ()), ("cell_size", "f32", ()), ("n_cells_x", "u32", ()),
             ("n_cells_z", "u32", ()), ("grid_origin", "f32", (2,)), ("pvs_row_bytes", "u32", ()),
             ("pvs_max_height", "f32", ()), ("detail_distance", "f32", ()), ("reserved", "u32", (5,))],
+    "Caster": [("batch", "u16", ()), ("class_id", "u16", ()), ("first_index", "u32", ()), ("n_indices", "u32", ()),
+               ("bbox", "f32", (6,))],
+    "ShadowEnv": [("light", "u16", ()), ("decal_texture", "u16", ()), ("darkness", "f32", ()),
+                  ("map_extent", "f32", ()), ("map_depth", "f32", ()), ("map_floor", "f32", ()),
+                  ("reserved", "u32", (3,))],
 }
 
 # section tags, in the order this writer lays them out (small tables first, bulk data last)
@@ -113,7 +118,8 @@ SECTIONS = [
     ("SEC_TRAK", "TRAK", "Track"), ("SEC_KEYS", "KEYS", "Key"), ("SEC_ENVR", "ENVR", "Env"),
     ("SEC_LITE", "LITE", "Light"), ("SEC_LSET", "LSET", "LightSet"), ("SEC_FOGS", "FOGS", "Fog"),
     ("SEC_MARK", "MARK", "Marker"), ("SEC_COLL", "COLL", "Collision"), ("SEC_CYLS", "CYLS", "Cylinder"),
-    ("SEC_CVIS", "CVIS", None), ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
+    ("SEC_CVIS", "CVIS", None), ("SEC_CAST", "CAST", "Caster"), ("SEC_SHDW", "SHDW", "ShadowEnv"),
+    ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
     ("SEC_BLOB", "BLOB", None),
 ]
 # the Package attribute holding each array section's records
@@ -121,7 +127,7 @@ SECTION_LISTS = {"TEXS": "textures", "MATS": "materials", "TMTX": "tex_mtx", "VT
                  "BTCH": "batches", "NODE": "nodes", "MODL": "models", "CELL": "cells", "CBAT": "cell_batches",
                  "INST": "instances", "ANIM": "anims", "TRAK": "tracks", "KEYS": "keys", "LITE": "lights",
                  "LSET": "light_sets", "FOGS": "fogs", "MARK": "markers", "COLL": "collisions",
-                 "CYLS": "cylinders", "IDAT": "indices"}
+                 "CYLS": "cylinders", "IDAT": "indices", "CAST": "casters"}
 
 # the struct of each section list's records
 LIST_KIND = {lst: kind for t4, lst in SECTION_LISTS.items() for _, tag4, kind in SECTIONS if tag4 == t4}
@@ -130,12 +136,13 @@ ENUMS = {
     "TexFormat": dict(TF_RGBA8=0, TF_RGB8=1, TF_RGBA5551=2, TF_RGB565=3, TF_RGBA4=4, TF_LA8=5, TF_HILO8=6,
                       TF_L8=7, TF_A8=8, TF_LA4=9, TF_L4=10, TF_A4=11, TF_ETC1=12, TF_ETC1A4=13),
     "TexFlags": dict(TEX_GX_RAW=1, TEX_ALPHA=2, TEX_CUTOUT=4),
-    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8, MAT_PRELIT=16),
+    "MatFlags": dict(MAT_XLU=1, MAT_FOG=2, MAT_INDIRECT=4, MAT_LIGHT_SET=8, MAT_PRELIT=16, MAT_SHADOW_DECAL=128,
+                     MAT_SHADOW_RECEIVER=256),
     "VtxAttr": dict(VA_POS=1, VA_NRM=2, VA_CLR=4, VA_UV0=8, VA_UV1=16, VA_POS16=32),
     "VbFlags": dict(VB_UV_FLOAT=1),
-    "BatchFlags": dict(BATCH_DETAIL=1),
+    "BatchFlags": dict(BATCH_DETAIL=1, BATCH_CASTER=4),
     "NodeFlags": dict(NODE_VISIBLE=1, NODE_BILLBOARD=2),
-    "InstFlags": dict(INST_STATIC=1, INST_COLLIDE=2, INST_ANIMATED=4),
+    "InstFlags": dict(INST_STATIC=1, INST_COLLIDE=2, INST_ANIMATED=4, INST_CASTER_ONLY=16, INST_NO_CAST=32),
     "TrackTarget": dict(TT_NODE_SCALE_X=0, TT_NODE_SCALE_Y=1, TT_NODE_SCALE_Z=2, TT_NODE_ROT_X=3,
                         TT_NODE_ROT_Y=4, TT_NODE_ROT_Z=5, TT_NODE_TRANS_X=6, TT_NODE_TRANS_Y=7,
                         TT_NODE_TRANS_Z=8, TT_TEXMTX_SCALE_S=16, TT_TEXMTX_SCALE_T=17, TT_TEXMTX_ROTATE=18,
@@ -319,6 +326,7 @@ class Package:
         for attr in SECTION_LISTS.values():
             setattr(self, attr, [])
         self.env = None
+        self.shadow_env = None
         self.strs = bytearray(b"\0")
         self._str_index = {"": 0}
         self.texture_data, self.vertex_data, self.blobs = [], [], []
@@ -350,6 +358,8 @@ class Package:
             return bytes(self.strs), 0
         if tag4 == "ENVR":
             return (self.env.pack(), 1) if self.env is not None else (b"", 0)
+        if tag4 == "SHDW":
+            return (self.shadow_env.pack(), 1) if self.shadow_env is not None else (b"", 0)
         if tag4 == "CVIS":
             rb = self.env.pvs_row_bytes if self.env is not None else 0
             return bytes(self.cvis), (len(self.cvis) // rb if rb else 0)
@@ -450,6 +460,8 @@ class Package:
                 setattr(p, SECTION_LISTS[t4], list(struct.unpack_from("<%dH" % s.count, data, s.offset)))
             elif t4 == "ENVR":
                 p.env = Rec.unpack("Env", data, s.offset)
+            elif t4 == "SHDW":
+                p.shadow_env = Rec.unpack("ShadowEnv", data, s.offset)
             elif t4 == "CVIS":
                 p.cvis = bytes(data[s.offset:s.offset + s.size])
             elif t4 in SECTION_LISTS:
@@ -524,7 +536,7 @@ class Package:
                 bad.append("vertex buffer %d: position origin %s, scale %g" % (i, v.pos_origin, v.pos_scale))
             in_sec("vertex buffer %d" % i, "VDAT", v.data, v.count * v.stride)
         for i, b in enumerate(self.batches):
-            if b.flags & ~BATCH_DETAIL:
+            if b.flags & ~(BATCH_DETAIL | BATCH_CASTER):
                 bad.append("batch %d: flags %04x" % (i, b.flags))
             if b.material >= nm or b.vbuf >= len(self.vertex_buffers) or b.n_indices % 3 or \
                     b.first_index + b.n_indices > ni:
@@ -616,6 +628,17 @@ class Package:
                 bad.append("CVIS: %d bytes but env pvs_row_bytes 0" % len(self.cvis))
             if not 0 <= e.detail_distance < 1e30:
                 bad.append("env detail_distance %g" % e.detail_distance)
+        for i, c in enumerate(self.casters):
+            if c.batch >= nb or not self.batches[c.batch].flags & BATCH_CASTER or c.n_indices % 3 or \
+                    c.first_index < self.batches[c.batch].first_index or \
+                    c.first_index + c.n_indices > self.batches[c.batch].first_index + self.batches[c.batch].n_indices:
+                bad.append("caster %d: batch %d indices %d+%d" % (i, c.batch, c.first_index, c.n_indices))
+        if self.shadow_env is not None:
+            se = self.shadow_env
+            if se.light >= len(self.lights) or (se.decal_texture != NONE16 and se.decal_texture >= nt) or \
+                    not 0 <= se.darkness <= 1 or not se.map_extent > 0 or not se.map_depth > 0 or not se.map_floor >= 0:
+                bad.append("shadow env: light %d, decal texture %d, darkness %g, map %g x %g + %g" % (
+                    se.light, se.decal_texture, se.darkness, se.map_extent, se.map_depth, se.map_floor))
         for i, m in enumerate(self.markers):
             s_ok("marker %d" % i, m.name)
             if m.kind > MK_WARP:
@@ -635,7 +658,7 @@ class Package:
             return v
         out = {lst: [strip(r, LIST_KIND[lst]) if isinstance(r, Rec) else r for r in getattr(self, lst)]
                for lst in SECTION_LISTS.values()}
-        out.update(env=self.env, strs=bytes(self.strs), texture_data=self.texture_data,
+        out.update(env=self.env, shadow_env=self.shadow_env, strs=bytes(self.strs), texture_data=self.texture_data,
                    vertex_data=self.vertex_data, blobs=self.blobs, cvis=bytes(self.cvis))
         return out
 

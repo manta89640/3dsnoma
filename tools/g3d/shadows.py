@@ -1,4 +1,10 @@
-"""Offline soft sunlight shadows for the island's static cell geometry."""
+"""Offline soft sunlight shadows for the island's static cell geometry.
+
+The terrain, the buildings and the cliffs shade each other here, once, into the prelit vertex colours
+(no cost a frame). The placed objects (trees, props: BATCH_CASTER) aren't casters: a tree's shadow is
+narrower than the map's 30-unit texels and the terrain's vertices are 70-140 units apart, so it fell
+between them; they cast at run time instead (WSR's silhouette decals, tools/g3d/shadow_decals.py, and the
+shadow map near the player). They still receive the terrain's and the buildings' shadows here."""
 import math
 
 import numpy as np
@@ -7,7 +13,8 @@ import ng3d
 
 
 def _cell_batches(pkg):
-    """The full-detail batches: one set of geometry per cell, before its cheaper LODs."""
+    """The full-detail batches: one set of geometry per cell, before its cheaper LODs. (The placed
+    objects' among them, BATCH_CASTER, receive but don't cast: see _casts.)"""
     for cell in pkg.cells:
         start, count = cell.first[0], cell.count[0]
         for batch_index in pkg.cell_batches[start:start + count]:
@@ -20,6 +27,12 @@ def _cell_batches(pkg):
             if (material.zmode & 0x11) != 0x11:  # (depth tested and written)
                 continue
             yield batch_index, batch, material
+
+
+def _casts(batch):
+    """Whether a batch casts here: not a placed object's (trees, props: they cast at run time, the
+    shadow map or their decals; here a tree's shadow fell between the terrain's vertices)."""
+    return not batch.flags & ng3d.BATCH_CASTER
 
 
 def _triangles(pkg, batch):
@@ -98,7 +111,8 @@ def bake_soft_sun_shadow(pkg, resolution=1536, radius=2, darkness=0.40, bias=8.0
         T = _triangles(pkg, batch).astype(np.float64, copy=False)
         if not len(T):
             continue
-        triangles.append(T)
+        if _casts(batch):
+            triangles.append(T)
         all_points.append(T.reshape(-1, 3))
         vb = pkg.vertex_buffers[batch.vbuf]
         if material.flags & ng3d.MAT_PRELIT and vb.attrs & ng3d.VA_CLR:

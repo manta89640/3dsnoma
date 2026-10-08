@@ -143,6 +143,7 @@ bool Package::check(std::string* error) {
         {fmt::SEC_TRAK, sizeof(fmt::Track)}, {fmt::SEC_KEYS, sizeof(fmt::Key)}, {fmt::SEC_LITE, sizeof(fmt::Light)},
         {fmt::SEC_LSET, sizeof(fmt::LightSet)}, {fmt::SEC_FOGS, sizeof(fmt::Fog)}, {fmt::SEC_MARK, sizeof(fmt::Marker)},
         {fmt::SEC_COLL, sizeof(fmt::Collision)}, {fmt::SEC_CYLS, sizeof(fmt::Cylinder)}, {fmt::SEC_ENVR, sizeof(fmt::Env)},
+        {fmt::SEC_CAST, sizeof(fmt::Caster)}, {fmt::SEC_SHDW, sizeof(fmt::ShadowEnv)},
     };
     for (const ArraySec& a : k_arrays)
         if (const fmt::Section* s = section(a.tag)) {
@@ -162,6 +163,11 @@ bool Package::check(std::string* error) {
     if (envr && envr->count > 1)
         return fail(error, "ENVR holds %u records (one expected)", envr->count);
     env_ = envr && envr->count ? (const fmt::Env*)(data_ + envr->offset) : &k_default_env;
+    // the shadows' setting: one record, or none
+    const fmt::Section* shdw = section(fmt::SEC_SHDW);
+    if (shdw && shdw->count > 1)
+        return fail(error, "SHDW holds %u records (one expected)", shdw->count);
+    shadow_env_ = shdw && shdw->count ? (const fmt::ShadowEnv*)(data_ + shdw->offset) : nullptr;
     return check_textures(error) && check_geometry(error) && check_models(error) && check_world(error) &&
            check_anims(error) && check_env(error);
 }
@@ -292,7 +298,7 @@ bool Package::check_geometry(std::string* error) {
             return fail(error, "batch %u: its box", i);
         if (b.node != fmt::NONE16 && b.node >= nodes().count)
             return fail(error, "batch %u: node %u", i, b.node);
-        if (b.flags & ~(u32)fmt::BATCH_DETAIL)
+        if (b.flags & ~(u32)(fmt::BATCH_DETAIL | fmt::BATCH_CASTER))
             return fail(error, "batch %u: flags %04X", i, b.flags);
     }
     return true;
@@ -385,6 +391,16 @@ bool Package::check_world(std::string* error) {
     for (u32 i = 0; i < cy.count; i++)
         if (!finite(&cy[i].x, 5) || cy[i].radius < 0)
             return fail(error, "cylinder %u", i);
+    // the casters: each a run of a caster batch's own indices
+    Span<fmt::Caster> cast = casters();
+    for (u32 i = 0; i < cast.count; i++) {
+        const fmt::Caster& c = cast[i];
+        if (c.batch >= n_batches || !(batches()[c.batch].flags & fmt::BATCH_CASTER) || c.n_indices % 3 ||
+            c.first_index < batches()[c.batch].first_index ||
+            (uint64_t)c.first_index + c.n_indices > (uint64_t)batches()[c.batch].first_index + batches()[c.batch].n_indices ||
+            !finite(c.bbox, 6))
+            return fail(error, "caster %u: batch %u, indices %u+%u", i, c.batch, c.first_index, c.n_indices);
+    }
     return true;
 }
 
@@ -467,6 +483,15 @@ bool Package::check_env(std::string* error) {
             return fail(error, "ENVR: visibility height %g", (double)e.pvs_max_height);
     } else if (cvis && cvis->size) {
         return fail(error, "CVIS without ENVR's pvs_row_bytes");
+    }
+    if (const fmt::ShadowEnv* se = shadow_env_) {
+        if (se->light >= ls.count || (se->decal_texture != fmt::NONE16 && se->decal_texture >= textures().count) ||
+            !(se->darkness >= 0 && se->darkness <= 1) || !(se->map_extent > 0) || !std::isfinite(se->map_extent) ||
+            !(se->map_depth > 0) || !std::isfinite(se->map_depth) || !(se->map_floor >= 0) ||
+            !std::isfinite(se->map_floor))
+            return fail(error, "SHDW: light %u of %u, decal texture %u, darkness %g, map %g + %g, %g", se->light,
+                        ls.count, se->decal_texture, (double)se->darkness, (double)se->map_extent,
+                        (double)se->map_depth, (double)se->map_floor);
     }
     return true;
 }

@@ -784,13 +784,14 @@ def build_single_batch(cv, c, material, node, detail=False):
     return _add_batch(cv, material, vbi, idx, c["pos"], node, detail)
 
 
-def _add_batch(cv, material, vbi, idx, pos, node, detail=False):
+def _add_batch(cv, material, vbi, idx, pos, node, detail=False, caster=False):
     pkg = cv.pkg
     first = len(pkg.indices)
     pkg.indices.extend(int(i) for i in idx)
     lo, hi = pos.min(0), pos.max(0)
     pkg.add("batches", material=material, vbuf=vbi, first_index=first, n_indices=len(idx),
-            bbox=[float(x) for x in list(lo) + list(hi)], node=node, flags=ng3d.BATCH_DETAIL if detail else 0)
+            bbox=[float(x) for x in list(lo) + list(hi)], node=node,
+            flags=(ng3d.BATCH_DETAIL if detail else 0) | (ng3d.BATCH_CASTER if caster else 0))
     cv.stats["triangles"] += len(idx) // 3
     if detail:
         cv.stats["detail batches (BATCH_DETAIL)"] += 1
@@ -810,12 +811,15 @@ class MeshSet:
     def __init__(self, cv):
         self.cv = cv
         self.pieces = {}
+        self.spans = {}   # batch -> [(tag, first index, index count)]: where build() put each tagged piece
 
-    def add(self, group, material, corners, levels=(0,), detail=False):
+    def add(self, group, material, corners, levels=(0,), detail=False, tag=None):
+        """tag: the placed object the piece is of (a caster: its batches are BATCH_CASTER, and build()
+        notes where each tagged piece's indices land, `spans`)."""
         corners = self.cv.prepare(corners, material)
         attrs, _ = layout_of(corners, ("s16", 0, 0))
         key = (group, material, bool(detail), attrs)
-        self.pieces.setdefault(key, []).append((tuple(sorted(set(levels))), corners))
+        self.pieces.setdefault(key, []).append((tuple(sorted(set(levels))), corners, tag))
 
     def absorb_small(self, max_triangles, neighbours, margin=0.0):
         """Small families (fewer than max_triangles; the slivers a centroid cut leaves where a
@@ -824,10 +828,10 @@ class MeshSet:
         that group's box (grown by `margin`: the group's box, which picks its detail level and culls
         it, stays as it was) and the two together still fit VA_POS16. Returns how many moved."""
         moved = 0
-        tris = {k: sum(len(c["pos"]) // 3 for _, c in v) for k, v in self.pieces.items()}
+        tris = {k: sum(len(c["pos"]) // 3 for _, c, _ in v) for k, v in self.pieces.items()}
         gbox = {}
         for k, v in self.pieces.items():
-            P = np.concatenate([c["pos"] for _, c in v])
+            P = np.concatenate([c["pos"] for _, c, _ in v])
             lo, hi = gbox.get(k[0], (np.full(3, np.inf), np.full(3, -np.inf)))
             gbox[k[0]] = (np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0)))
         for key in sorted(self.pieces, key=lambda k: (tris[k], str(k))):
@@ -835,17 +839,17 @@ class MeshSet:
             if not parts or tris[key] >= max_triangles:
                 continue
             group, material, detail, attrs = key
-            levels = {lv for lv, _ in parts}
-            Pk = np.concatenate([c["pos"] for _, c in parts])
+            levels = {lv for lv, _, _ in parts}
+            Pk = np.concatenate([c["pos"] for _, c, _ in parts])
             best = None
             for g in neighbours(group):
                 k2 = (g, material, detail, attrs)
                 other = self.pieces.get(k2)
-                if not other or {lv for lv, _ in other} != levels or tris[k2] < tris[key]:
+                if not other or {lv for lv, _, _ in other} != levels or tris[k2] < tris[key]:
                     continue
                 if (Pk.min(0) < gbox[g][0] - margin).any() or (Pk.max(0) > gbox[g][1] + margin).any():
                     continue
-                P = np.concatenate([c["pos"] for _, c in other + parts])
+                P = np.concatenate([c["pos"] for _, c, _ in other + parts])
                 if pos16_fit(P.min(0), P.max(0)) is None:
                     continue
                 if best is None or tris[k2] > tris[best]:
@@ -866,7 +870,7 @@ class MeshSet:
         fams = []
         for key in sorted(self.pieces, key=lambda k: (k[0], k[3], k[1], k[2])):
             parts = self.pieces[key]
-            mode = _uv_mode(None, [c for _, c in parts])
+            mode = _uv_mode(None, [c for _, c, _ in parts])
             fams.append((key, mode))
         by_vb = {}
         for key, mode in fams:
@@ -880,12 +884,15 @@ class MeshSet:
             def flush():
                 vbi = _flush_vbuf(cv, vb)
                 for k2, sets in pending:
-                    for levels, (idx2, pos2) in sets.items():
-                        b = _add_batch(cv, k2[1], vbi, idx2, pos2, NONE16, k2[2])
+                    for levels, (idx2, pos2, tagged) in sets.items():
+                        b = _add_batch(cv, k2[1], vbi, idx2, pos2, NONE16, k2[2], caster=bool(tagged))
                         out.setdefault(k2[0], []).append((b, k2[1], levels))
+                        if tagged:
+                            first = pkg.batches[b].first_index
+                            self.spans[b] = [(tag, first + at, n) for tag, at, n in tagged]
             for key in keys:
                 parts = self.pieces[key]
-                cs = [c for _, c in parts]
+                cs = [c for _, c, _ in parts]
                 c = {k: np.concatenate([p[k] for p in cs]) for k in cs[0] if k != "uvfrac"}
                 rows = encode_vertices(c, attrs, mode)
                 lo, hi = np.minimum(vlo, c["pos"].min(0)), np.maximum(vhi, c["pos"].max(0))
@@ -901,13 +908,13 @@ class MeshSet:
                 idx = _index_into(vb, rows)
                 # the pieces each level draws; a batch per distinct set
                 spans, at = [], 0
-                for lv, p in parts:
+                for lv, p, tag in parts:
                     n = len(p["pos"])
-                    spans.append((lv, at, at + n))
+                    spans.append((lv, at, at + n, tag))
                     at += n
                 sets = {}
-                for level in sorted({x for lv, _ in parts for x in lv}):
-                    sel = [(a, b) for lv, a, b in spans if level in lv]
+                for level in sorted({x for lv, _, _ in parts for x in lv}):
+                    sel = [(a, b) for lv, a, b, _ in spans if level in lv]
                     key_set = tuple(sel)
                     found = next((k for k in sets if sets[k][2] == key_set), None)
                     if found is not None:
@@ -915,8 +922,15 @@ class MeshSet:
                         continue
                     ii = np.concatenate([idx[a:b] for a, b in sel])
                     pp = np.concatenate([c["pos"][a:b] for a, b in sel])
-                    sets[(level,)] = (ii, pp, key_set)
-                pending.append((key, {lv: (v[0], v[1]) for lv, v in sets.items()}))
+                    # (the tagged pieces' runs within the batch's indices, in its order)
+                    tagged, off = [], 0
+                    for lv, a, b, tag in spans:
+                        if level in lv:
+                            if tag is not None:
+                                tagged.append((tag, off, b - a))
+                            off += b - a
+                    sets[(level,)] = (ii, pp, key_set, tagged)
+                pending.append((key, {lv: (v[0], v[1], v[3]) for lv, v in sets.items()}))
                 vlo, vhi = lo, hi
             if pending:
                 flush()

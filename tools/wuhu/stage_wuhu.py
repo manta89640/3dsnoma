@@ -67,6 +67,7 @@ import brres  # noqa: E402
 import convert  # noqa: E402
 import ng3d  # noqa: E402
 import nintendo_formats as nf  # noqa: E402
+import shadow_decals  # noqa: E402
 import shadows  # noqa: E402
 import water  # noqa: E402
 from ng3d import NONE16  # noqa: E402
@@ -283,6 +284,8 @@ VIEWS = OrderedDict([
     ("distant", ((-7700.0, 1100.0, -300.0), (-29600.0, 300.0, 16100.0), 40.0)),
     ("overview", ((-9000.0, 3500.0, 12000.0), (0.0, 400.0, -2000.0), 50.0)),
     ("wedge", ((-2800.0, 114.0, 3300.0), (-29858.0, 350.0, 16626.0), 50.0)),
+    # Wind Park from its south-west corner, the windmills and their shadows (the shadows' check)
+    ("windmill", ((-5350.0, 1050.0, -1350.0), (-4450.0, 740.0, -1850.0), 55.0)),
 ])
 
 # CmnObjManager classes (main.dol 0x80669518) by PMP (group 1) type (0x80669858), and how each
@@ -378,6 +381,17 @@ def wheel_pick(hub):
 CAR_WHEELS = [(n, hub, wheel_pick(hub)) for n, hub in WHEEL_HUBS.items()]
 # the "static" props at level 0 only (small next to the boats and the gates)
 NEAR_STATIC = {21}
+# Shadows (tools/g3d/shadow_decals.py, docs/wuhu.md "Shadows"): the light they fall from (the one the
+# static lighting and the stager's sun bake take), how dark they are (WSR's decals' alpha; the shadow
+# map takes as much light away), the shadow map's square around the player (units: 512 texels make
+# about 0.94 units a texel, a quarter of the Mii's width), how far toward the sun its casters are
+# taken from the ground there (the airship flies 2,800 units up: 4,800 along the light) and below it;
+# the car's shadow a little larger than its box; the Mii's stand-ins' classes (as the parachute's)
+SHADOW_LIGHT = "Map_Light"
+SHADOW_DARKNESS = shadow_decals.DARKNESS
+SHADOW_MAP_EXTENT, SHADOW_MAP_DEPTH, SHADOW_MAP_FLOOR = 480.0, 6000.0, 1500.0
+CAR_SHADOW_SIZE = 1.15
+SHADOW_PROXY_CLASS, SHADOW_BLOB_CLASS = 0xFFFD, 0xFFFC
 
 
 # ----------------------------------------------------------------------------------- sources
@@ -812,12 +826,13 @@ class Stager:
 
     # -- static geometry into the cells
     def bake_model(self, r, mdl, M, tag, hidden=(), tex_override=None, by_centroid=False, cell=None,
-                   group_name=None, tag_of=None, detail=False, select=None):
+                   group_name=None, tag_of=None, detail=False, select=None, caster=None):
         """Every visible draw of `mdl`, moved by M (4x4), into the cells: by triangle centroid
         (terrain) or all into `cell`. tag_of(node name, material name) -> its tag, or None to leave
         the draw out (default: `tag`); a draw whose material is in DETAIL_MATERIALS, or any if
         `detail`, makes BATCH_DETAIL batches; select(node name, material name, triangles (n, 3, 3))
-        -> the triangles to keep. Returns the triangles baked."""
+        -> the triangles to keep. caster: the placed object `mdl` is (its pieces cast into the shadow
+        map: MeshSet's tags, the package's CAST). Returns the triangles baked."""
         mats = {m.index: m for m in mdl.materials}
         shapes = {s.index: s for s in mdl.shapes}
         tris = 0
@@ -855,7 +870,7 @@ class Stager:
                     if group_name:
                         self.cell_groups.setdefault(key, Counter())[vis or group_name] += int(sel.sum() // 3)
             else:
-                self.cells.add(cell, mi, c, TAG_LEVELS[dtag], det)
+                self.cells.add(cell, mi, c, TAG_LEVELS[dtag], det, tag=caster)
         return tris
 
     # ------------------------------------------------------------------------------- island
@@ -978,27 +993,29 @@ class Stager:
         # static props and trees: H/M/L tree models in levels 0/1/2 (the palm has one model at 0-1);
         # the boats and gates at levels 0-1, the fountain at 0; the
         # small props at level 0, BATCH_DETAIL
-        for o in objs:
+        # (each object's full-detail pieces tagged with it, (class, number): its shadow map caster)
+        for k, o in enumerate(objs):
             name, how, path, models = CLASSES[o["cls"]]
             if how not in ("static", "small", "tree"):
                 continue
             r = w.brres(SA, path)
             cell = self.cell_of(o["pos"][0], o["pos"][2])
+            caster = (o["cls"], k)
             if how == "tree":
                 near, mid = models[:2]
                 far = models[2] if len(models) > 2 else None
                 if mid:
-                    self.bake_model(r, r.models[near], o["mtx"], TAG_NEAR, cell=cell)
+                    self.bake_model(r, r.models[near], o["mtx"], TAG_NEAR, cell=cell, caster=caster)
                     self.bake_model(r, r.models[mid], o["mtx"], TAG_MID, cell=cell)
                     if far:
                         self.bake_model(r, r.models[far], o["mtx"], TAG_FAR, cell=cell)
                 else:
-                    self.bake_model(r, r.models[near], o["mtx"], TAG_PROP, cell=cell)
+                    self.bake_model(r, r.models[near], o["mtx"], TAG_PROP, cell=cell, caster=caster)
             elif how == "static":
                 self.bake_model(r, r.models[models[0]], o["mtx"], TAG_NEAR if o["cls"] in NEAR_STATIC else TAG_PROP,
-                                cell=cell)
+                                cell=cell, caster=caster)
             else:
-                self.bake_model(r, r.models[models[0]], o["mtx"], TAG_NEAR, cell=cell, detail=True)
+                self.bake_model(r, r.models[models[0]], o["mtx"], TAG_NEAR, cell=cell, detail=True, caster=caster)
             handled[o["cls"]] += 1
         self.inv["props"] = counts
         self.say("baked: %s" % ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(handled.items())))
@@ -1016,6 +1033,8 @@ class Stager:
                 r = w.brres(SA, path)
                 mi, nm = self.cv.model(r, r.models[mname], name="%s#%d" % (mname, cls) if extra_root else mname,
                                        extra_root=extra_root, split=CAR_WHEELS if mname == "WS2_common_car" else ())
+                if mname == "WS2_common_car":
+                    self.car_shadow(mi)
                 models[(cls, extra_root)] = (r, r.models[mname], mi, nm)
             return models[(cls, extra_root)]
 
@@ -1176,6 +1195,7 @@ class Stager:
                 class_id=0xFFFE, mtx=np.eye(4)[:3].tolist(), anim_offset=0.0, cull_distance=0.0)
         self.inv["falling"] = dict(source="Common/OmkScene/common.carc:G3D/WS2_omk_parachute.brres",
                                    model="WS2_omk_parachute_01", animation="WS2_omk_parachute_01 (30-frame CHR0)")
+        self.shadow_models()
         self.say("instances: %s" % ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(made.items())))
         for cls, n in made.items():
             self.inv["props"][cls]["instances"] = n
@@ -1188,6 +1208,119 @@ class Stager:
             "%s %.0f -> %.0f" % (pkg.string(pkg.models[mi].name), r0, r1) for mi, (r0, r1) in sorted(grown.items())))
         self.inv["model_radius_over_animation"] = {pkg.string(pkg.models[mi].name): [r0, r1]
                                                    for mi, (r0, r1) in sorted(grown.items())}
+
+
+    # ------------------------------------------------------------------------------- shadows
+    def stage_shadows(self):
+        """WSR's object shadows (tools/g3d/shadow_decals.py): each tree's, parasol's and venue prop's
+        silhouette cut from the render terrain under it into its cell (one detail batch a cell, culled
+        as the edge strips are); the island's materials marked as the shadow map's receivers; the
+        silhouettes' atlas, its material and the shadows' setting kept for the cars, the Mii and SHDW.
+        After stage_props (the objects and the terrain are pieces of the cells), before build_cells."""
+        w, pkg = self.wsr, self.pkg
+        # the sun: the light the World shades from (a point light: its position toward the origin)
+        sun = next(l for l in self.lights if l["name"] == SHADOW_LIGHT)
+        if sun["kind"] == ng3d.LK_POINT:
+            light = -np.asarray(sun["position"], np.float64)
+        else:
+            light = np.asarray(sun["direction"], np.float64)
+        light /= np.linalg.norm(light)
+        self.shadow_light = light
+        # the silhouettes, one atlas
+        atlas = shadow_decals.Silhouettes()
+        rects = {}
+        for cls, (name, tex, path, size, offset, depth, down) in shadow_decals.TYPES.items():
+            rects[cls] = atlas.add(tex, shadow_decals.coverage_of(w.brres(SA, path), tex))
+        for key, (tex, path) in (("car", shadow_decals.CAR), ("mii", shadow_decals.MII)):
+            rects[key] = atlas.add(tex, shadow_decals.coverage_of(w.brres(SA, path), tex))
+        ti = self.cv.texture(atlas, atlas.name)
+        self.shadow_texture = ti
+        self.shadow_rects = rects
+        self.decal_mat = shadow_decals.decal_material(self.cv, (ti, atlas.levels), SHADOW_DARKNESS)
+        # the ground: the island's own opaque full-detail triangles in the cells (not its strips, the
+        # props, the far island or the water)
+        island = {mi for (mdl, _), mi in self.mat_by_name.items() if mdl == "WS2_common_island"}
+        tris = []
+        for (group, mi, detail, attrs), parts in self.cells.pieces.items():
+            m = pkg.materials[mi]
+            if mi not in island or detail or m.flags & ng3d.MAT_XLU:
+                continue
+            for levels, c, tag in parts:
+                if 0 in levels and tag is None:
+                    tris.append(np.asarray(c["pos"], np.float64).reshape(-1, 3, 3))
+        ground = shadow_decals.Ground(np.concatenate(tris))
+        # the decals, into the cells of their objects (level 0, detail)
+        made, missed, n_tris = Counter(), Counter(), 0
+        for o in self.objs:
+            t = shadow_decals.TYPES.get(o["cls"])
+            if t is None or CLASSES[o["cls"]][1] not in ("tree", "small", "static"):
+                continue
+            name, tex, path, size, offset, depth, down = t
+            d = shadow_decals.place(ground, o["mtx"], size, offset, depth, down, light)
+            c = shadow_decals.cut(ground, d, rects[o["cls"]]) if d is not None else None
+            if c is None:
+                missed[name] += 1
+                continue
+            self.cells.add(self.cell_of(o["pos"][0], o["pos"][2]), self.decal_mat, c, TAG_LEVELS[TAG_NEAR], True)
+            made[name] += 1
+            n_tris += len(c["pos"]) // 3
+        # the shadow map's receivers: the island's materials (near and far: an item is marked only
+        # where the map covers it), not its water or the volcano's glow
+        receivers = 0
+        for (mdl, _), mi in self.mat_by_name.items():
+            if mdl in ("WS2_common_island", "WS2_common_island_R"):
+                pkg.materials[mi].flags |= ng3d.MAT_SHADOW_RECEIVER
+                receivers += 1
+        self.say("shadows: %d decals (%s; %d triangles; no ground under %s), the sun along (%.3f, %.3f, %.3f), "
+                 "darkness %.2f; %d receiving materials" % (
+                     sum(made.values()), ", ".join("%s %d" % kv for kv in made.items()), n_tris, dict(missed) or "none",
+                     light[0], light[1], light[2], SHADOW_DARKNESS, receivers))
+        self.inv["shadows"] = dict(light=SHADOW_LIGHT, direction=light.tolist(), darkness=SHADOW_DARKNESS,
+                                   decals=dict(made), decal_triangles=n_tris, no_ground=dict(missed),
+                                   silhouettes=list(atlas.slots), receiving_materials=receivers,
+                                   map=dict(extent=SHADOW_MAP_EXTENT, depth=SHADOW_MAP_DEPTH, floor=SHADOW_MAP_FLOOR))
+
+    def shadow_models(self):
+        """The Mii's stand-ins: shadow_proxy (a capsule a unit tall, drawn into the shadow map only:
+        INST_CASTER_ONLY) and shadow_blob (WSR's spectators' blob, a unit across, a decal: the shadow map
+        fades it out where it covers), each a model and one instance at the origin that the island
+        moves to the Mii (class SHADOW_PROXY_CLASS, SHADOW_BLOB_CLASS)."""
+        pkg, cv = self.pkg, self.cv
+        proxy_mat = shadow_decals.simple_material(cv, "shadow_proxy", None, konst=(0, 0, 0, 255), cull=0)
+        made = []
+        for name, cls, mat, c, flags in (
+                ("shadow_proxy", SHADOW_PROXY_CLASS, proxy_mat, shadow_decals.capsule_corners(), ng3d.INST_CASTER_ONLY),
+                ("shadow_blob", SHADOW_BLOB_CLASS, self.decal_mat,
+                 shadow_decals.quad_corners((0, 0.05, 0), (0.5, 0, 0), (0, 0, -0.5), self.shadow_rects["mii"]),
+                 ng3d.INST_NO_CAST)):
+            node = len(pkg.nodes)
+            first = len(pkg.batches)
+            b = convert.build_single_batch(cv, cv.prepare(c, mat), mat, 0)
+            pkg.add("nodes", name=pkg.str(name), parent=NONE16, flags=ng3d.NODE_VISIBLE, scale=[1.0] * 3,
+                    bind=[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]], first_batch=first, n_batches=1)
+            bb = pkg.batches[b].bbox
+            ctr = np.array([(bb[0] + bb[3]) / 2, (bb[1] + bb[4]) / 2, (bb[2] + bb[5]) / 2])
+            mi = pkg.add("models", name=pkg.str(name), first_node=node, n_nodes=1, first_batch=first, n_batches=1,
+                         bbox=list(bb), radius=float(np.linalg.norm(np.array(bb[3:]) - ctr)), lod_next=NONE16)
+            pkg.add("instances", model=mi, flags=flags, anim=NONE16, class_id=cls, mtx=np.eye(4)[:3].tolist(),
+                    anim_offset=0.0, cull_distance=0.0)
+            made.append("%s (%d triangles)" % (name, pkg.batches[b].n_indices // 3))
+        self.say("shadows: the Mii's stand-ins %s" % ", ".join(made))
+
+    def car_shadow(self, model):
+        """WSR's car shadow (WS2_common_car_shadow) as a quad under the car's body, a batch of its root
+        node: it goes with every car, parked, driven, or on its route."""
+        pkg, cv = self.pkg, self.cv
+        m = pkg.models[model]
+        if m.first_batch + m.n_batches != len(pkg.batches):
+            raise ValueError("the car's shadow must follow its model's batches")
+        lo, hi = np.array(m.bbox[:3]), np.array(m.bbox[3:])
+        ctr = (lo + hi) / 2
+        hx, hz = (hi[0] - lo[0]) / 2 * CAR_SHADOW_SIZE, (hi[2] - lo[2]) / 2 * CAR_SHADOW_SIZE
+        c = shadow_decals.quad_corners((ctr[0], lo[1] + 0.25, ctr[2]), (hx, 0, 0), (0, 0, -hz), self.shadow_rects["car"])
+        b = convert.build_single_batch(cv, cv.prepare(c, self.decal_mat), self.decal_mat, 0)
+        m.n_batches += 1
+        return b
 
     # ------------------------------------------------------------------------------- the cells
     def build_cells(self):
@@ -1239,6 +1372,22 @@ class Stager:
                 stats["cells with geometry"] += bool(lst)
         self.grid = (x0 * CELL, z0 * CELL, nx, nz)
         self.world_bbox = [float(v) for v in list(world_lo) + list(world_hi)]
+        # the casters: each placed object's run of its full-detail batches' indices (CAST)
+        by_class = Counter()
+        for group, lst in sorted(built.items()):
+            for b, _, levels in lst:
+                if 0 not in levels:
+                    continue
+                bt = pkg.batches[b]
+                P = ng3d.vertex_positions(pkg.vertex_buffers[bt.vbuf], pkg.vertex_data[bt.vbuf])
+                for (cls, _), first, n in self.cells.spans.get(b, ()):
+                    q = P[np.asarray(pkg.indices[first:first + n], np.int64)]
+                    pkg.add("casters", batch=b, class_id=cls, first_index=first, n_indices=n,
+                            bbox=[float(v) for v in list(q.min(0)) + list(q.max(0))])
+                    by_class[cls] += 1
+        self.say("casters: %d runs (%s), %d triangles" % (
+            len(pkg.casters), ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(by_class.items())),
+            sum(c.n_indices for c in pkg.casters) // 3))
         self.say("cells: %d x %d of %.0f units from (%.0f, %.0f), %d with geometry; batches by level %s" % (
             nx, nz, CELL, x0 * CELL, z0 * CELL, stats["cells with geometry"],
             [stats["batches level %d" % l] for l in range(3)]))
@@ -1359,6 +1508,9 @@ class Stager:
         wsr_mii = head_set + WSR_HEAD_SCALE * RFL_HAIR_TOP
         noma_mii = NOMA_HEAD_Y + NOMA_HEAD_SCALE * RFL_HAIR_TOP
         k = self.k = MII_UNITS_PER_ISLAND_UNIT
+        light = next(k for k, l in enumerate(self.lights) if l["name"] == SHADOW_LIGHT)
+        pkg.shadow_env = ng3d.Rec("ShadowEnv", light=light, decal_texture=self.shadow_texture, darkness=SHADOW_DARKNESS,
+                                  map_extent=SHADOW_MAP_EXTENT, map_depth=SHADOW_MAP_DEPTH, map_floor=SHADOW_MAP_FLOOR)
         pkg.env = ng3d.Rec("Env", sky_model=self.sky_model, sky_anim=self.sky_srt, sea_model=self.sea_model,
                            sea_anim_srt=self.sea_srt, sea_anim_clr=self.sea_clr, world_anim_srt=self.world_srt,
                            world_anim_clr=self.world_clr, world_bbox=self.world_bbox, mii_units_per_unit=k,
@@ -1718,6 +1870,7 @@ def main(argv=None):
     st = Stager(Wsr(a.wsr), prelit=not a.no_prelit, pos16=not a.no_pos16)
     st.stage_island()
     st.stage_props()
+    st.stage_shadows()
     st.build_cells()
     st.stage_instances()
     st.stage_anims()

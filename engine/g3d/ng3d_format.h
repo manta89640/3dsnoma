@@ -78,6 +78,10 @@ constexpr u32 SEC_COLL = tag('C', 'O', 'L', 'L');  // Collision[count] (raw KCL 
 constexpr u32 SEC_CYLS = tag('C', 'Y', 'L', 'S');  // Cylinder[count] (tree trunks etc.)
 constexpr u32 SEC_BLOB = tag('B', 'L', 'O', 'B');  // data the above point into (KCL bytes, ...)
 constexpr u32 SEC_CVIS = tag('C', 'V', 'I', 'S');  // cell visibility: a bit row per cell (Env::pvs_row_bytes)
+// optional (a package without them has no shadows but its decals): the placed objects of the cells that
+// cast into the shadow map (Caster[count]), and the shadows' light and darkness (ShadowEnv, one)
+constexpr u32 SEC_CAST = tag('C', 'A', 'S', 'T');
+constexpr u32 SEC_SHDW = tag('S', 'H', 'D', 'W');
 
 // ---------------------------------------------------------------- textures
 // PICA texel formats (the numbering of citro3d's GPU_TEXCOLOR)
@@ -152,6 +156,10 @@ enum MatFlags : u32 {
     MAT_LIGHT_SET = 8,    // light_set is valid
     MAT_PRELIT = 16,      // its lighting is baked into the vertex colours (a static sun): drawn as an
                           // unlit material whose channel colour is the vertex's (no normals needed)
+    MAT_SHADOW_DECAL = 128,     // a shadow laid on the ground as a silhouette (WSR's object shadows):
+                                // faded out where the shadow map covers, so that nothing darkens twice
+    MAT_SHADOW_RECEIVER = 256,  // the shadow map darkens it (the terrain and buildings, their edge strips),
+                                // where its combiners and texture units leave room (material.h)
 };
 
 struct Material {
@@ -224,6 +232,8 @@ struct Batch {
 enum BatchFlags : u16 {
     BATCH_DETAIL = 1,  // small detail (edge-blend strips, small props): drawn only nearer than
                        // Env::detail_distance
+    BATCH_CASTER = 4,  // placed objects baked into a cell (trees, props): each one's run of its indices is
+                       // a Caster (CAST), drawn into the shadow map; the stager's static sun bake leaves it out
 };
 static_assert(sizeof(Batch) == 40, "Batch");
 
@@ -274,6 +284,9 @@ enum InstFlags : u16 {
     INST_STATIC = 1,     // never moves (could be baked; kept as an instance for LOD)
     INST_COLLIDE = 2,    // has a trunk cylinder (CYLS)
     INST_ANIMATED = 4,   // plays `anim` (node tracks), looping
+    INST_CASTER_ONLY = 16,  // drawn into the shadow map only, never seen (a stand-in for what another
+                            // renderer draws: the Mii's)
+    INST_NO_CAST = 32,      // never drawn into the shadow map
 };
 struct Instance {
     u16 model;           // MODL
@@ -396,5 +409,32 @@ struct Env {
     u32 reserved[5];
 };
 static_assert(sizeof(Env) == 96, "Env");
+
+// ---------------------------------------------------------------- shadows
+// A placed object of the static world that casts a shadow: a run of a cell batch's indices (the
+// batch has BATCH_CASTER; the run is the object's triangles, in the vertex buffer the cell draws).
+struct Caster {
+    u16 batch;           // BTCH
+    u16 class_id;        // WSR CmnObj class (for the record)
+    u32 first_index;     // in IDAT, within the batch's indices
+    u32 n_indices;       // a multiple of 3
+    f32 bbox[6];         // its triangles' box, world
+};
+static_assert(sizeof(Caster) == 36, "Caster");
+
+// The shadows. The sun is a light of LITE: its shadows fall along the direction the World lights from
+// it (a point light: from its position toward the origin). The shadow map covers a square of
+// `map_extent` units around the player (looked at along the light), taking casters up to `map_depth`
+// units toward the sun from the ground there and `map_floor` below it; a shadow keeps `1 - darkness`
+// of the light (the shadow map's and the decals' alike, so that the two meet without a seam).
+struct ShadowEnv {
+    u16 light;           // LITE
+    u16 decal_texture;   // TEXS: the decals' silhouettes (for the record), NONE16
+    f32 darkness;        // 0..1
+    f32 map_extent;      // package units
+    f32 map_depth, map_floor;
+    u32 reserved[3];
+};
+static_assert(sizeof(ShadowEnv) == 32, "ShadowEnv");
 
 }  // namespace engine::g3d::fmt
