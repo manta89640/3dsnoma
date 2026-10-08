@@ -161,10 +161,14 @@ void call_original(u32 button, u32 slot) {
         gcall<u32>(guest::load32(it->second + 8 + 4 * slot), button);
 }
 
+PushListener* s_listener;  // (set_push_listener)
+
 u32 button_push_start(u32 button) {
     call_original(button, SLOT_PUSH_START);
     if (HostScene* s = current_host_scene())
         s->on_push_start(button);
+    else if (s_listener)
+        s_listener->on_push_start(button);
     return 0;
 }
 
@@ -172,6 +176,8 @@ u32 button_pushed(u32 button) {
     call_original(button, SLOT_PUSHED);
     if (HostScene* s = current_host_scene())
         s->on_pushed(button);
+    else if (s_listener)
+        s_listener->on_pushed(button);
     return 0;
 }
 
@@ -223,6 +229,8 @@ void hook_button(u32 button) {
     }
     guest::fatal("host scene: button %08X's class (vtable %08X) wasn't made hookable at the start", button, vt);
 }
+
+void set_push_listener(PushListener* l) { s_listener = l; }
 
 u32 lasting_alloc(u32 size, u32 align) { return alloc_lasting(size, align); }
 

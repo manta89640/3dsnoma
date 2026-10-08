@@ -68,5 +68,13 @@ void change_scene(u32 factory);
 // layout::Button has 21) is made hookable at the start.
 void hookable_button_class(u32 vtable, u32 n_slots);
 void hook_button(u32 button);
+// Who hears the hooked buttons' pushes when the current scene isn't a HostScene (a native part of
+// one of the channel's own scenes: the room's bottom-screen panel, engine/room); nullptr: none.
+struct PushListener {
+    virtual ~PushListener() {}
+    virtual void on_push_start(u32 button) {}
+    virtual void on_pushed(u32 button) {}
+};
+void set_push_listener(PushListener* l);
 
 }  // namespace engine::system
