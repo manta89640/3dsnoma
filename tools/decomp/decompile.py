@@ -268,6 +268,10 @@ PATCHED_NAMES = {
     # the way to Wuhu Island and back in black (runtime/patches/wipes.cpp, engine/wuhu):
     # SceneTransit::Request, layout::parts::Wipe's Out and In
     "controller_living_SceneTransit_Request", "layout_parts_Wipe_Out", "layout_parts_Wipe_In",
+    # the room's buttons on the bottom screen (runtime/patches/room.cpp, engine/room): the room
+    # scene made, its frame and its end
+    "scene_LivingRoomScene_ctor", "scene_LivingRoomScene_dtor", "scene_LivingRoomScene_Update",
+    "scene_LivingRoomScene_Draw",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",

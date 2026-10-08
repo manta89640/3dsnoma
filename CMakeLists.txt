@@ -88,6 +88,7 @@ set(ENGINE_SOURCES
   engine/os/interrupts.cpp
   engine/os/mutex.cpp
   engine/os/time.cpp
+  engine/room/panel.cpp
   engine/snd/ax_voice.cpp
   engine/snd/channel.cpp
   engine/snd/seq.cpp
@@ -147,6 +148,7 @@ set(RUNTIME_SOURCES
   runtime/patches/offline.cpp
   runtime/patches/sound.cpp
   runtime/patches/players.cpp
+  runtime/patches/room.cpp
   runtime/patches/profile.cpp
   runtime/patches/vf.cpp
   runtime/patches/wii_parts.cpp

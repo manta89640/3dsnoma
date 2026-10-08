@@ -202,8 +202,13 @@ beside it as `NNNNN_bottom.bmp`.
 
 The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom screen (or use the
 circle pad) to point, A/B as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad as the D-pad.
-Left alone for 3 seconds, the pointer leaves the screen as a remote put down would, so the room's
-menus (その他, the bottom bar) close; the next touch brings it back.
+Left alone for 3 seconds, the pointer leaves the screen as a remote put down would, so nothing
+stays highlighted; the next touch brings it back.
+In the room the top screen shows the room alone (no bar, no hand) and the bottom one the room's
+buttons, the channel's own, worked by touch (`engine/room/panel.h`): the bar along the bottom edge
+as the channel has it (the way back, ホームシアター, サウンド, 出発) and the その他 column's buttons two
+by two above it (メッセージボード, メッセージを送る, 使い方, 設定). The way back asks the room's question
+(Wiiの間をおわります) on the bottom screen; B there is いいえ.
 The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.
@@ -226,8 +231,8 @@ and B backs out of each.
 
 ## The Sound Player
 
-A screen of the port's own for listening to the channel's music: the sixth button of the room's
-bottom bar (サウンド, right of the theater's) opens it, through the room's own circle wipe, and the Home
+A screen of the port's own for listening to the channel's music: the room's サウンド (on the
+bottom screen, right of the theater's) opens it, through the room's own circle wipe, and the Home
 tab at the bottom left (or B) goes back to the room, whose music comes back by itself.
 
 - The tracks are the channel's own, found in its sound archive (`snd/douga.brsar`, which the

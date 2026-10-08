@@ -32,9 +32,12 @@ public:
     ~Confirm();
     Confirm(const Confirm&) = delete;
     Confirm& operator=(const Confirm&) = delete;
-    // the whole of it (window, buttons, veil) moved across by x layout units (a screen region not
-    // centred on the layouts' middle: engine/ui/screen.h)
-    void place(f32 x);
+    // the whole of it (window, buttons, veil) moved by x, y layout units (a screen region not
+    // centred on the layouts' middle: engine/ui/screen.h); the window and its buttons span 387
+    // units up and down (y 191 to -196 as the layouts have them), so the bottom screen's 400 hold
+    // them lowered by DROP
+    void place(f32 x, f32 y = 0);
+    static constexpr f32 DROP = -26;
 
     // the window opens (nothing if it is shown already); over_window: in the place of another
     // window, whose veil it takes over (see above)

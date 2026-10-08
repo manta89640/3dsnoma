@@ -19,7 +19,6 @@
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
 #include "engine/system/save.h"
-#include "engine/wuhu/bar_button.h"
 #include "engine/wuhu/music.h"
 #include "engine/wuhu/wuhu.h"
 #include "hw/ios/net.h"
@@ -62,15 +61,6 @@ void hide(u32 button) {
     nw4r_lyt_Pane_SetVisible(root_pane(button), 0);
     layout_Button_SetActive(button, 0);
 }
-
-// the button goes where the other one's locator is
-void move_to(u32 button, u32 other) {
-    for (u32 i = 0; i < 3; i++)
-        guest::store32(locator(button) + 0x2C + 4 * i, guest::load32(locator(other) + 0x2C + 4 * i));
-}
-
-// controller::living::SceneTransit::To for the Sound Player (the game's own go up to 8)
-const u32 TO_SOUND_PLAYER = 9;
 
 // layout::option::Option, the options' top menu: a column of four buttons (Option_Scene.lex,
 // under Loc_Btn_Top), pressed as Option::ButtonType 0..3 (scene_OptionScene_StateTop_OnButton;
@@ -197,51 +187,29 @@ u32 controller_theater_LayoutController_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
 }
 
 // The room's bottom bar (layout::living, Move_Btn_Scene.lex): its buttons, in the order
-// layout_living_MoveBtn_CreateButtons makes them (+0xD04, a vector of layout::Button*), are the
-// theater, the shop, いろんな間, the TV programmes and the way back. The shop, いろんな間 and the TV
-// programmes are left out of the port (engine/system/scrapped_scenes.cpp): the shop's catalogues
-// were Flash files from the server, and いろんな間 and the TV programmes were the server's content
-// too. Their buttons stay where the bar made them, hidden and inactive (not hit-tested; the bar
-// never makes its buttons active again). The port's own buttons take their places, made as the
-// bar makes its others (layout_living_MoveBtn_AddTransitButton: the layout, the cursor, the bar's
-// focus group and locks, and SceneTransit::Request when pushed, which wipes the room out and asks
-// SceneTransit::Go for the scene), both with いろんな間's layout: the Sound Player's
-// (engine/soundplayer) in the shop's place (Loc_shopping_Btn), beside the theater's, and 出発
-// (engine/wuhu) in いろんな間's (Loc_ironna_Btn). The TV programmes' button is the bar's right end
-// cap (Move_Btn_Tv_Btn.lex, its face running off the screen's edge): it stays shown, without its
-// icon and label, and inactive, so the bar still reaches the edge. The bar's opening animation
-// raises the locators one after the other from the left, so the buttons rise in their order on
-// the screen.
-// The way back (Common/Wii_Btn.lex) went to the Wii Menu, and ends the app here: its back arrow
-// stays, the "Wii" logo under it goes (Pic_Wii and its shadow Pic_Shadow; the button's animations
-// change their colours, not whether they're shown).
+// layout_living_MoveBtn_CreateButtons makes them (+0xD04, a vector of layout::Button*, +0xD08 how
+// many), the theater, the shop, いろんな間, the TV programmes and the way back, and the その他 tab
+// (+0x68C, its layout Move_Btn_Other.lex at +0x124 of it, hanging from Loc_Other_Btn), whose
+// column opens when the pointer comes to it. On the 3DS the room's buttons are on the bottom
+// screen, made again there from the same layouts (engine/room/panel.h); the bar is still made
+// (the room's code drives it) but none of it is shown, and none of it can be reached: the room's
+// cursor hit-tests the bottom screen's buttons with the touch's place in the layouts' space, which
+// is where the bar's buttons are too. So each of its buttons is hidden, inactive (the bar never
+// makes them active again) and moved far out of the pointer's reach (its root pane: the bar's
+// animations move the locators it hangs from, the buttons' own their insides), and the その他
+// tab's layout too (its tab is no layout::Button, and opens its column by itself).
 void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     layout_living_MoveBtn_ctor_orig(r3, r4, r5, r6, r7);
-    enum : u32 { SHOP = 1, IRONNA = 2, TV = 3, BACK = 4 };
-    u32 count = guest::load32(r3 + 0xD08);
-    if (count <= BACK)
-        return;
-    u32 buttons = guest::load32(r3 + 0xD04);
-    auto button = [buttons](u32 i) { return guest::load32(buttons + 4 * i); };
-    for (u32 i : {SHOP, IRONNA})
-        hide(button(i));
-    layout_Button_SetActive(button(TV), 0);
-    for (const char* part : {"Pic_Icon", "Pic_Text"})
-        if (u32 pane = find_pane(button(TV), part))
-            nw4r_lyt_Pane_SetVisible(pane, 0);
-    for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
-        if (u32 pane = find_pane(button(BACK), logo))
-            nw4r_lyt_Pane_SetVisible(pane, 0);
-    // (r4 the bar's scene layout, r5 the cursor, r7 the bar's focus group; the strings are the
-    // bar's own: +0x1D0 "layout/Move_Btn/Move_Btn_Ironna_Btn.lex", +0x1BC "Loc_shopping_Btn",
-    // +0x1F8 "Loc_ironna_Btn")
-    const u32 strings = GA_layout_living_MoveBtn_sData;
-    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x1D0, r4, strings + 0x1BC, r5, r7, TO_SOUND_PLAYER);
-    if (guest::load32(r3 + 0xD08) > BACK + 1)
-        engine::soundplayer::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 1)));
-    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x1D0, r4, strings + 0x1F8, r5, r7, engine::wuhu::TO_ISLAND);
-    if (guest::load32(r3 + 0xD08) > BACK + 2)
-        engine::wuhu::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 2)));
+    const f32 AWAY = 10000;
+    u32 count = guest::load32(r3 + 0xD08), buttons = guest::load32(r3 + 0xD04);
+    for (u32 i = 0; i < count; i++) {
+        u32 button = guest::load32(buttons + 4 * i);
+        hide(button);
+        engine::math::store_f32(root_pane(button) + 0x2C, AWAY);
+    }
+    u32 other = guest::load32(guest::load32(r3 + 0x68C + 0x124 + 0xC) + 0x10);
+    nw4r_lyt_Pane_SetVisible(other, 0);
+    engine::math::store_f32(other + 0x2C, AWAY);
 }
 
 // The application's scene factories, made at the start (one block of them): the Sound Player's
@@ -255,10 +223,10 @@ void app_SceneFactories_ctor(u32 r3) {
     engine::wuhu::music_boot();
 }
 
-// controller::living::SceneTransit::Go(To): the scene a room bar button leads to, once the room
-// has been wiped out. The Sound Player's button and 出発 ask for their own To.
+// controller::living::SceneTransit::Go(To): the scene a room button leads to, once the room has
+// been wiped out. The Sound Player's button and 出発 (engine/room/panel.cpp) ask for their own To.
 u32 controller_living_SceneTransit_Go(u32 r3, u32 r4) {
-    if (r4 == TO_SOUND_PLAYER) {
+    if (r4 == engine::soundplayer::TO_SOUND_PLAYER) {
         engine::system::change_scene(engine::soundplayer::scene_factory());
         return 0;
     }

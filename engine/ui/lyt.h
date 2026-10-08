@@ -237,6 +237,23 @@ inline void set_text_at(u32 box, u32 text) { gcall<u32>(guest::load32(guest::loa
 // the channel's message `id` (lib::Message::Get: its text in the message file, the language's);
 // e.g. 1 はい, 2 いいえ
 inline u32 message(u32 id) { return g::lib_Message_Get(0, id); }
+// the same as a string (its escape sequences, the button icons and the like, left out)
+inline std::u16string message_string(u32 id) {
+    std::u16string s;
+    u32 p = message(id);
+    if (!p)
+        return s;
+    for (u16 c; (c = guest::load16(p)) != 0;) {
+        if (c == 0x1A) {
+            u8 n = guest::load8(p + 2);
+            p += n >= 3 ? n : 2;
+            continue;
+        }
+        s.push_back((char16_t)c);
+        p += 2;
+    }
+    return s;
+}
 inline void font_size(u32 box, f32 w, f32 h) {
     store_f32(box + 0xE8, w);
     store_f32(box + 0xEC, h);

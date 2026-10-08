@@ -1,0 +1,51 @@
+// The room (scene::LivingRoomScene) on the 3DS's two screens: the room on the top one, its buttons
+// on the bottom one (engine/room/panel.h). The room's own bar and その他 are hidden and out of
+// reach (runtime/patches/menus.cpp, layout_living_MoveBtn_ctor), and its hand isn't drawn.
+
+#include "engine/room/panel.h"
+#include "engine/ui/lyt.h"
+#include "noma_decomp.h"
+
+namespace g {
+
+u32 scene_LivingRoomScene_ctor_orig(u32 r3);
+u32 scene_LivingRoomScene_dtor_orig(u32 r3, u32 r4);
+u32 scene_LivingRoomScene_Update_orig(u32 r3);
+u32 scene_LivingRoomScene_Draw_orig(u32 r3);
+
+namespace {
+
+// the room's layout::Cursor; its layouts, the hand (+0x8) and its shadow (+0x130)
+const u32 ROOM_CURSOR = 0x498;
+
+}  // namespace
+
+u32 scene_LivingRoomScene_ctor(u32 r3) {
+    u32 r = scene_LivingRoomScene_ctor_orig(r3);
+    engine::room::open(r3);
+    return r;
+}
+
+u32 scene_LivingRoomScene_dtor(u32 r3, u32 r4) {
+    engine::room::close();
+    return scene_LivingRoomScene_dtor_orig(r3, r4);
+}
+
+u32 scene_LivingRoomScene_Update(u32 r3) {
+    u32 r = scene_LivingRoomScene_Update_orig(r3);
+    engine::room::update();
+    return r;
+}
+
+// The room draws its 3D, its layouts, then the cursor's: the hand hidden first (the cursor shows
+// it as the pointer comes and goes, in its update), then the panel on the bottom screen.
+u32 scene_LivingRoomScene_Draw(u32 r3) {
+    namespace lyt = engine::ui::lyt;
+    for (u32 layout : {0x8u, 0x130u})
+        lyt::show(lyt::root_pane(r3 + ROOM_CURSOR + layout), false);
+    u32 r = scene_LivingRoomScene_Draw_orig(r3);
+    engine::room::draw();
+    return r;
+}
+
+}  // namespace g

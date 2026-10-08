@@ -158,7 +158,7 @@ IslandScene::IslandScene() {
     // on the bottom screen, as the Sound Player's (engine/ui/screen.h): its region's middle is 37
     // units left of the layouts', so the windows move with it
     menu_->place(BOTTOM_MIDDLE_X);
-    confirm_->place(BOTTOM_MIDDLE_X);
+    confirm_->place(BOTTOM_MIDDLE_X, Confirm::DROP);
     prompt_->place(BOTTOM_MIDDLE_X, PROMPT_DROP);
     bottom_ = g::operator_new(game::BOTTOM_SIZE);
     game::bottom_ctor(bottom_, cursor_);  // hidden until the island shows
