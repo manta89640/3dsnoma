@@ -353,6 +353,12 @@ void draw_native(u32 r3, u32 vpos, u32 vnrm, u32 venv, u32 opa, u32 xlu, u32 rep
     model_draws(r3, vpos, opa, xlu, repl, draw_mode, f.draws);
     Sent& s = f.sent;
     s.clear();
+    // What the GX library keeps as dirty state (GXSetProjection, GXSetViewport, GXSetCurrentMtx...)
+    // first, as the game's GXCallDisplayList would send it: the draws' lists are called from here,
+    // and without it they read the last GX draw's (the 2D layouts' orthographic projection: the room
+    // came out flat, half of it off screen, once no draw of a model went through the game's code)
+    if (load32(GA___GXData))
+        g::__GXSetDirtyState();
     // the view matrix arrays (GXSetArray 0x15-0x17: the indexed loads' arrays), their DMA from the
     // locked cache done
     auto view_arrays = [&] {
