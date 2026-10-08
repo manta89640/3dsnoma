@@ -68,7 +68,6 @@ import convert  # noqa: E402
 import ng3d  # noqa: E402
 import nintendo_formats as nf  # noqa: E402
 import shadows  # noqa: E402
-import water  # noqa: E402
 from ng3d import NONE16  # noqa: E402
 
 DEFAULT_WSR = os.path.join(os.path.dirname(ROOT), "wii-sports-extract/wii-sports-resort")
@@ -201,6 +200,60 @@ POINT_LIGHT_MIN_DISTANCE = 10000.0
 # where the sun is on the screen and a read of the depth buffer (fn_802A89C4, GXPeekZ).
 SUN_DISTANCE = 60000.0
 SUN_SCREEN = 0.5 * 2.39 * 10000.0 * 456.0
+
+# The sea that moves (docs/wuhu.md "The sea"; engine/g3d/sea.h). WSR's island sea is a flat plane at
+# y 0 whose only motion is an indirect warp of jog_waterB by the scrolling jog_waterA (research
+# sea/report.md section 1); the engine has no dependent texture reads, so mt_za_water keeps its three
+# other layers -- the glare spot projected from the camera, jog_waterB, sea2_day for the placeholder
+# sea2_dummy as WSR swaps it -- as three texture units, its texture matrices 2 and 3 (SRT0 sea_P's
+# crossing scrolls and the colour mottle) moved to the package's 1 and 2 (SEA_WATER_MATRIX: the
+# engine keeps a material's first three), scrolling smoothly every frame. Over it near the eye a grid
+# of vertices that follows the camera draws waves (the stager's: WSR's island has none; its jet-ski
+# sea's are a CPU height field on a hex grid, research section 2): SEA_WAVES, travelling waves of the
+# deep water's speed (sqrt(g wavelength / 2 pi), g = SEA_G units a second squared: 9.81 m at 9 cm a
+# unit), a calm bay's swell from one side (within 45 degrees of one wind), each faded out from 1.5 to
+# 3 of its wavelengths from the grid's centre (beyond that the grid's vertices, 0.13 of their distance
+# apart, are too few for it) and flattened toward the shores by an amplitude map from the collision
+# (SEA_AMP: none within `calm` of land, whole from `whole` on; land the triangles that aren't water or
+# a fence reaching above y -3). The grid (SEA_GRID): `segments` around and rings from `inner` out to
+# `radius` each `segments / 2 pi` further (log-polar: its vertices as far apart along it as across,
+# denser near the eye as the screen is), centred under the eye on a lattice of `snap`, drawn while the
+# eye is no higher than `height` over the sea. Its material is mt_za_water's (the flat sea's look at
+# the rim exactly) times the shade of its vertices (sea.h: the sun's side of a swell lighter, the
+# sky's Fresnel reflection) plus SEA_SKY times their brightening (that reflection's gain, the sun's
+# glint); SEA_SHADE are those terms' weights (diffuse, sky, glint, glint exponent), toward the
+# visible sun (the .penv's direction, 14 degrees up). The flat sea at its level -- a triangle with a
+# corner there (SEA_LEVEL_TOL) and none higher than SEA_SHORE: the ramps the water rises up the beaches
+# by too -- gets a material of its own, MAT_SEA: not drawn where the grid drew (the stencil buffer), so
+# a trough never shows the flat plane through it and the rim has no seam; the inland waters that share
+# mt_za_water (the lake, the pool, the streams, Wedge Island's rim) keep the plain one.
+SEA_LEVEL, SEA_LEVEL_TOL, SEA_SHORE = 0.0, 0.5, 20.0
+SEA_WATER = "mt_za_water"
+SEA_WATER_MATRIX = {2: 1, 3: 2}
+SEA_G = 109.0
+SEA_WAVES = (  # (direction it travels, degrees from +z toward +x; wavelength; amplitude; phase)
+    (35.0, 300.0, 2.6, 0.0), (65.0, 190.0, 1.6, 1.7), (10.0, 120.0, 0.95, 3.1), (80.0, 75.0, 0.5, 4.4))
+SEA_FADE = (1.5, 3.0)
+SEA_GRID = dict(radius=1200.0, inner=3.0, segments=48, snap=8.0, height=600.0)
+SEA_SHADE = (2.5, 2.2, 1.5, 40.0)
+SEA_SKY = (200, 228, 255)
+SEA_AMP = dict(texel=128.0, raster=64.0, calm=40.0, whole=400.0, margin=1500.0)
+# Wakes (research sea/report.md section 3). WSR's own: the island's cruiser object draws
+# Cruiser/G3D/WS2_common_cruiser_ef (two bow-wave skirts and a trailing foam trapezoid, 32 triangles,
+# in the cruiser's space) under each moving cruiser, the liner Liner/G3D/WS2_common_move_liner_ef,
+# with their SRT0s (the foam scrolling back) and CLR0 frame 0 (the day's colours, baked into the
+# registers); staged as parts of the moving cruisers' and the liner's models (WAKES), and as an
+# instance of its own (WAKE_CLASS, hidden) that the island puts under the boat the player drives,
+# faded by its speed (MAT_RUNTIME: its C0 alpha, which the foam's alpha is multiplied by). And ours:
+# a trail behind every boat that moves (INST_TRAIL on TRAIL_CLASSES; world.h), a ribbon along its
+# path that curves as it turns and fades over `life` seconds, widening by `spread` a second, of
+# ws2f_waterStream's streaks (the wake's foam texture, its alpha times the ribbon's: TRAIL), riding
+# the waves; the nearest `boats` of them in one draw.
+WAKES = {33: ("Cruiser/G3D/WS2_common_cruiser_ef.brres", "WS2_common_cruiser_ef"),
+         40: ("Liner/G3D/WS2_common_move_liner_ef.brres", "WS2_common_move_liner_ef")}
+WAKE_CLASS = 0xFFFD
+TRAIL_CLASSES = (7, 8, 33, 40)
+TRAIL = dict(boats=4, samples=24, spacing=14.0, life=5.0, spread=7.0, speed=70.0)
 
 # Wedge Island (Island_16) is in the cells like the rest of the island: its full model and sea rim
 # (Water16) at levels 0-1, island_R's light model of it (Island_16b_model, as WSR's ground-level
@@ -793,9 +846,10 @@ class Stager:
         return (int(math.floor(x / CELL)), int(math.floor(z / CELL)))
 
     # -- materials by name, for animations
-    def material(self, r, mdl, mat, tex_override=None, prio=0):
-        mi = self.cv.material(r, mdl, mat, tex_override, prio)
-        self.mat_by_name[(mdl.name, mat.name)] = mi
+    def material(self, r, mdl, mat, tex_override=None, prio=0, variant=None):
+        mi = self.cv.material(r, mdl, mat, tex_override, prio, variant=variant)
+        if not variant:
+            self.mat_by_name[(mdl.name, mat.name)] = mi
         return mi
 
     def texmtx_of(self, model):
@@ -812,12 +866,13 @@ class Stager:
 
     # -- static geometry into the cells
     def bake_model(self, r, mdl, M, tag, hidden=(), tex_override=None, by_centroid=False, cell=None,
-                   group_name=None, tag_of=None, detail=False, select=None):
+                   group_name=None, tag_of=None, detail=False, select=None, variant=None):
         """Every visible draw of `mdl`, moved by M (4x4), into the cells: by triangle centroid
         (terrain) or all into `cell`. tag_of(node name, material name) -> its tag, or None to leave
         the draw out (default: `tag`); a draw whose material is in DETAIL_MATERIALS, or any if
         `detail`, makes BATCH_DETAIL batches; select(node name, material name, triangles (n, 3, 3))
-        -> the triangles to keep. Returns the triangles baked."""
+        -> the triangles to keep; variant: the draws' materials of their own (Converter.material).
+        Returns the triangles baked."""
         mats = {m.index: m for m in mdl.materials}
         shapes = {s.index: s for s in mdl.shapes}
         tris = 0
@@ -840,7 +895,7 @@ class Stager:
                 if not keep.any():
                     continue
                 c = {k: (v[keep] if k != "uvfrac" else v) for k, v in c.items()}
-            mi = self.material(r, mdl, mats[d.mat], tex_override, d.prio)
+            mi = self.material(r, mdl, mats[d.mat], tex_override, d.prio, variant)
             det = detail or mname in DETAIL_MATERIALS
             n = len(c["pos"]) // 3
             tris += n
@@ -863,20 +918,10 @@ class Stager:
         w = self.wsr
         isl = self.island
         self.seatex = sea = w.brres(SA, "Island/G3D/WS2_common_seatex.brres")
-        reflection = water.reflection_atlas(
-            sea.texture_rgba("sea2_day"), isl.texture_rgba("jog_waterA"), isl.texture_rgba("jog_waterB"))
-        self.water_reflection = water.AtlasTexture("departure_sea_reflection", reflection)
-        self.sea_override = {"sea2_dummy": (self.water_reflection, "departure_sea_reflection")}
+        self.sea_override = {"sea2_dummy": (sea, "sea2_day")}
         island, island_r = isl.models["WS2_common_island"], isl.models["WS2_common_island_R"]
         sea_m = isl.models["WS2_common_sea"]
-        # WSR's fourth sea texgen is the environment lookup, but the 3DS has three texture
-        # coordinates. Route that lookup through the unused waterA matrix slot so the animated
-        # reflection atlas fits the existing three-unit TEV material.
-        water_mat = next(m for m in sea_m.materials if m.name == "mt_za_water")
-        water_mat.texgens[3]["matrix"] = 1
-        water_mat.srt[1]["scale"] = [0.25, 0.25]
-        water_mat.srt[1]["rot"] = 0.0
-        water_mat.srt[1]["trans"] = [0.0, 0.0]
+        three_unit_sea(sea_m)
         # the island (Wedge Island with it) at level 0, its edge-blend strips detail; a few nodes at
         # every level (FAR_FROM_ISLAND)
         def island_tag(node, mat):
@@ -900,19 +945,46 @@ class Stager:
 
         def sea_tag(node, mat):     # (the cave's water, _off, at level 0: R has no cave)
             return TAG_NEAR if mat in DETAIL_MATERIALS or mat.endswith("_off") else TAG_ALL
+
+        def at_level(node, mat, tris):  # (the flat sea's surface: MAT_SEA, under the wave grid)
+            y = tris[:, :, 1] - SEA_LEVEL
+            return (np.abs(y).min(1) < SEA_LEVEL_TOL) & (y.max(1) < SEA_SHORE) if mat == SEA_WATER else \
+                np.zeros(len(tris), bool)
         ns = self.bake_model(isl, sea_m, None, TAG_ALL, {WEDGE_FAR_NODES[1]}, self.sea_override, by_centroid=True,
-                             tag_of=sea_tag, select=lambda node, mat, tris: ~open_sea(node, mat, tris))
+                             tag_of=sea_tag, select=lambda node, mat, tris: ~open_sea(node, mat, tris) &
+                             ~at_level(node, mat, tris))
+        nsl = self.bake_model(isl, sea_m, None, TAG_ALL, {WEDGE_FAR_NODES[1]}, self.sea_override, by_centroid=True,
+                              tag_of=sea_tag, select=lambda node, mat, tris: ~open_sea(node, mat, tris) &
+                              at_level(node, mat, tris), variant="sea")
+        ns += nsl
         self.say("island: %d triangles in the cells (mode 13 with Wedge Island), island_V %d, island_R %d "
                  "(level 2), the sea near the shores and inland %d" % (n, nv, nr, ns))
         self.inv["island"] = dict(source="%s Island/G3D/WS2_common_island.brres" % SA, cell_triangles=n,
                                   island_V_triangles=nv, island_R_triangles=nr, sea_in_cells_triangles=ns,
                                   hidden_nodes=sorted(HIDDEN_MODE13), detail_materials=sorted(DETAIL_MATERIALS),
                                   far_from_island=sorted(FAR_FROM_ISLAND), island_R_left_out=sorted(R_LEFT_OUT))
-        # the open sea and the sky: models of their own; the sun a part of the sky
+        # the open sea and the sky: models of their own; the sun a part of the sky. The open sea lies
+        # at the sea's level whole: its water is MAT_SEA's
+        def open_level(m, d, tris):
+            keep = open_sea(m.nodes[d.node].name, mat_name(m, d), tris)
+            off = keep & ~at_level(m.nodes[d.node].name, mat_name(m, d), tris)
+            if off.any():
+                raise SystemExit("the open sea has %d triangles off its level" % int(off.sum()))
+            return keep
         self.sea_model, _ = self.cv.model(isl, sea_m, hidden={nd.name for nd in sea_m.nodes if nd.name != "Water_Sea"},
-                                          tex_override=self.sea_override,
-                                          select=lambda m, d, tris: open_sea(m.nodes[d.node].name, mat_name(m, d), tris))
+                                          tex_override=self.sea_override, select=open_level, variant="sea")
         self.register_materials(isl, sea_m, self.sea_override)
+        # the sea's water as the package has it: the inland waters' (plain), the flat sea's (MAT_SEA),
+        # and the wave grid's (stage_sea gives it the grid's shading): each animated by sea_P
+        water = next(m for m in sea_m.materials if m.name == SEA_WATER)
+        self.sea_waters = {v: self.cv.material(isl, sea_m, water, self.sea_override, variant=v)
+                           for v in (None, "sea", "grid")}
+        self.pkg.materials[self.sea_waters["sea"]].flags |= ng3d.MAT_SEA
+        grid_material(self.pkg.materials[self.sea_waters["grid"]])
+        self.say("the sea: %d triangles of the flat sea at its level in the cells (MAT_SEA), the open sea's %d" % (
+            nsl, sum(self.pkg.batches[b].n_indices // 3 for b in range(
+                self.pkg.models[self.sea_model].first_batch,
+                self.pkg.models[self.sea_model].first_batch + self.pkg.models[self.sea_model].n_batches))))
         self.sun = sunr = w.brres(SA, "Sun/G3D/WS2_common_sun_model.brres")
         penv = read_penv(w.get(*ENV_PENV))
         M, info = sun_matrix(penv)
@@ -1014,12 +1086,18 @@ class Stager:
             if (cls, extra_root) not in models:
                 path, mname = CLASSES[cls][2], CLASSES[cls][3][0]
                 r = w.brres(SA, path)
-                mi, nm = self.cv.model(r, r.models[mname], name="%s#%d" % (mname, cls) if extra_root else mname,
-                                       extra_root=extra_root, split=CAR_WHEELS if mname == "WS2_common_car" else ())
+                # (a moving boat with WSR's wake under it, as a part: WAKES)
+                parts = [convert.Part("wake", self.wake_brres(cls), self.wake_brres(cls).models[WAKES[cls][1]])] \
+                    if cls in WAKES else ()
+                mi, nm = self.cv.model(r, r.models[mname], name="%s#%d" % (mname, cls) if extra_root or parts else mname,
+                                       extra_root=extra_root, split=CAR_WHEELS if mname == "WS2_common_car" else (),
+                                       parts=parts)
                 models[(cls, extra_root)] = (r, r.models[mname], mi, nm)
             return models[(cls, extra_root)]
 
         def place(cls, model, anim, mtx, offset, flags=ng3d.INST_ANIMATED):
+            # (a boat leaves a trail as it moves: TRAIL_CLASSES)
+            flags |= ng3d.INST_TRAIL if cls in TRAIL_CLASSES else 0
             pkg.add("instances", model=model, flags=flags, anim=anim, class_id=cls,
                     mtx=[list(map(float, row)) for row in np.asarray(mtx)[:3]], anim_offset=float(offset),
                     cull_distance=INSTANCE_CULL.get(cls, 0.0))
@@ -1176,6 +1254,7 @@ class Stager:
                 class_id=0xFFFE, mtx=np.eye(4)[:3].tolist(), anim_offset=0.0, cull_distance=0.0)
         self.inv["falling"] = dict(source="Common/OmkScene/common.carc:G3D/WS2_omk_parachute.brres",
                                    model="WS2_omk_parachute_01", animation="WS2_omk_parachute_01 (30-frame CHR0)")
+        self.stage_wakes()
         self.say("instances: %s" % ", ".join("%s %d" % (CLASSES[c][0], n) for c, n in sorted(made.items())))
         for cls, n in made.items():
             self.inv["props"][cls]["instances"] = n
@@ -1188,6 +1267,47 @@ class Stager:
             "%s %.0f -> %.0f" % (pkg.string(pkg.models[mi].name), r0, r1) for mi, (r0, r1) in sorted(grown.items())))
         self.inv["model_radius_over_animation"] = {pkg.string(pkg.models[mi].name): [r0, r1]
                                                    for mi, (r0, r1) in sorted(grown.items())}
+
+    # ------------------------------------------------------------------------------- wakes
+    def wake_brres(self, cls):
+        return self.wsr.brres(SA, WAKES[cls][0])
+
+    def stage_wakes(self):
+        """WSR's wakes (WAKES): the moving cruisers' and the liner's, parts of their models (model_for),
+        their materials given the day's colours (CLR0 frame 0); the driven boat's, an instance of its
+        own (WAKE_CLASS, hidden: the island shows it, placed and faded) with a material of its own
+        (MAT_RUNTIME); the boats' trails' material and batch (TRAIL, made from the cruiser's wake: its
+        streaks and colours)."""
+        pkg = self.pkg
+        self.wake_mats = []    # (package material, the wake's brres, its model): stage_anims scrolls them
+        for cls, (path, mname) in sorted(WAKES.items()):
+            r = self.wake_brres(cls)
+            self.register_materials(r, r.models[mname])
+            for m in r.models[mname].materials:
+                mi = self.mat_by_name.get((mname, m.name))
+                if mi is not None:
+                    wake_registers(pkg.materials[mi], r.anims["CLR0"][mname], m.name)
+                    self.wake_mats.append((mi, r, mname))
+        r = self.wake_brres(33)
+        ef = r.models["WS2_common_cruiser_ef"]
+        mi, _ = self.cv.model(r, ef, name="WS2_common_cruiser_ef#driven", variant="driven")
+        for b in range(pkg.models[mi].first_batch, pkg.models[mi].first_batch + pkg.models[mi].n_batches):
+            M = pkg.materials[pkg.batches[b].material]
+            M.flags |= ng3d.MAT_RUNTIME
+            wake_registers(M, r.anims["CLR0"]["WS2_common_cruiser_ef"], "m_nami_ef")
+            self.wake_mats.append((pkg.batches[b].material, r, "WS2_common_cruiser_ef"))
+        pkg.add("instances", model=mi, flags=0, anim=ng3d.NONE16, class_id=WAKE_CLASS, mtx=np.eye(4)[:3].tolist(),
+                anim_offset=0.0, cull_distance=0.0)
+        # the trails' material: the wake's, its alpha the ribbons' (trail_material); its batch (stage_sea)
+        self.trail_material = self.cv.material(r, ef, ef.materials[0], variant="trail")
+        M = pkg.materials[self.trail_material]
+        trail_material(M)
+        wake_registers(M, r.anims["CLR0"]["WS2_common_cruiser_ef"], "m_nami_ef")
+        self.inv["wakes"] = dict(parts={CLASSES[c][0]: "%s %s" % (SA, p) for c, (p, _) in WAKES.items()},
+                                 driven="WS2_common_cruiser_ef#driven (class 0x%04X, MAT_RUNTIME)" % WAKE_CLASS,
+                                 trails=dict(TRAIL, classes=[CLASSES[c][0] for c in TRAIL_CLASSES]))
+        self.say("wakes: WSR's under the moving cruisers and the liner (parts), the driven boat's (an instance of "
+                 "its own, faded at run time); trails behind %s" % ", ".join(CLASSES[c][0] for c in TRAIL_CLASSES))
 
     # ------------------------------------------------------------------------------- the cells
     def build_cells(self):
@@ -1264,27 +1384,38 @@ class Stager:
         n += convert.add_clr0(ab, isl.anims["CLR0"]["WS2_common_island_V"], self.material_of("WS2_common_island_V"))
         self.world_clr = ab.end()
         out["world_clr"] = dict(frames=200, tracks=n, sources=["CLR0 WS2_common_island", "CLR0 WS2_common_island_V"])
-        # the sea: the Flyover's set (main.dol 0x806BE698: sea_P with sea_nami); 20,000 frames
+        # the sea: the Flyover's set (main.dol 0x806BE698: sea_P with sea_nami); 20,000 frames. sea_P's
+        # mt_za_water tracks go to each of its materials (the inland waters', the flat sea's, the wave
+        # grid's), its matrices 2 and 3 as the package's 1 and 2 (three_unit_sea; 1, jog_waterA's, has
+        # nothing left to move). And the wakes' foam scrolling back (their SRT0s: the cruiser's 120 frames
+        # 167 times, 0.2 % slower to fit; the liner's 400, 50 times)
         ab = convert.AnimBuilder(pkg, "sea_srt", 20000)
-        n = convert.add_srt0(ab, isl.anims["SRT0"]["WS2_common_sea_P"], self.texmtx_of("WS2_common_sea"),
-                             skip={("mt_za_water", 1)})
+        sea_p = isl.anims["SRT0"]["WS2_common_sea_P"]
+        n = convert.add_srt0(ab, sea_p, self.texmtx_of("WS2_common_sea"), skip={(SEA_WATER, j) for j in range(8)})
+
+        def matrix_in(mi, mname, remap=None):
+            m = pkg.materials[mi]
+
+            def f(name, j):
+                k = j if remap is None else remap.get(j)
+                return m.tex_mtx_first + k if name == mname and k is not None and k < m.n_tex_mtx else None
+            return f
+        for mi in self.sea_waters.values():
+            n += convert.add_srt0(ab, sea_p, matrix_in(mi, SEA_WATER, SEA_WATER_MATRIX))
         n += convert.add_srt0(ab, isl.anims["SRT0"]["WS2_common_sea_nami"], self.texmtx_of("WS2_common_sea"),
                               period=1000)
-        reflection_mtx = self.texmtx_of("WS2_common_sea")("mt_za_water", 1)
-        if reflection_mtx is not None:
-            # Sixteen prefiltered wave/reflection phases, stepping every 25 world frames and
-            # repeating every 400. The base SRT is quarter-scale, so these are 4x4 atlas cells.
-            s_keys, t_keys = [], []
-            for repeat in range(50):
-                for frame in range(16):
-                    at = float(repeat * 400 + frame * 25)
-                    s_keys.append((at, (frame % 4) * 0.25, 0.0))
-                    t_keys.append((at, (frame // 4) * 0.25, 0.0))
-            ab.add(ng3d.TT_TEXMTX_TRANS_S, reflection_mtx, s_keys, ng3d.IP_STEP, reg=1)
-            ab.add(ng3d.TT_TEXMTX_TRANS_T, reflection_mtx, t_keys, ng3d.IP_STEP, reg=1)
-            n += 2
+        wakes = 0
+        for mi, r, mname in self.wake_mats:
+            a = r.anims["SRT0"][mname]
+            laps = max(1, round(20000 / a.frames))
+            for mat in r.models[mname].materials:
+                wakes += convert.add_srt0(ab, a, matrix_in(mi, mat.name), period=20000 / laps,
+                                          time_scale=20000 / (laps * a.frames))
+        n += wakes
         self.sea_srt = ab.end()
-        out["sea_srt"] = dict(frames=20000, tracks=n, sources=["SRT0 WS2_common_sea_P", "SRT0 WS2_common_sea_nami"])
+        out["sea_srt"] = dict(frames=20000, tracks=n, sources=["SRT0 WS2_common_sea_P", "SRT0 WS2_common_sea_nami",
+                                                               "SRT0 WS2_common_cruiser_ef, _move_liner_ef"],
+                              water_materials=len(self.sea_waters), wake_tracks=wakes)
         ab = convert.AnimBuilder(pkg, "sea_clr", 1000)
         n = convert.add_clr0(ab, isl.anims["CLR0"]["WS2_common_sea_nami"], self.material_of("WS2_common_sea"))
         self.sea_clr = ab.end()
@@ -1552,6 +1683,164 @@ class Stager:
                                 tool=r.stdout.strip())
 
     # ------------------------------------------------------------------------------- collision
+    # ------------------------------------------------------------------------------- the sea
+    def stage_sea(self, kcl):
+        """The sea that moves (SEAW; SEA_* above, engine/g3d/sea.h): the waves, the amplitude map from
+        the collision, the wave grid's batch (its vertices about its centre, the grid material) and the
+        trails' (TRAIL: a placeholder buffer of the ribbons' layout, their fixed indices), the sea's
+        texture coordinates as a function of the place (fitted to the open sea's), the visible sun."""
+        pkg = self.pkg
+        isl = self.island
+        tris, attrs, normals = kcl
+        # ---- the amplitude map: the distance from land (not water, not a fence, reaching above y -3)
+        # on a raster of `raster` units over the land's box (and `margin` round it), as factors 0-1 a
+        # texel of `texel` units (the raster's averaged)
+        A = SEA_AMP
+        land = (attrs != 0x1106) & ~np.isin(attrs >> 8, (0x00, 0x08)) & (tris[:, :, 1].max(1) > SEA_LEVEL - 3.0)
+        lt = tris[land]
+        lo = lt[:, :, [0, 2]].reshape(-1, 2).min(0) - A["margin"]
+        hi = lt[:, :, [0, 2]].reshape(-1, 2).max(0) + A["margin"]
+        step = int(round(A["texel"] / A["raster"]))
+        cells = np.ceil((hi - lo) / A["texel"]).astype(int)
+        hi = lo + cells * A["texel"]
+        nx, nz = cells * step
+        mask = np.zeros((nz, nx), bool)
+        res = A["raster"]
+        # each land triangle's raster cells: the cells its box covers whose centres it covers, and the
+        # cells of its corners and middle (a sliver narrower than a cell)
+        tx, tz = lt[:, :, 0], lt[:, :, 2]
+        i0 = np.clip(np.floor((tx.min(1) - lo[0]) / res).astype(int), 0, nx - 1)
+        i1 = np.clip(np.floor((tx.max(1) - lo[0]) / res).astype(int), 0, nx - 1)
+        j0 = np.clip(np.floor((tz.min(1) - lo[1]) / res).astype(int), 0, nz - 1)
+        j1 = np.clip(np.floor((tz.max(1) - lo[1]) / res).astype(int), 0, nz - 1)
+        for pts in (lt[:, 0], lt[:, 1], lt[:, 2], lt.mean(1)):
+            ii = np.clip(np.floor((pts[:, 0] - lo[0]) / res).astype(int), 0, nx - 1)
+            jj = np.clip(np.floor((pts[:, 2] - lo[1]) / res).astype(int), 0, nz - 1)
+            mask[jj, ii] = True
+        for t in np.nonzero((i1 > i0) | (j1 > j0))[0]:
+            ci, cj = np.meshgrid(np.arange(i0[t], i1[t] + 1), np.arange(j0[t], j1[t] + 1))
+            px, pz = lo[0] + (ci + 0.5) * res, lo[1] + (cj + 0.5) * res
+            a, b, c = lt[t, 0], lt[t, 1], lt[t, 2]
+
+            def edge(p, q):
+                return (q[0] - p[0]) * (pz - p[2]) - (q[2] - p[2]) * (px - p[0])
+            e0, e1, e2 = edge(a, b), edge(b, c), edge(c, a)
+            inside = ((e0 >= 0) & (e1 >= 0) & (e2 >= 0)) | ((e0 <= 0) & (e1 <= 0) & (e2 <= 0))
+            mask[cj[inside], ci[inside]] = True
+        # the distance to the nearest land cell (its middle), within `whole`
+        reach = int(np.ceil(A["whole"] / res)) + 1
+        dist = np.full(mask.shape, np.inf)
+        dist[mask] = 0.0
+        padded = np.pad(mask, reach)
+        for dj in range(-reach, reach + 1):
+            for di in range(-reach, reach + 1):
+                d = math.hypot(di, dj) * res
+                if 0 < d <= A["whole"] + res:
+                    near = padded[reach + dj:reach + dj + nz, reach + di:reach + di + nx]
+                    dist[near] = np.minimum(dist[near], d)
+        t = np.clip((dist - A["calm"]) / (A["whole"] - A["calm"]), 0.0, 1.0)
+        amp = t * t * (3 - 2 * t)
+        amp = amp.reshape(cells[1], step, cells[0], step).mean((1, 3))
+        amp_bytes = np.rint(amp * 255).astype(np.uint8)
+        # ---- the grid: log-polar, `segments` around, rings from `inner` to `radius` (a ring's step
+        # its spacing along it), and a vertex in the middle
+        G = SEA_GRID
+        S = G["segments"]
+        q = math.exp(2 * math.pi / S)
+        rings = int(math.ceil(math.log(G["radius"] / G["inner"]) / math.log(q))) + 1
+        radii = G["inner"] * np.power(G["radius"] / G["inner"], np.arange(rings) / (rings - 1))
+        th = 2 * math.pi * np.arange(S) / S
+        P = [[0.0, 0.0, 0.0]]
+        for r in radii:
+            P += [[r * math.cos(a), 0.0, r * math.sin(a)] for a in th]
+        P = np.array(P, np.float32)
+        # (its triangles facing up as GX's front faces are wound: mt_za_water culls the back ones)
+        idx = []
+        for k in range(S):
+            idx += [0, 1 + k, 1 + (k + 1) % S]
+        for i in range(rings - 1):
+            for k in range(S):
+                a, b = 1 + i * S + k, 1 + i * S + (k + 1) % S
+                c, d = a + S, b + S
+                idx += [a, c, b, c, d, b]
+        grid_batch = self.raw_batch(self.sea_waters["grid"], P.tobytes(), len(P), ng3d.VA_POS, 12, 0, idx, P)
+        # ---- the trails: ribbons of pairs of vertices (position f32, colour, coordinates f32: the
+        # engine's world.cpp TRAIL_STRIDE) whose segments are two triangles
+        T = TRAIL
+        nb, ns = T["boats"], T["samples"]
+        tidx = []
+        for k in range(nb):
+            for j in range(ns - 1):
+                a = 2 * (k * ns + j)
+                tidx += [a, a + 1, a + 2, a + 2, a + 1, a + 3]
+        nv = 2 * nb * ns
+        trail_batch = self.raw_batch(self.trail_material, bytes(24 * nv), nv, ng3d.VA_POS | ng3d.VA_CLR | ng3d.VA_UV0,
+                                     24, ng3d.VB_UV_FLOAT, tidx, np.zeros((1, 3)), ng3d.BATCH_DYNAMIC)
+        # ---- the sea's texture coordinates at a place: fitted to the open sea's at its level
+        sea_m = isl.models["WS2_common_sea"]
+        shapes = {sh.index: sh for sh in sea_m.shapes}
+        mats = {m.index: m for m in sea_m.materials}
+        Ps, Us = [], []
+        for d in sea_m.draws("DrawOpa"):
+            if sea_m.nodes[d.node].name != "Water_Sea" or mats[d.mat].name != SEA_WATER:
+                continue
+            t = sea_m.shape_triangles(shapes[d.shape], world=True)
+            p3 = np.asarray(t["pos"], np.float64).reshape(-1, 3, 3)
+            u3 = np.asarray(t["uv0"], np.float64).reshape(-1, 3, 2)
+            keep = np.all(np.abs(p3[:, :, 1] - SEA_LEVEL) < SEA_LEVEL_TOL, axis=1)  # (flat ones only)
+            Ps.append(p3[keep].reshape(-1, 3)), Us.append(u3[keep].reshape(-1, 2))
+        Ps, Us = np.concatenate(Ps), np.concatenate(Us)
+        X = np.c_[Ps[:, 0], Ps[:, 2], np.ones(len(Ps))]
+        uv_map = [np.linalg.lstsq(X, Us[:, i], rcond=None)[0] for i in range(2)]
+        uv_err = max(float(np.abs(X @ uv_map[i] - Us[:, i]).max()) for i in range(2))
+        # ---- the record
+        sun = np.asarray(read_penv(self.wsr.get(*ENV_PENV))["pos"], np.float64)
+        sun /= np.linalg.norm(sun)
+        waves = []
+        for deg, length, ampl, phase in SEA_WAVES:
+            a = math.radians(deg)
+            waves.append(ng3d.Rec("SeaWave", dir=[math.sin(a), math.cos(a)], wavelength=length, amplitude=ampl,
+                                  speed=math.sqrt(SEA_G * length / (2 * math.pi)), phase=phase,
+                                  fade=[min(SEA_FADE[0] * length, 0.9 * G["radius"]),
+                                        min(SEA_FADE[1] * length, 0.95 * G["radius"])]))
+        pkg.sea = ng3d.Rec("Sea", waves=waves, level=SEA_LEVEL, amp_box=[float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])],
+                           amp_size=[int(cells[0]), int(cells[1])], grid_batch=grid_batch, trail_batch=trail_batch,
+                           grid_radius=G["radius"], grid_snap=G["snap"], grid_height=G["height"],
+                           uv_map=[[float(v) for v in m] for m in uv_map], sun=[float(v) for v in sun],
+                           shade=list(SEA_SHADE), trail_boats=nb, trail_samples=ns, trail_spacing=T["spacing"],
+                           trail_life=T["life"], trail_spread=T["spread"], trail_speed=T["speed"])
+        pkg.sea_amp = amp_bytes.tobytes()
+        whole = float((amp_bytes == 255).mean())
+        flat = float((amp_bytes == 0).mean())
+        self.say("the sea: %d waves (%s), an amplitude map of %dx%d over (%.0f, %.0f)-(%.0f, %.0f) (%.0f %% whole, "
+                 "%.0f %% flat), a grid of %d vertices and %d triangles (%d rings of %d to %.0f units), %d trails of "
+                 "%d samples; its texture coordinates fitted to within %.4f" % (
+                     len(waves), ", ".join("%.0f long, %.2f high, %.1f s" % (l, a, l / math.sqrt(SEA_G * l / (2 * math.pi)))
+                                           for _, l, a, _ in SEA_WAVES),
+                     cells[0], cells[1], lo[0], lo[1], hi[0], hi[1], 100 * whole, 100 * flat, len(P), len(idx) // 3,
+                     rings, S, G["radius"], nb, ns, uv_err))
+        self.inv["sea"] = dict(waves=[dict(direction_deg=d, wavelength=l, amplitude=a, phase=p) for d, l, a, p in SEA_WAVES],
+                               amplitude_map=dict(A, size=[int(cells[0]), int(cells[1])],
+                                                  box=[float(v) for v in list(lo) + list(hi)], whole_share=whole,
+                                                  flat_share=flat),
+                               grid=dict(G, vertices=len(P), triangles=len(idx) // 3, rings=rings),
+                               trails=T, shade=SEA_SHADE, sky=SEA_SKY, sun=[float(v) for v in sun],
+                               uv_map=[[float(v) for v in m] for m in uv_map], uv_fit_error=uv_err)
+
+    def raw_batch(self, material, data, count, attrs, stride, vflags, idx, P, bflags=0):
+        """A batch of its own (no model, no cell: the sea's grid and trails) over a vertex buffer of
+        `data` (count vertices of this layout), with these indices; its box from P."""
+        pkg = self.pkg
+        vb = pkg.add("vertex_buffers", count=count, attrs=attrs, stride=stride, flags=vflags, uv_scale=[0.0, 0.0],
+                     pos_origin=[0.0, 0.0, 0.0], pos_scale=0.0)
+        pkg.vertex_data.append(bytes(data))
+        first = len(pkg.indices)
+        pkg.indices.extend(int(i) for i in idx)
+        lo, hi = np.asarray(P).min(0), np.asarray(P).max(0)
+        pkg.add("batches", material=material, vbuf=vb, first_index=first, n_indices=len(idx),
+                bbox=[float(x) for x in list(lo) + list(hi)], node=NONE16, flags=bflags)
+        return len(pkg.batches) - 1
+
     def stage_collision(self):
         pkg, w = self.pkg, self.wsr
         all_t, all_a, all_n = [], [], []
@@ -1596,6 +1885,82 @@ class Stager:
                                              for c, v in trunks.items()})
         self.cylinders = [(c.x, c.z, c.y0, c.y1, c.radius) for c in pkg.cylinders]
         return kcl
+
+
+def three_unit_sea(sea_m):
+    """mt_za_water (WS2_common_sea's open sea) as three texture units: jog_waterA is only its indirect
+    map (dropped with the warp), so its texgens 2 (jog_waterB) and 3 (sea2) go through texture
+    matrices 1 and 2 with their own SRTs there (SEA_WATER_MATRIX; stage_anims moves sea_P's tracks
+    alike). Changes the brres material in place, before anything is converted from it."""
+    m = next(m for m in sea_m.materials if m.name == SEA_WATER)
+    for j, k in SEA_WATER_MATRIX.items():
+        m.srt[k] = dict(m.srt[j])
+        m.texgens[j]["matrix"] = k
+
+
+def tev_color_word(a, b, c, d, scale=0, dest=0):
+    """A GX TEV colour combiner word (BP 0xC0 + 2i, without its address): d + lerp(a, b, c), clamped,
+    times 2^scale, into dest (0 PREV). Inputs: 0 CPREV, 10 RASC, 11 RASA, 14 KONST, 15 ZERO..."""
+    return d | c << 4 | b << 8 | a << 12 | 1 << 19 | scale << 20 | dest << 22
+
+
+def tev_alpha_word(a, b, c, d, dest=0):
+    """A GX TEV alpha combiner word (BP 0xC1 + 2i): d + lerp(a, b, c), clamped, the swap tables 0.
+    Inputs: 0 APREV, 1 A0, 4 TEXA, 5 RASA, 6 KONST, 7 ZERO."""
+    return d << 4 | c << 7 | b << 10 | a << 13 | 1 << 19 | dest << 22
+
+
+def tev_field(word, lo, n, value):
+    return (word & ~(((1 << n) - 1) << lo)) | value << lo
+
+
+def grid_material(M):
+    """The wave grid's material (a variant of mt_za_water: its three units and stages, the flat sea's
+    look), with two stages more: times the colour channel's rgb, doubled (the vertices' shade, half
+    of it in the channel: sea.h), then plus SEA_SKY (konst 1) times its alpha (their brightening); the
+    channel's colour and alpha the vertex's, unlit. The grid's vertex program (and the host's soft
+    backend) give the vertices those."""
+    n = M.n_stages
+    M.color_env[n] = tev_color_word(15, 0, 10, 15, scale=1)       # cprev x rasc x 2
+    M.alpha_env[n] = tev_alpha_word(7, 7, 7, 0)                    # aprev
+    M.color_env[n + 1] = tev_color_word(15, 14, 11, 0)            # cprev + konst x rasa
+    M.alpha_env[n + 1] = tev_alpha_word(7, 7, 7, 0)
+    for k in (n, n + 1):
+        # no texture; the rasterised colour from channel 0 (TREF: map 7, coord 7, off, COLOR0A0)
+        lo = 12 * (k & 1)
+        M.tref[k // 2] = tev_field(M.tref[k // 2], lo, 12, 7 | 7 << 3)
+        # konst colour K1 (KCSEL 0x0D) for the second
+        M.ksel[k // 2] = tev_field(M.ksel[k // 2], 4 if not k & 1 else 14, 5, 0x0D)
+    M.n_stages = n + 2
+    M.tev_konst[1] = list(SEA_SKY) + [255]
+    M.n_chans = 1
+    M.chan_color = (M.chan_color & ~3) | 1
+    M.chan_alpha = (M.chan_alpha & ~3) | 1
+    M.flags &= ~(ng3d.MAT_FOG | ng3d.MAT_PRELIT)
+
+
+def wake_registers(M, clr0, mname):
+    """A wake material's colour registers at its CLR0's frame 0 (the day's: WSR picks the frame by the
+    time of day)."""
+    for t, x in clr0.materials.get(mname, {}).items():
+        reg = convert.CLR_TARGET_REG[t]
+        if ng3d.CR_TEV0 <= reg <= ng3d.CR_TEV2:
+            v = x["values"][0]
+            M.tev_reg[1 + reg - ng3d.CR_TEV0] = [(v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255]
+
+
+def trail_material(M):
+    """The boats' trails' material (a variant of the wake's m_nami_ef: ws2f_waterStream's streaks in
+    the wake's colours): its first stage alone, the foam's alpha times the vertices' (RASA, the
+    ribbon's fade, in place of the C0 alpha the wake's is multiplied by) instead of the bow wave's
+    mask; the channel's alpha the vertex's."""
+    if (M.alpha_env[0] >> 7) & 7 != 1:
+        raise SystemExit("the wake's material isn't what the trails are made from (stage 0 alpha %06x)" % M.alpha_env[0])
+    M.alpha_env[0] = tev_field(M.alpha_env[0], 7, 3, 5)
+    M.tref[0] = tev_field(M.tref[0], 7, 3, 0)
+    M.n_stages = 1
+    M.n_chans = 1
+    M.chan_alpha = (M.chan_alpha & ~3) | 1
 
 
 def batch_triangles(pkg, bi, M=None):
@@ -1722,6 +2087,7 @@ def main(argv=None):
     st.stage_instances()
     st.stage_anims()
     kcl = st.stage_collision()
+    st.stage_sea(kcl)
     st.stage_env()
     st.stage_markers(kcl)
     if not a.no_pvs:

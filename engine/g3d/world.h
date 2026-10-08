@@ -15,6 +15,13 @@
 //   * the sea (Env::sea_model) as an instance at the origin, each batch culled by its box;
 //   * the sky (Env::sky_model) first, centred on the eye (it follows the camera), every batch with
 //     DRAW_SKY (no depth test or write);
+//   * the sea's wave grid (fmt::Sea, sea.h) right after the sky, centred under the eye on the grid's
+//     lattice, while the eye is no higher than Sea::grid_height over the sea, the grid's box is in view
+//     and the amplitude map leaves it some waves; the sea's flat surface (fmt::MAT_SEA) then only where
+//     the grid didn't draw (DRAW_SEA_MASKED);
+//   * the trails behind moving boats (fmt::INST_TRAIL instances: each one's path sampled as it goes,
+//     the samples fading with their age) as one item first in the translucent pass, ribbons on the
+//     waves (DRAW_DYNAMIC: the packet's vertices), the nearest Sea::trail_boats of them;
 //   * of all these, a detail batch (fmt::BATCH_DETAIL) only within Env::detail_distance (times the
 //     LOD scale) of the eye, and an animated instance only where its meshes are in view as posed and
 //     a pixel across on the 3DS's screen (its bounding sphere spans the path they move on).
@@ -43,6 +50,7 @@
 #include "engine/g3d/material.h"
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/package.h"
+#include "engine/g3d/sea.h"
 #include "engine/math/vecmath.h"
 
 namespace engine::g3d {
@@ -76,6 +84,8 @@ struct WorldStats {
     u32 poses = 0;              // instances posed this frame (animated ones due, new LOD models)
     u32 translations = 0;       // material combiner translations in this frame's packets
     u32 translations_cached = 0;  // ... and register sets found among the last translations
+    u32 sea_grid = 0;           // the sea's wave grid drawn (1) or not
+    u32 trails = 0;             // the ribbons of the trails item (0: none drawn)
 };
 
 // what a World's speed-ups do (all on by default; off: as it was without them, for comparisons)
@@ -122,6 +132,18 @@ public:
     // are drawn at rest.
     int instance_node(u32 instance, const char* name) const;
     void set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]);
+    // A material's colour register set while the scene runs (as a CLR0 track sets it: fmt::ColorReg
+    // CR_MAT0, CR_AMB0, CR_TEV0-2, CR_KONST0-3; RGBA, the TEV's as GX's signed 11 bits): a material
+    // the package marks fmt::MAT_RUNTIME (a driven boat's wake, faded by its speed). Unchanged values
+    // cost nothing; changed ones a combiner translation when next drawn (the last few kept). Thread
+    // rule as set_instance_transform.
+    void set_material_register(u16 material, u8 reg, const s16 rgba[4]);
+
+    // the package's sea (sea.h; not valid() if it has none), and its surface under (x, z) at `seconds`
+    // (the World's clock: its frames / 60) as the grid about the camera's last eye draws it: height and
+    // normal (what a boat rides; Sea::height)
+    const Sea& sea() const;
+    f32 sea_height(f32 x, f32 z, double seconds, Vec3* normal = nullptr) const;
 
     // the speed-ups in use (WorldFeature bits)
     void set_features(u32 features);

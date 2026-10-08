@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
                                           fmt::SEC_BTCH, fmt::SEC_NODE, fmt::SEC_MODL, fmt::SEC_CELL, fmt::SEC_CBAT,
                                           fmt::SEC_INST, fmt::SEC_ANIM, fmt::SEC_TRAK, fmt::SEC_KEYS, fmt::SEC_ENVR,
                                           fmt::SEC_LITE, fmt::SEC_LSET, fmt::SEC_FOGS, fmt::SEC_MARK, fmt::SEC_CYLS,
-                                          fmt::SEC_BLOB, fmt::SEC_CVIS};
+                                          fmt::SEC_BLOB, fmt::SEC_CVIS, fmt::SEC_SEAW};
             bool known = false;
             for (u32 t : k_known)
                 known |= t == s.tag;

@@ -102,6 +102,8 @@ void Packet::reset() {
     matrices.assign(k_identity, k_identity + 12);
     mat_states.clear();
     items.clear();
+    sea.amp.clear();
+    dynamic.clear();
 }
 
 GxView native_draw_view() {

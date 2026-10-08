@@ -23,7 +23,8 @@
 //    them (an unlimited one's gain is written as a picture).
 //
 // The camera: NOMA_G3D_FOV (degrees, default 45), near 1.5 and far 80,000 package units, the
-// world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views.
+// world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views;
+// NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz adds a view of one's own, view_camera (eye, target).
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -517,8 +518,18 @@ void test_views() {
     const HostEfb e = gx_host_efb();
     double worst_ms = 0;
     u32 n_views = 0;
-    for (const fm::Marker& m : pkg->markers()) {
-        const char* name = pkg->str(m.name);
+    // (the package's views, and NOMA_G3D_CAMERA's as view_camera)
+    std::vector<fm::Marker> shown(pkg->markers().begin(), pkg->markers().end());
+    f32 c6[6];
+    if (const char* e = getenv("NOMA_G3D_CAMERA"))
+        if (sscanf(e, "%f,%f,%f,%f,%f,%f", &c6[0], &c6[1], &c6[2], &c6[3], &c6[4], &c6[5]) == 6) {
+            fm::Marker m = {};
+            m.name = 0xFFFFFFFFu, m.kind = fm::MK_CAMERA;
+            memcpy(m.position, c6, 12), memcpy(m.dir, c6 + 3, 12);
+            shown.push_back(m);
+        }
+    for (const fm::Marker& m : shown) {
+        const char* name = m.name == 0xFFFFFFFFu ? "view_camera" : pkg->str(m.name);
         if (strncmp(name, "view_", 5) != 0)
             continue;
         if (views && !strstr(views, name))

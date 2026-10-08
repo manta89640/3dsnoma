@@ -78,6 +78,7 @@ constexpr u32 SEC_COLL = tag('C', 'O', 'L', 'L');  // Collision[count] (raw KCL 
 constexpr u32 SEC_CYLS = tag('C', 'Y', 'L', 'S');  // Cylinder[count] (tree trunks etc.)
 constexpr u32 SEC_BLOB = tag('B', 'L', 'O', 'B');  // data the above point into (KCL bytes, ...)
 constexpr u32 SEC_CVIS = tag('C', 'V', 'I', 'S');  // cell visibility: a bit row per cell (Env::pvs_row_bytes)
+constexpr u32 SEC_SEAW = tag('S', 'E', 'A', 'W');  // Sea (one, optional), then its amplitude map
 
 // ---------------------------------------------------------------- textures
 // PICA texel formats (the numbering of citro3d's GPU_TEXCOLOR)
@@ -152,6 +153,9 @@ enum MatFlags : u32 {
     MAT_LIGHT_SET = 8,    // light_set is valid
     MAT_PRELIT = 16,      // its lighting is baked into the vertex colours (a static sun): drawn as an
                           // unlit material whose channel colour is the vertex's (no normals needed)
+    MAT_SEA = 32,         // the sea's flat surface at its level (Sea::level): not drawn where the wave
+                          // grid (Sea) drew this frame
+    MAT_RUNTIME = 64,     // the scene sets its colour registers while it runs (World::set_material_register)
 };
 
 struct Material {
@@ -224,6 +228,8 @@ struct Batch {
 enum BatchFlags : u16 {
     BATCH_DETAIL = 1,  // small detail (edge-blend strips, small props): drawn only nearer than
                        // Env::detail_distance
+    BATCH_DYNAMIC = 2, // its vertices are made each frame (the packet's): the buffer holds the layout and a
+                       // placeholder of the most it takes, the indices are fixed (the sea's trails)
 };
 static_assert(sizeof(Batch) == 40, "Batch");
 
@@ -274,6 +280,7 @@ enum InstFlags : u16 {
     INST_STATIC = 1,     // never moves (could be baked; kept as an instance for LOD)
     INST_COLLIDE = 2,    // has a trunk cylinder (CYLS)
     INST_ANIMATED = 4,   // plays `anim` (node tracks), looping
+    INST_TRAIL = 8,      // leaves a trail on the sea as it moves (a boat: Sea::trail_batch)
 };
 struct Instance {
     u16 model;           // MODL
@@ -396,5 +403,47 @@ struct Env {
     u32 reserved[5];
 };
 static_assert(sizeof(Env) == 96, "Env");
+
+// ---------------------------------------------------------------- the sea (optional: SEC_SEAW)
+// The sea's waves, which a grid of vertices that follows the camera draws over the open water near
+// it (engine/g3d/sea.h) and which boats ride: a sum of SEA_WAVES travelling waves, flattened where
+// the amplitude map says so (by the shores) and, each from its fade distances on, toward the grid's
+// rim (where its vertices are too far apart for it). The section is the Sea record, then its
+// amplitude map: amp_size[0] x amp_size[1] u8 (255: the waves whole, 0: flat), a row of x a z after
+// another, each texel's value at its centre; outside amp_box the waves are whole.
+constexpr int SEA_WAVES = 4;
+struct SeaWave {
+    f32 dir[2];          // the direction it travels (x, z; unit)
+    f32 wavelength;      // units
+    f32 amplitude;       // units: the crest over the mean
+    f32 speed;           // its phase speed, units a second
+    f32 phase;           // at the world's origin at time 0 (radians)
+    f32 fade[2];         // its amplitude whole within fade[0] of the grid's centre, none beyond fade[1]
+};
+static_assert(sizeof(SeaWave) == 32, "SeaWave");
+
+struct Sea {
+    SeaWave waves[SEA_WAVES];
+    f32 level;           // the sea's mean level (y): where MAT_SEA's surface lies
+    f32 amp_box[4];      // x0, z0, x1, z1: what the amplitude map covers
+    u16 amp_size[2];     // its texels across x and z
+    u16 grid_batch;      // the wave grid: a batch whose vertex buffer holds its vertices about its centre
+                         // (f32 positions at y 0) and whose material draws it (NONE16: no grid)
+    u16 trail_batch;     // the trails behind moving boats (BATCH_DYNAMIC): its material and the indices
+                         // of trail_boats ribbons of trail_samples pairs of vertices (NONE16: none)
+    f32 grid_radius;     // the grid's outer ring (units)
+    f32 grid_snap;       // its centre kept on a lattice of this (units): moved in steps
+    f32 grid_height;     // drawn while the eye is no higher than this over the level
+    f32 uv_map[2][3];    // the sea's texture coordinates at a world (x, z): u = [0] . (x, z, 1), v = [1] . ...
+    f32 sun[3];          // toward the sun (unit): where the waves glint
+    f32 shade[4];        // the grid's shading: diffuse, sky reflection, glint, glint exponent
+    u16 trail_boats, trail_samples;  // the trail batch's ribbons, and the pairs of vertices each has
+    f32 trail_spacing;   // a ribbon's samples this far apart along the path (units)
+    f32 trail_life;      // seconds a sample lasts
+    f32 trail_spread;    // units a second a ribbon's half width grows behind the boat
+    f32 trail_speed;     // units a second at which a boat leaves its trail whole (slower: fainter)
+    u32 reserved[4];
+};
+static_assert(sizeof(Sea) == 256, "Sea");
 
 }  // namespace engine::g3d::fmt

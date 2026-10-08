@@ -52,6 +52,8 @@
 
 extern "C" const uint8_t g3d_shbin[];
 extern "C" const size_t g3d_shbin_size;
+extern "C" const uint8_t g3d_sea_shbin[];
+extern "C" const size_t g3d_sea_shbin_size;
 
 namespace guest {
 
@@ -151,7 +153,8 @@ struct MatRes {
     bool projects = false;    // a unit maps the position (its rows depend on the matrix)
     UnitRes unit[3];
     u32 bools = 0;            // the shader's flags for it, but haslights
-    u32 pixel[6] = {};        // alpha test, depth and colour mask, blend, colour operation, logic op, cull
+    u32 pixel[8] = {};        // alpha test, depth and colour mask, blend, colour operation, logic op, cull,
+                              // stencil test and operation (off: the sea's items set them)
 };
 struct PkgRes {
     bool ok = false;
@@ -173,6 +176,10 @@ struct Regs {
     int mvp, nmtx, matc, selmat, ambc, selamb, sellit, lcfg, tsel, tmtx, lights;
     int b_lit, b_haslights, b_usenrm, b_proj0, b_tc1on, b_tc2on;  // (proj1, proj2 follow proj0)
 } R;
+// the sea's wave grid's program's (shaders/g3d_sea.v.pica)
+struct SeaRegs {
+    int mvp, tmtx, wkx, wkz, wph, wamp, wfa, wfb, eye, sun, sunr, shade;
+} SR;
 const int MAX_LIGHTS = 8;
 
 // The LOD bias the PICA gets is GX's. The GPU picks a level from the texels a pixel of the 3DS's
@@ -248,6 +255,13 @@ inline bool same_words(const u32 (&a)[N], const u32 (&b)[N]) {
 // drawn; the first is logged.
 const u32 ITEM_WORDS = 2048, GX_RESERVE_WORDS = 64u << 10;
 
+// The vertex data made each frame (the sea's: the wave grid's amplitudes, the boats' trails: native_draw.h
+// DRAW_SEA_GRID, DRAW_DYNAMIC), copied into a ring in linear memory where the GPU reads it, flushed
+// from the CPU's cache. A frame takes about 14 KB (9 KB of the grid's amplitudes, 4.6 KB of trails), so
+// a part of the ring is written again five frames later at the soonest: the GPU has drawn the frame
+// that read it by then (gx_pica.cpp's frame start waits for the frame before).
+const u32 RING_BYTES = 64u << 10;
+
 const f32 k_identity24[2][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}};
 
 // ---------------------------------------------------------------- the backend
@@ -261,6 +275,14 @@ public:
 private:
     DVLB_s* dvlb_ = nullptr;
     shaderProgram_s prog_;
+    // the sea's wave grid's program, and the ring the frame's vertex data goes into
+    DVLB_s* sea_dvlb_ = nullptr;
+    shaderProgram_s sea_prog_;
+    bool sea_ok_ = false;
+    u8* ring_ = nullptr;
+    u32 ring_at_ = 0;
+    u32 base_ = 0;         // the attribute buffers' base now (the package's, or lower for the ring's data)
+    u32 idx_base_ = 0;     // the package's indices from it
 
     // ---- what the GPU has in this packet (sent again only when it changes; ~0: unknown)
     u32 uv_[96][4];        // float uniforms as the GPU takes them (w, z, y, x)
@@ -271,7 +293,7 @@ private:
     u32 texenv_buf_ = ~0u;
     u32 units_[3][6];
     u32 unit_config_ = ~0u;
-    u32 pixel_[6];
+    u32 pixel_[8];
     int layout_ = -1, vbuf_ = -1;
     int light_set_ = -2;   // whose lights the uniforms hold
     u32 n_lights_ = 0;
@@ -323,7 +345,7 @@ private:
     // ---- NOMA_G3D_STATS
     int stats_every_ = 0;
     struct Stats {
-        u32 frames, draws, fog_draws, prelit_draws, triangles, indices, items_skipped;
+        u32 frames, draws, fog_draws, prelit_draws, triangles, indices, items_skipped, sea_draws, dynamic_draws;
         u32 mat_changes, matrices, matrices_made, uniform_vectors, cmd_words;
         u64 ticks, ticks_max_frame, ticks_frame;
     } st_ = {};
@@ -338,10 +360,16 @@ private:
     void set_bools(u32 bools);
     void set_lights(const g3::Packet& p, int set);
     void begin_packet(const PkgRes& r);
-    void set_layout(const PkgRes& r, int vbuf);
+    void configure(shaderProgram_s* prog);
+    u32 ring_put(const void* data, u32 size);
+    void use_base(u32 base, const PkgRes& r);
+    bool draw_sea_grid(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, const g3::Material& m,
+                       MatRes& mr);
+    void projection_rows(const f32 (*T)[4], f32 sx, f32 sy, f32 rows[3][4]) const;
+    void set_layout(const PkgRes& r, int vbuf, u32 dynamic_pa = 0);
     void set_texenv(const tev::Combiners& comb);
     void set_units(const UnitRes units[3]);
-    void set_pixel(const u32 pixel[6]);
+    void set_pixel(const u32 pixel[8]);
     void draw_batch(const PkgRes& r, const fmt::Batch& b);
     void make_material(PkgRes& r, u32 index, const g3::Material& m);
     MatrixEntry& matrices(const g3::Packet& p, const MatrixKey& key);
@@ -393,6 +421,23 @@ bool PicaBackend::init() {
         R.b_tc1on < 0 || R.b_tc2on < 0 || at("nlights") != 0x60) {
         log("g3d pica: the shader's flags are not where expected");
         return false;
+    }
+    // the sea's program (without it, or without the ring, the sea's grid isn't drawn: the flat sea is)
+    sea_dvlb_ = DVLB_ParseFile((u32*)g3d_sea_shbin, (u32)g3d_sea_shbin_size);
+    ring_ = (u8*)linearAlloc(RING_BYTES);
+    if (sea_dvlb_ && ring_) {
+        shaderProgramInit(&sea_prog_);
+        shaderProgramSetVsh(&sea_prog_, &sea_dvlb_->DVLE[0]);
+        shaderInstance_s* sv = sea_prog_.vertexShader;
+        auto sat = [&](const char* name) { return (int)shaderInstanceGetUniformLocation(sv, name); };
+        SR.mvp = sat("mvp"), SR.tmtx = sat("tmtx"), SR.wkx = sat("wkx"), SR.wkz = sat("wkz"), SR.wph = sat("wph");
+        SR.wamp = sat("wamp"), SR.wfa = sat("wfa"), SR.wfb = sat("wfb"), SR.eye = sat("eye"), SR.sun = sat("sun");
+        SR.sunr = sat("sunr"), SR.shade = sat("shade");
+        sea_ok_ = true;
+        for (int reg : {SR.mvp, SR.tmtx, SR.wkx, SR.wkz, SR.wph, SR.wamp, SR.wfa, SR.wfb, SR.eye, SR.sun, SR.sunr, SR.shade})
+            sea_ok_ &= reg >= 0 && reg < 95;
+        if (!sea_ok_)
+            log("g3d pica: the sea's program's uniforms are not all there: the sea is drawn flat");
     }
     if (const char* v = getenv("NOMA_G3D_LOD_BIAS"))
         s_lod_bias_add = (f32)atof(v);
@@ -632,11 +677,9 @@ void PicaBackend::set_lights(const g3::Packet& p, int set) {
 // a packet's start: the shader program and its constants, the attribute buffers' base, what the
 // GPU has taken as unknown
 void PicaBackend::begin_packet(const PkgRes& r) {
-    shaderProgramConfigure(&prog_, true, false);
-    shaderInstance_s* vsh = prog_.vertexShader;
-    for (u32 i = 0; i < vsh->numFloat24Uniforms; i++)
-        cmd_incremental(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
+    configure(&prog_);
     cmd_write(GPUREG_ATTRIBBUFFERS_LOC, r.base >> 3);
+    base_ = r.base, idx_base_ = r.idx_offset;
     static const u32 k_zero[33] = {};  // (buffers 1-11: none)
     cmd_incremental(GPUREG_ATTRIBBUFFER1_OFFSET, k_zero, 33);
     cmd_write(GPUREG_TEXENV_BUFFER_COLOR, 0xFFFFFFFF);
@@ -672,10 +715,47 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     mat_key_ = ~0u;
 }
 
+// a program: its code, entry point and outputs (shaderProgramConfigure), and its constants
+void PicaBackend::configure(shaderProgram_s* prog) {
+    shaderProgramConfigure(prog, true, false);
+    shaderInstance_s* vsh = prog->vertexShader;
+    for (u32 i = 0; i < vsh->numFloat24Uniforms; i++)
+        cmd_incremental(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32*)&vsh->float24Uniforms[i], 4);
+}
+
+// the frame's vertex data into the ring (16-byte aligned, from its start again when it doesn't fit),
+// flushed: where the GPU reads it (physical), 0 if it can't take it
+u32 PicaBackend::ring_put(const void* data, u32 size) {
+    if (!ring_ || !size || size > RING_BYTES)
+        return 0;
+    if (ring_at_ + size > RING_BYTES)
+        ring_at_ = 0;
+    u8* at = ring_ + ring_at_;
+    memcpy(at, data, size);
+    GSPGPU_FlushDataCache(at, size);
+    ring_at_ = (ring_at_ + size + 15) & ~15u;
+    return osConvertVirtToPhys(at);
+}
+
+// The attribute buffers' base: the package's, or lower, under the ring's data (the buffers' offsets
+// are unsigned, from it); the package's indices from it, its buffers' offsets sent again.
+void PicaBackend::use_base(u32 base, const PkgRes& r) {
+    if (base == base_)
+        return;
+    base_ = base;
+    idx_base_ = r.base + r.idx_offset - base;
+    cmd_write(GPUREG_ATTRIBBUFFERS_LOC, base >> 3);
+    vbuf_ = -1;
+}
+
 // the vertex buffer: its layout (the loaders, the shader inputs they feed, the fixed values) and
-// its place
-void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
+// its place (the package's buffer, or the frame's data at dynamic_pa: DRAW_DYNAMIC)
+void PicaBackend::set_layout(const PkgRes& r, int vbuf, u32 dynamic_pa) {
     const VbRes& vb = r.vbs[(u32)vbuf];
+    if (dynamic_pa)
+        use_base(std::min(r.base, dynamic_pa) & ~0xFu, r);
+    else
+        use_base(r.base, r);
     const Layout& L = s_layouts[vb.layout];
     if (vb.layout != layout_) {
         layout_ = vb.layout;
@@ -691,9 +771,9 @@ void PicaBackend::set_layout(const PkgRes& r, int vbuf) {
         }
         vbuf_ = -1;
     }
-    if (vbuf != vbuf_) {
-        vbuf_ = vbuf;
-        const u32 buf[3] = {vb.offset, L.buf_config1, L.buf_config2};
+    if (dynamic_pa || vbuf != vbuf_) {
+        vbuf_ = dynamic_pa ? -1 : vbuf;
+        const u32 buf[3] = {dynamic_pa ? dynamic_pa - base_ : r.base + vb.offset - base_, L.buf_config1, L.buf_config2};
         cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
     }
 }
@@ -741,7 +821,7 @@ void PicaBackend::set_units(const UnitRes units[3]) {
 }
 
 // the pixel pipeline's registers that differ (as citro3d's effect binding writes them)
-void PicaBackend::set_pixel(const u32 px[6]) {
+void PicaBackend::set_pixel(const u32 px[8]) {
     if (px[0] != pixel_[0])
         cmd_write(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
     if (px[1] != pixel_[1]) {
@@ -756,6 +836,10 @@ void PicaBackend::set_pixel(const u32 px[6]) {
         cmd_write(GPUREG_LOGIC_OP, px[4]);
     if (px[5] != pixel_[5])
         cmd_write(GPUREG_FACECULLING_CONFIG, px[5]);
+    if (px[6] != pixel_[6])
+        cmd_write(GPUREG_STENCIL_TEST, px[6]);
+    if (px[7] != pixel_[7])
+        cmd_write(GPUREG_STENCIL_OP, px[7]);
     memcpy(pixel_, px, sizeof(pixel_));
 }
 
@@ -765,7 +849,7 @@ void PicaBackend::draw_batch(const PkgRes& r, const fmt::Batch& b) {
     pica_native_draw_noted();
     cmd_masked(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
     cmd_write(GPUREG_RESTART_PRIMITIVE, 1);
-    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
+    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (idx_base_ + b.first_index * 2) | 1u << 31);
     cmd_write(GPUREG_NUMVERTICES, b.n_indices);
     cmd_write(GPUREG_VERTEX_OFFSET, 0);
     cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
@@ -845,6 +929,8 @@ void PicaBackend::make_material(PkgRes& r, u32 index, const g3::Material& m) {
     mr.pixel[3] = px.logic ? 0xE40000 : 0xE40100;  // (logic op, else blending; GL fragment ops)
     mr.pixel[4] = px.logic ? (u32)px.logic_op : (u32)GPU_LOGICOP_COPY;
     mr.pixel[5] = px.cull & 3;
+    mr.pixel[6] = (u32)GPU_ALWAYS << 4;  // (stencil test off)
+    mr.pixel[7] = 0;
 }
 
 // the material's colours and lights: colour channel 0 as GX computes it (register or vertex
@@ -910,22 +996,143 @@ void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3
                 rows[i][3] = sc[i] * (T[i][3] + 0.5f * (T[i][0] + T[i][1]));
             }
             break;
-        case g3::TexCoordSource::PROJECTION: {
-            double c[4][4];  // GX clip space, from the buffer's positions
-            mul44_34(proj_, mv_, c);
-            for (int j = 0; j < 4; j++) {
-                const double S = 0.5 * (c[3][j] + c[0][j]), Tt = 0.5 * (c[3][j] - c[1][j]), Q = c[3][j];
-                for (int i = 0; i < 2; i++)
-                    rows[i][j] = (f32)(sc[i] * (T[i][0] * S + T[i][1] * Tt + (T[i][2] + T[i][3]) * Q));
-                rows[2][j] = (f32)Q;
-            }
+        case g3::TexCoordSource::PROJECTION:
+            projection_rows(T, sc[0], sc[1], rows);
             break;
-        }
         }
         for (int i = 0; i < 3; i++)
             uni(R.tmtx + 3 * u + i, rows[i]);
         uni(R.tsel + u, sel);
     }
+}
+
+// a camera projection's rows (s, t, q) through the texture matrix T, of the positions the item's
+// model-view (mv_) takes: (0.5 w + 0.5 x, 0.5 w - 0.5 y, w) in GX's clip space; the padding's scale
+void PicaBackend::projection_rows(const f32 (*T)[4], f32 sx, f32 sy, f32 rows[3][4]) const {
+    double c[4][4];  // GX clip space, from the buffer's positions
+    mul44_34(proj_, mv_, c);
+    const f32 sc[2] = {sx, sy};
+    for (int j = 0; j < 4; j++) {
+        const double S = 0.5 * (c[3][j] + c[0][j]), Tt = 0.5 * (c[3][j] - c[1][j]), Q = c[3][j];
+        for (int i = 0; i < 2; i++)
+            rows[i][j] = (f32)(sc[i] * (T[i][0] * S + T[i][1] * Tt + (T[i][2] + T[i][3]) * Q));
+        rows[2][j] = (f32)Q;
+    }
+}
+
+// ---------------------------------------------------------------- the sea's wave grid
+// The grid's item (native_draw.h DRAW_SEA_GRID) with its own program (shaders/g3d_sea.v.pica): its
+// positions (the package's buffer) and the packet's amplitudes (into the ring) as two attribute buffers;
+// its uniforms -- the clip rows of its matrix, the waves (sea.h SeaWaves: the phases moved to the
+// buffer's origin, a hair from the grid's centre), the eye and the sun about the centre, the shading's
+// weights, and the texture rows: unit 0 the camera projection as any item's, units 1 and 2 the sea's
+// texture coordinates at a position (fmt::Sea::uv_map at the centre, its constant term in double and
+// brought within a repeat of the texture) through the material's matrices --; the material's
+// combiners, units and pixel state, marking what it draws in the stencil buffer (the packet's value:
+// the flat sea's items, DRAW_SEA_MASKED, aren't drawn there). Then the g3d program again, with nothing
+// it had in the float uniforms, the bools or the attribute layout taken as still there. False (not
+// drawn: the flat sea shows) without the program, the ring or the packet's amplitudes.
+bool PicaBackend::draw_sea_grid(const g3::Packet& p, const PkgRes& r, const g3::DrawItem& it, const g3::Material& m,
+                                MatRes& mr) {
+    const fmt::Sea* sp = p.package->sea();
+    const fmt::Batch& b = p.package->batches()[it.batch];
+    const VbRes& vb = r.vbs[b.vbuf];
+    const u32 n = p.package->vertex_buffers()[b.vbuf].count;
+    if (!sea_ok_ || !sp || vb.scale != 1.0f || p.sea.amp.size() < 4 * (size_t)n)
+        return false;
+    const u32 amp_pa = ring_put(p.sea.amp.data(), 4 * n);
+    if (!amp_pa)
+        return false;
+    const g3::MatDynamic* dyn = it.mat_state < p.mat_states.size() ? &p.mat_states[it.mat_state] : nullptr;
+    configure(&sea_prog_);
+    // ---- the attributes: buffer 0 the positions (f32 x 3: v0), buffer 1 the amplitudes (u8 x 4: v1)
+    use_base(std::min(r.base, amp_pa) & ~0xFu, r);
+    const u32 fmt_words[2] = {(u32)(2 << 2 | GPU_FLOAT) | (u32)(3 << 2 | GPU_UNSIGNED_BYTE) << 4, (0xFFFu & ~3u) << 16 | 1u << 28};
+    cmd_incremental(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
+    cmd_masked(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 1);
+    cmd_write(GPUREG_VSH_NUM_ATTR, 1);
+    const u32 perm[2] = {0x10, 0};
+    cmd_incremental(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
+    const u32 bufs[6] = {r.base + vb.offset - base_, 0, 12u << 16 | 1u << 28, amp_pa - base_, 1, 4u << 16 | 1u << 28};
+    cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, bufs, 6);
+    // ---- the uniforms
+    MatrixKey key;
+    key.matrix = it.matrix, key.scale = 1.0f;
+    memcpy(key.origin, vb.origin, sizeof(key.origin));
+    const MatrixEntry& e = matrices(p, key);
+    memcpy(mv_, e.mv, sizeof(mv_));
+    for (int i = 0; i < 4; i++)
+        uni(SR.mvp + i, e.mvp[i]);
+    const g3::SeaWaves& w = p.sea.waves;
+    f32 ph[4];
+    for (int i = 0; i < 4; i++)
+        ph[i] = w.phase[i] + w.kx[i] * vb.origin[0] + w.kz[i] * vb.origin[2];
+    uni(SR.wkx, w.kx), uni(SR.wkz, w.kz), uni(SR.wph, ph), uni(SR.wamp, w.amp);
+    uni(SR.wfa, w.fade_a), uni(SR.wfb, w.fade_b);
+    uni(SR.eye, p.sea.eye[0] - vb.origin[0], p.sea.eye[1] - vb.origin[1], p.sea.eye[2] - vb.origin[2], 0);
+    uni(SR.sun, sp->sun[0], sp->sun[1], sp->sun[2], 0);
+    uni(SR.sunr, -sp->sun[0], sp->sun[1], -sp->sun[2], 0);
+    uni(SR.shade, sp->shade);
+    f32 rows[7][4] = {};
+    const double ox = (double)p.sea.origin[0] + vb.origin[0], oz = (double)p.sea.origin[2] + vb.origin[2];
+    for (int u = 0; u < 3; u++) {
+        if (!mr.unit[u].on)
+            continue;
+        const g3::TexUnit& tu = m.unit[u];
+        const f32(*T)[4] = tu.matrix >= 0 && tu.matrix < 3 ? (dyn ? dyn->tex_mtx[tu.matrix] : m.tex_mtx[tu.matrix])
+                                                            : k_identity24;
+        if (u == 0) {
+            if (tu.source == g3::TexCoordSource::PROJECTION)
+                projection_rows(T, mr.unit[0].sx, mr.unit[0].sy, rows);
+            continue;
+        }
+        // (s, t) = T (u, v, 1, 1), (u, v) = uv_map (x, z, 1) at the centre plus the position
+        const double (*U)[3] = nullptr;
+        double um[2][3];
+        for (int i = 0; i < 2; i++)
+            for (int j = 0; j < 3; j++)
+                um[i][j] = sp->uv_map[i][j];
+        U = um;
+        const double cu = U[0][0] * ox + U[0][1] * oz + U[0][2], cv = U[1][0] * ox + U[1][1] * oz + U[1][2];
+        const f32 sc[2] = {mr.unit[u].sx, mr.unit[u].sy};
+        const u8 wrap[2] = {tu.wrap_s, tu.wrap_t};
+        for (int i = 0; i < 2; i++) {
+            double c = T[i][0] * cu + T[i][1] * cv + T[i][2] + T[i][3];
+            const double period = wrap[i] == 2 ? 1.0 : wrap[i] == 3 ? 2.0 : 0.0;  // (repeat, mirrored repeat)
+            if (period > 0)
+                c -= period * std::floor(c / period);
+            f32* row = rows[1 + 2 * u + i];
+            row[0] = (f32)(sc[i] * (T[i][0] * U[0][0] + T[i][1] * U[1][0]));
+            row[1] = 0;
+            row[2] = (f32)(sc[i] * (T[i][0] * U[0][1] + T[i][1] * U[1][1]));
+            row[3] = (f32)(sc[i] * c);
+        }
+    }
+    for (int i = 0; i < 7; i++)
+        uni(SR.tmtx + i, rows[i]);
+    // ---- the material, marking its pixels in the stencil buffer (where the depth test passes)
+    set_texenv(dyn ? dyn->comb : m.comb);
+    set_units(mr.unit);
+    u32 pixel[8];
+    memcpy(pixel, mr.pixel, sizeof(pixel));
+    pixel[6] = 1 | (u32)GPU_ALWAYS << 4 | 0xFFu << 8 | (u32)p.sea.stencil << 16 | 0xFFu << 24;
+    pixel[7] = GPU_STENCIL_KEEP | GPU_STENCIL_KEEP << 4 | GPU_STENCIL_REPLACE << 8;
+    set_pixel(pixel);
+    draw_batch(r, b);
+    // ---- back: buffer 1 none, the g3d program, what it had taken as unknown
+    static const u32 k_none[3] = {};
+    cmd_incremental(GPUREG_ATTRIBBUFFER1_OFFSET, k_none, 3);
+    configure(&prog_);
+    memset(uv_, 0xFF, sizeof(uv_));
+    dirty_lo_ = 0, dirty_hi_ = 0;
+    bools_ = int0_ = ~0u;
+    layout_ = vbuf_ = -1;
+    light_set_ = -2;
+    mcur_ = nullptr;
+    mkey_ = MatrixKey();
+    mat_key_ = ~0u;
+    rows_uv_[0] = rows_uv_[1] = 0;
+    return true;
 }
 
 // ---------------------------------------------------------------- matrices
@@ -1076,12 +1283,12 @@ void PicaBackend::fog_pass(const g3::Material& m, const fmt::Batch& b, const Pkg
         func = GPU_GEQUAL;
     else if (px.depth_test)
         func = px.depth_func & 7u;
-    const u32 pixel[6] = {
+    const u32 pixel[8] = {
         0,  // no alpha test
         1 | func << 4 | (u32)(GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE) << 8,
         GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_SRC_ALPHA << 16 | GPU_ONE_MINUS_SRC_ALPHA << 20 | GPU_ZERO << 24 |
             (u32)GPU_ONE << 28,
-        0xE40100, GPU_LOGICOP_COPY, (u32)(px.cull & 3)};
+        0xE40100, GPU_LOGICOP_COPY, (u32)(px.cull & 3), (u32)GPU_ALWAYS << 4, 0};
     set_pixel(pixel);
     for (int i = 0; i < 3; i++)
         uni(R.tmtx + i, rows[i]);
@@ -1159,7 +1366,23 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
         const g3::MatDynamic* dyn = it.mat_state < p.mat_states.size() ? &p.mat_states[it.mat_state] : nullptr;
         const bool sky = it.flags & g3::DRAW_SKY;
         const VbRes& vb = r->vbs[b.vbuf];
-        set_layout(*r, b.vbuf);
+        // the sea's wave grid: its own program (draw_sea_grid)
+        if (it.flags & g3::DRAW_SEA_GRID) {
+            if (draw_sea_grid(p, *r, it, m, mr)) {
+                st_.draws++, st_.sea_draws++, st_.triangles += b.n_indices / 3, st_.indices += b.n_indices;
+            }
+            continue;
+        }
+        // (a dynamic item's vertices: the packet's, into the ring)
+        u32 dynamic_pa = 0;
+        if (it.flags & g3::DRAW_DYNAMIC) {
+            const fmt::VertexBuffer& fvb = p.package->vertex_buffers()[b.vbuf];
+            if (p.dynamic.size() < (size_t)fvb.count * fvb.stride ||
+                !(dynamic_pa = ring_put(p.dynamic.data(), fvb.count * fvb.stride)))
+                continue;
+            st_.dynamic_draws++;
+        }
+        set_layout(*r, b.vbuf, dynamic_pa);
         // its matrices (an overlay pulled toward the eye by its box's furthest corner: native_draw.h
         // overlay_pull, from the model-view in package units)
         MatrixKey key;
@@ -1200,10 +1423,12 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             for (int i = 0; i < 3; i++)
                 uni(R.nmtx + i, mcur_->nmtx[i]);
         }
-        u32 pixel[6];
+        u32 pixel[8];
         memcpy(pixel, mr.pixel, sizeof(pixel));
         if (sky)  // (no depth test or write)
             pixel[1] = 1 | (u32)GPU_ALWAYS << 4 | (pixel[1] & 0xF00);
+        if (it.flags & g3::DRAW_SEA_MASKED)  // (not where the wave grid marked: native_draw.h)
+            pixel[6] = 1 | (u32)GPU_NOTEQUAL << 4 | (u32)p.sea.stencil << 16 | 0xFFu << 24;
         set_pixel(pixel);
         set_bools(mr.bools | (n_lights_ && (mr.bools >> R.b_lit & 1) ? 1u << R.b_haslights : 0));
         if (new_mat || vb.uv_scale[0] != rows_uv_[0] || vb.uv_scale[1] != rows_uv_[1] || (moved && mr.projects)) {
@@ -1220,6 +1445,12 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             st_.fog_draws++;
         }
     }
+    // the stencil test off again (the GX path never uses it), the package's base
+    if (pixel_[6] != ~0u && (pixel_[6] & 1)) {
+        cmd_write(GPUREG_STENCIL_TEST, (u32)GPU_ALWAYS << 4);
+        cmd_write(GPUREG_STENCIL_OP, 0);
+    }
+    use_base(r->base, *r);
     // unit 0 left an ordinary 2D texture (a projection one samples by texcoord0w, which the GX
     // shader doesn't write)
     if (units_[0][2] != ~0u && ((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION)
@@ -1252,12 +1483,14 @@ void PicaBackend::stats_packet(const g3::Packet& p, const PkgRes& r, u64 ticks, 
     for (const TexRes& t : r.texs)
         textures += t.data != nullptr;
     const double max_ms = (double)std::max(st_.ticks_max_frame, st_.ticks_frame) * ms;
-    log("g3d pica: %u frames: %.0f draws (%.0f prelit, %.0f fog passes), %.0f triangles, %.0f indices a frame; "
+    log("g3d pica: %u frames: %.0f draws (%.0f prelit, %.0f fog passes, %.1f wave grids, %.1f trails), %.0f triangles, "
+        "%.0f indices a frame; "
         "%.2f ms a frame in the backend (at most %.2f); %.0f material changes, %.0f matrix changes (%.0f made), "
         "%.0f uniform vectors, %.0f command words a frame; %u items not drawn (command list full; the last frame's "
         "list %.0f %% of it); resident: %u textures %u KB, vertices %u KB, indices %u KB; %u KB of the linear heap "
         "free",
-        (unsigned)st_.frames, st_.draws / f, st_.prelit_draws / f, st_.fog_draws / f, st_.triangles / f,
+        (unsigned)st_.frames, st_.draws / f, st_.prelit_draws / f, st_.fog_draws / f, st_.sea_draws / f,
+        st_.dynamic_draws / f, st_.triangles / f,
         st_.indices / f, (double)st_.ticks * ms / f, max_ms, st_.mat_changes / f, st_.matrices / f,
         st_.matrices_made / f, st_.uniform_vectors / f, st_.cmd_words / f, (unsigned)st_.items_skipped,
         (double)C3D_GetCmdBufUsage() * 100.0, (unsigned)textures,

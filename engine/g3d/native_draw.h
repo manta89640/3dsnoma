@@ -27,6 +27,7 @@
 
 #include "engine/g3d/material.h"
 #include "engine/g3d/package.h"
+#include "engine/g3d/sea.h"
 
 namespace engine::g3d {
 
@@ -44,7 +45,16 @@ struct DrawItem {
     u16 flags;         // DRAW_* below
 };
 enum : u16 {
-    DRAW_SKY = 1,      // the sky dome: follows the camera, no depth test or write, drawn first
+    DRAW_SKY = 1,         // the sky dome: follows the camera, no depth test or write, drawn first
+    // The sea (sea.h; the packet's `sea`): the wave grid (its batch's vertices about its centre, moved
+    // by the waves; its item's matrix a translation to the centre), drawn before the sea's flat surface
+    // and marking the pixels it drew in the stencil buffer (Packet::SeaDraw::stencil); the flat surface's
+    // items (fmt::MAT_SEA) then drawn only where it didn't, so that a trough never shows the flat sea
+    // over it and the rim meets it without a seam.
+    DRAW_SEA_GRID = 2,
+    DRAW_SEA_MASKED = 4,
+    DRAW_DYNAMIC = 8,     // its vertices are the packet's `dynamic` (fmt::BATCH_DYNAMIC: its batch's
+                          // layout and indices), positions about its matrix's translation
 };
 
 // Overlays (material.h is_overlay: translucent, depth tested, writing no depth -- the island's Kiwa and
@@ -123,6 +133,18 @@ struct Packet {
     std::vector<f32> matrices;     // 12 floats each (3x4), [0] = identity
     std::vector<MatDynamic> mat_states;
     std::vector<DrawItem> items;   // in draw order
+    // the sea's wave grid, for a DRAW_SEA_GRID item: its centre (package units: the item's matrix),
+    // the waves about it now, the eye from it, the stencil value it marks its pixels with (a frame's
+    // own, 1-255: last frame's marks never count), and each grid vertex's amplitude (4 bytes a vertex:
+    // Sea::grid_amplitudes)
+    struct SeaDraw {
+        f32 origin[3] = {};
+        SeaWaves waves;
+        f32 eye[3] = {};
+        u8 stencil = 1;
+        std::vector<u8> amp;
+    } sea;
+    std::vector<u8> dynamic;       // a DRAW_DYNAMIC item's vertices
 
     void reset();                  // empty, for the next frame (keeps the vectors' memory)
 };
