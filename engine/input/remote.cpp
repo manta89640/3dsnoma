@@ -16,6 +16,14 @@ namespace guest {
 namespace {
 WiimoteInput s_in;  // set by the platform layer
 bool s_stick_mode;  // set by a native scene
+// Between two of the game's reads (KPADReadEx, once a game frame) the platform sets the input every
+// retrace: a button pressed and let go in between would never be seen held. s_pressed: the buttons
+// pressed since the last read, shown held at the next one (and let go at the one after).
+u16 s_prev_buttons, s_pressed;
+// A tap is a press (the 3DS's touch screen as one, not only a pointer): when the touch ends, the
+// game's cursor gets A where it was, as touching then pressing A did. Not in stick mode (a scene
+// that walks something about: there A is the scene's, a jump on Wuhu Island).
+bool s_was_touching, s_tap;
 }
 
 // NOMA_OLD3DS=1: an Old 3DS's controls on any machine (a New 3DS, an emulator, the host's scripts):
@@ -35,6 +43,23 @@ void wiimote_set_input(const WiimoteInput& in) {
         s_in.pad &= ~(PAD_ZL | PAD_ZR);
         s_in.cam_x = s_in.cam_y = 0;
     }
+    s_pressed |= s_in.buttons & ~s_prev_buttons;
+    s_prev_buttons = s_in.buttons;
+    if (s_was_touching && !s_in.touching && !s_stick_mode)
+        s_tap = true;
+    s_was_touching = s_in.touching;
+}
+
+// the game's read takes the latched presses and the tap (KPADReadEx)
+u16 wiimote_take_pressed() {
+    u16 p = s_pressed;
+    s_pressed = 0;
+    return p;
+}
+bool wiimote_take_tap() {
+    bool t = s_tap;
+    s_tap = false;
+    return t;
 }
 const WiimoteInput& wiimote_input() { return s_in; }
 void input_set_stick_mode(bool on) { s_stick_mode = on; }
@@ -67,6 +92,12 @@ enum : u8 { WPAD_DEV_CORE = 0, WPAD_FMT_CORE_ACC_DPD = 2, DPD_TWO_POINTS = 2 };
 bool s_ready;
 u32 s_hold;          // the buttons at the last read
 float s_x, s_y;      // the pointer at the last read
+// A tap's A, held for one read: once the pointer has been on the screen for TAP_READY reads (the
+// game's cursor (layout_Cursor_Update) takes no press for 10 frames after the pointer comes back,
+// as a remote's pointer settles); a tap before then waits for it.
+const u32 TAP_READY = 11;
+u32 s_pointing_reads;  // reads in a row with the pointer on the screen
+bool s_tap_waiting;    // a tap, its A not given yet
 
 void store_f32(u32 a, float v) {
     u32 bits;
@@ -95,12 +126,23 @@ u32 KPADReadEx(u32 chan, u32 samples, u32 length, u32 result) {
         float x = s_x, y = s_y;
         if (in.pointing)
             x = in.x, y = in.y;
+        s_pointing_reads = in.pointing ? s_pointing_reads + 1 : 0;
+        if (guest::wiimote_take_tap())
+            s_tap_waiting = in.pointing;
+        if (!in.pointing || (s_hold & guest::WM_A))
+            s_tap_waiting = false;  // (the pointer gone, or A held anyway: no press later on)
+        // what is held now, with what was pressed and let go since the last read (not held then)
+        u32 held = in.buttons | (guest::wiimote_take_pressed() & ~s_hold);
+        if (s_tap_waiting && s_pointing_reads >= TAP_READY) {
+            held |= guest::WM_A;
+            s_tap_waiting = false;
+        }
         u32 st = samples;
         for (u32 k = 0; k < KS_SIZE; k += 4)
             guest::store32(st + k, 0);
-        guest::store32(st + KS_HOLD, in.buttons);
-        guest::store32(st + KS_TRIG, in.buttons & ~s_hold);
-        guest::store32(st + KS_RELEASE, s_hold & ~in.buttons);
+        guest::store32(st + KS_HOLD, held);
+        guest::store32(st + KS_TRIG, held & ~s_hold);
+        guest::store32(st + KS_RELEASE, s_hold & ~held);
         store_f32(st + KS_ACC + 4, -1.0f);  // held level, pointing at the screen
         store_f32(st + KS_ACC_VALUE, 1.0f);
         store_f32(st + KS_POS, x), store_f32(st + KS_POS + 4, y);
@@ -112,7 +154,7 @@ u32 KPADReadEx(u32 chan, u32 samples, u32 length, u32 result) {
         guest::store8(st + KS_DEV_TYPE, WPAD_DEV_CORE);
         guest::store8(st + KS_DPD_VALID, in.pointing ? DPD_TWO_POINTS : 0);
         guest::store8(st + KS_DATA_FORMAT, WPAD_FMT_CORE_ACC_DPD);
-        s_hold = in.buttons, s_x = x, s_y = y;
+        s_hold = held, s_x = x, s_y = y;
         n = 1;
     }
     if (result)

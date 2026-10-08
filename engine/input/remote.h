@@ -49,6 +49,11 @@ struct WiimoteInput {
 // 3DS doesn't have (ZL, ZR, the C-stick)
 void wiimote_set_input(const WiimoteInput& in);
 bool input_old3ds();
+// For KPADReadEx (remote.cpp), at the game's read: the buttons pressed since the last read (a press
+// and its release between two reads still counts), and whether the touch screen was tapped (let go;
+// not in stick mode), which the game's cursor gets as A: a tap presses what it is on.
+u16 wiimote_take_pressed();
+bool wiimote_take_tap();
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

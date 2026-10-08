@@ -282,6 +282,7 @@ static void scripted_input() {
     in.buttons = in.pad = 0;
     in.pointing = true;
     in.stick_x = in.stick_y = in.cam_x = in.cam_y = 0;
+    in.touching = false;  // (a T(x;y) event touches while it lasts)
     input_script_apply(in);
     wiimote_set_input(in);
 }

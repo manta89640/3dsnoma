@@ -663,6 +663,57 @@ void selftest_input() {
         in.touch_y, in.x, in.y, ok ? "ok" : "MISMATCH");
 }
 
+// NOMA_SELFTEST=input, the game's reads (KPADReadEx) against the platform's input set every retrace:
+// a press and its release between two reads seen held at one read and let go at the next; a tap
+// (touch, let go) as A once the pointer has been on the screen for 11 reads, held for one read; no
+// tap in stick mode
+void selftest_kpad() {
+    const u32 st = 0x81600000;  // (a KPADStatus in guest memory nothing else uses here)
+    g::KPADInitEx(0, 0);
+    auto read = [&]() {
+        g::KPADReadEx(0, st, 1, 0);
+        return std::pair<u32, u32>(guest::load32(st + 0x00), guest::load32(st + 0x04));  // hold, trigger
+    };
+    WiimoteInput in;
+    in.buttons = 0, in.pointing = true;
+    bool ok = true;
+    // a B press and release between two reads
+    wiimote_set_input(in);
+    read();
+    in.buttons = WM_B, wiimote_set_input(in);
+    in.buttons = 0, wiimote_set_input(in);
+    auto r1 = read(), r2 = read();
+    ok &= r1.first == WM_B && r1.second == WM_B && r2.first == 0;
+    // a tap: the A press waits for the pointer's 11th read on the screen, then lasts one read
+    for (int i = 0; i < 20; i++)
+        read();  // (the pointer has been on the screen for a while)
+    in.touching = true, in.touch_x = 100, in.touch_y = 50, wiimote_set_input(in);
+    read();
+    in.touching = false, wiimote_set_input(in);
+    auto t1 = read(), t2 = read();
+    ok &= t1.first == WM_A && t1.second == WM_A && t2.first == 0;
+    // a tap just after the pointer came back: A at its 11th read
+    in.pointing = false, wiimote_set_input(in), read();
+    in.pointing = true, in.touching = true, wiimote_set_input(in), read();
+    in.touching = false, wiimote_set_input(in);
+    int at = 0;
+    for (int i = 2; i <= 14 && !at; i++)
+        if (read().second == WM_A)
+            at = i;
+    ok &= at == 11;
+    // stick mode: a tap is no press
+    input_set_stick_mode(true);
+    in.touching = true, wiimote_set_input(in), read();
+    in.touching = false, wiimote_set_input(in);
+    bool none = true;
+    for (int i = 0; i < 14; i++)
+        none &= read().first == 0;
+    input_set_stick_mode(false);
+    ok &= none;
+    log("selftest input: KPAD reads: press between reads hold %X/%X, tap A %X then %X, a tap at read %d, stick mode %s: %s",
+        r1.first, r2.first, t1.first, t2.first, at, none ? "no press" : "PRESSED", ok ? "ok" : "MISMATCH");
+}
+
 void selftest_walk() {
     const char* dir = getenv("NOMA_KCL_DIR");
     if (!dir) {
