@@ -11,6 +11,7 @@
 #include "engine/soundplayer/catalog.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <set>
 
@@ -107,6 +108,13 @@ const Named NAMES[] = {
     {"SEQ_SE_130_COMPANY_LOGO_H", u"企業ロゴ H", true},
 };
 
+// the channel's jingles' heading in the list
+const char16_t* const JINGLES = u"ジングル";
+
+// the staged games' list (tools/music/stage_music.py), under the data directory
+const char* const SPORTS_LIST = "/music/sports.tsv";
+const char* const SPORTS_DIR = "/music/sports/";
+
 // a label the table doesn't know, in words: "SEQ_BGM_SOMETHING_NEW" -> "SOMETHING NEW"
 std::u16string name_of_label(const std::string& label) {
     std::string s = label.compare(0, 8, "SEQ_BGM_") == 0 ? label.substr(8) : label;
@@ -114,6 +122,66 @@ std::u16string name_of_label(const std::string& label) {
     for (char c : s)
         n += (char16_t)(c == '_' ? ' ' : c);
     return n;
+}
+
+std::u16string from_utf8(const std::string& s) {
+    std::u16string out;
+    for (size_t i = 0; i < s.size();) {
+        u8 c = (u8)s[i];
+        u32 cp, n;
+        if (c < 0x80)
+            cp = c, n = 1;
+        else if ((c & 0xE0) == 0xC0)
+            cp = c & 0x1F, n = 2;
+        else if ((c & 0xF0) == 0xE0)
+            cp = c & 0x0F, n = 3;
+        else
+            cp = c & 0x07, n = 4;
+        for (u32 k = 1; k < n && i + k < s.size(); k++)
+            cp = cp << 6 | ((u8)s[i + k] & 0x3F);
+        i += n;
+        if (cp < 0x10000)
+            out += (char16_t)cp;
+    }
+    return out;
+}
+
+// The games' music, from DATA/music/sports.tsv: a line a heading ("#\tHEADING") or a piece
+// ("FILE\tFLAGS\tNAME", FLAGS "j" for a jingle), in the list's order. Nothing if not staged.
+void read_streams(std::vector<Track>& out) {
+    std::string dir = guest::data_dir();
+    FILE* f = std::fopen((dir + SPORTS_LIST).c_str(), "rb");
+    if (!f)
+        return;
+    std::string text;
+    char buf[4096];
+    size_t got;
+    while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        text.append(buf, got);
+    std::fclose(f);
+    std::u16string heading;
+    u32 n = 0;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        at = end == std::string::npos ? text.size() : end + 1;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        size_t t1 = line.find('\t');
+        if (t1 == std::string::npos)
+            continue;
+        if (line.compare(0, t1, "#") == 0) {
+            heading = from_utf8(line.substr(t1 + 1));
+            continue;
+        }
+        size_t t2 = line.find('\t', t1 + 1);
+        if (t2 == std::string::npos)
+            continue;
+        bool jingle = line.compare(t1 + 1, t2 - t1 - 1, "j") == 0;
+        out.push_back({STREAM_ID + n++, from_utf8(line.substr(t2 + 1)), jingle, heading,
+                       dir + SPORTS_DIR + line.substr(0, t1)});
+    }
+    guest::log("soundplayer: %u pieces of Wii Sports and Wii Sports Resort (%s)", n, SPORTS_LIST);
 }
 
 std::vector<Track> read_catalog() {
@@ -166,20 +234,21 @@ std::vector<Track> read_catalog() {
         auto it = by_label.find(n.label);
         if (it == by_label.end() || (!n.jingle && !it->second.music))
             continue;
-        out.push_back({it->second.id, n.name, n.jingle});
+        out.push_back({it->second.id, n.name, n.jingle, n.jingle ? JINGLES : u"", {}});
         by_label.erase(it);
     }
     // music the table doesn't name (none in this archive) goes before the jingles
     std::vector<Track> more;
     for (const auto& kv : by_label)
         if (kv.second.music)
-            more.push_back({kv.second.id, name_of_label(kv.first), false});
+            more.push_back({kv.second.id, name_of_label(kv.first), false, u"", {}});
     std::sort(more.begin(), more.end(), [](const Track& a, const Track& b) { return a.sound_id < b.sound_id; });
     auto first_jingle = std::find_if(out.begin(), out.end(), [](const Track& t) { return t.jingle; });
     out.insert(first_jingle, more.begin(), more.end());
     u32 n_music = (u32)std::count_if(out.begin(), out.end(), [](const Track& t) { return !t.jingle; });
     guest::log("soundplayer: %u sounds in the archive: %u pieces of music, %u jingles", n_sounds, n_music,
                (u32)out.size() - n_music);
+    read_streams(out);
     return out;
 }
 
@@ -188,6 +257,13 @@ std::vector<Track> read_catalog() {
 const std::vector<Track>& catalog() {
     static std::vector<Track> tracks = read_catalog();
     return tracks;
+}
+
+const Track* track_of(u32 sound_id) {
+    for (const Track& t : catalog())
+        if (t.sound_id == sound_id)
+            return &t;
+    return nullptr;
 }
 
 }  // namespace engine::soundplayer

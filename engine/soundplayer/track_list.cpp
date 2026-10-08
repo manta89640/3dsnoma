@@ -13,7 +13,8 @@
 // at one end and come back at the other, out of sight. Rows near the window's edges fade (their
 // alpha) rather than being cut off, as the TV programme list's do. Holding a tab, or the D-pad's
 // up or down, keeps it moving with the TV list's rhythm: a row in 13 frames, the next in 7, then
-// one every 4.
+// one every 4. The list has headings (the channel's jingles, each game's music and jingles: rows
+// in the dialogs' grey that can't be chosen); L and R jump from one to the next.
 //
 // The track playing has its row marked: a cyan bar with the name in white and ♪ before it (∥ and
 // a grey bar when paused, ♪ blinking while the player switches to it). The bar is a row layout of
@@ -35,6 +36,7 @@
 #include <utility>
 #include <vector>
 
+#include "engine/input/remote.h"
 #include "engine/system/host_scene.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
@@ -86,7 +88,6 @@ f32 wide = 1;
 // colour a pushed button flashes); grey when paused
 const Rgb PAUSED_BAR = {150, 150, 150}, PAUSED_BAR_LIT = {178, 178, 178};
 const Rgb HEADER_GREY = {128, 128, 128};
-const char16_t* const HEADER = u"ジングル";
 const char16_t NOTE = 0x266A, PAUSE = 0x2225;  // ♪ ∥ (the font has no ▶ ‖)
 
 const u32 SOUND_UNKNOWN = 0xFFFFFFFEu;
@@ -191,7 +192,8 @@ f32 shown_part(f32 pos, int entry) {
 }  // namespace
 
 struct TrackList::Impl {
-    // the list: catalog indices, with the jingles' heading (-1) before the first jingle
+    // the list: catalog indices, with a heading (-1 - the index of the track it heads) before the
+    // first track of each heading (the jingles', each game's)
     std::vector<int> entries;
 
     u32 window = 0;   // Friend_Sel_Window, a layout of its own: the rows, tabs and bar hang from it
@@ -224,6 +226,7 @@ struct TrackList::Impl {
     int tab_dir = 0, tab_steps = 0;                 // a tab held
     f32 tab_x = 0, tab_y = 0;                       // where the pointer pressed it
     int pad_dir = 0, pad_steps = 0, pad_timer = 0;  // the D-pad held
+    u16 shoulders = 0;                              // L and R held at the last frame
 
     int highlight = 0;      // the D-pad's highlight (an entry)
     bool pad_mode = false;  // the D-pad has been used since the pointer last moved
@@ -242,6 +245,7 @@ struct TrackList::Impl {
     void glide(int frames, bool ease);
     void scroll_to_show(int entry, int frames, bool ease);
     void move_highlight(int dir, int frames);
+    void jump_heading(int dir);
     void follow_music(const Music& music);
     void input();
     void advance();
@@ -264,8 +268,8 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
     Impl& m = *impl_;
     const std::vector<Track>& tracks = catalog();
     for (size_t i = 0; i < tracks.size(); i++) {
-        if (tracks[i].jingle && (i == 0 || !tracks[i - 1].jingle))
-            m.entries.push_back(-1);
+        if (!tracks[i].heading.empty() && (i == 0 || tracks[i].heading != tracks[i - 1].heading))
+            m.entries.push_back(-1 - (int)i);
         m.entries.push_back((int)i);
     }
 
@@ -345,7 +349,7 @@ TrackList::~TrackList() {
     delete impl_;
 }
 
-// a row takes an entry: its name (or the jingles' heading, which can't be chosen)
+// a row takes an entry: its name (or a heading, which can't be chosen)
 void TrackList::Impl::assign(Row& r, int entry) {
     r.entry = entry;
     bool header = entry >= 0 && entries[entry] < 0;
@@ -362,7 +366,8 @@ void TrackList::Impl::assign(Row& r, int entry) {
     if (entry < 0)
         return;
     if (header) {
-        set_text(r.panes.text, HEADER);
+        fit_text(r.panes.text, catalog()[-1 - entries[entry]].heading, HEADER_W * wide, HEADER_FONT_W,
+                 HEADER_FONT_H, 0.7f);
         paint(r.panes.text, HEADER_GREY);
     } else {
         fit_text(r.panes.text, catalog()[entries[entry]].name, TEXT_W * wide, FONT_W, FONT_H, 0.7f);
@@ -407,6 +412,30 @@ void TrackList::Impl::move_highlight(int dir, int n) {
     scroll_to_show(h, n, n >= RHYTHM[0]);
 }
 
+// L and R: the highlight to the first track under the next heading, or the one before (the list's
+// start counts as one), the list scrolled to show that heading at its top
+void TrackList::Impl::jump_heading(int dir) {
+    std::vector<int> starts;  // the first track under each heading, and the list's first
+    for (size_t e = 0; e < entries.size(); e++)
+        if (entries[e] >= 0 && (e == 0 || entries[e - 1] < 0))
+            starts.push_back((int)e);
+    if (starts.empty())
+        return;
+    int current = 0;  // the start of the highlight's part
+    for (size_t k = 0; k < starts.size(); k++)
+        if (starts[k] <= highlight)
+            current = (int)k;
+    int k = std::min(std::max(current + dir, 0), (int)starts.size() - 1);
+    if (dir < 0 && highlight > starts[current])
+        k = current;  // back to the start of its own part first
+    highlight = starts[k];
+    int t = std::min(std::max(highlight - (highlight > 0 && entries[highlight - 1] < 0 ? 1 : 0), 0), max_top());
+    if (t != top) {
+        top = t;
+        glide(std::min(std::max(10 + std::abs(t - (int)pos) / 2, 13), 30), true);
+    }
+}
+
 // The track changed (from the list, the controls, left and right): its row comes into sight,
 // and the highlight goes with it. When the screen opens, the list starts there.
 void TrackList::Impl::follow_music(const Music& music) {
@@ -435,6 +464,15 @@ void TrackList::Impl::input() {
         pad_mode = false;
     pointer_x = px;
     pointer_y = py;
+
+    // L and R: from heading to heading
+    u16 shoulders_held = guest::wiimote_input().pad & (guest::PAD_L | guest::PAD_R);
+    u16 shoulders_pressed = shoulders_held & ~shoulders;
+    shoulders = shoulders_held;
+    if (shoulders_pressed) {
+        pad_mode = true;
+        jump_heading(shoulders_pressed & guest::PAD_R ? 1 : -1);
+    }
 
     // up and down: the highlight moves at once, again after 13 frames, after 7, then every 4
     if (pressed & (game::PAD_UP | game::PAD_DOWN)) {

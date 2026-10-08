@@ -142,6 +142,7 @@ void SoundPlayerScene::toggle_play() {
 }
 
 void SoundPlayerScene::update() {
+    music_->update();
     if (music_->state() != logged_state_ || music_->current() != logged_sound_) {
         logged_state_ = music_->state();
         logged_sound_ = music_->current();

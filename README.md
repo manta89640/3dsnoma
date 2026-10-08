@@ -137,6 +137,11 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    a package staged before the speed round is refused, the reason in the log; stage it again), baked with
    the host build's `ng3d-bake` and with its cells' visibility from `ng3d-pvs` (build the host
    targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it.
+   Wii Sports' and Wii Sports Resort's music for the Sound Player, from the same disc:
+   `tools/music/stage_music.py DATA [--extract ROOT]` (ROOT: the disc split into `launcher/`,
+   `wii-sports/`, `wii-sports-resort/`; default `../wii-sports-extract`) writes
+   `DATA/music/sports.tsv` and `DATA/music/sports/*.nstm` (about 150 MB), encoded by the host
+   build's `nstm-enc`.
 
 ## Running on the host
 
@@ -232,6 +237,14 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
   those put into words. They play through the channel's own BGM player (`sound::BGMManager`),
   which crossfades between pieces and keeps the room's theme paused until the room asks for it
   again.
+- After them, if staged (`tools/music/stage_music.py`), the music of Wii Sports and Wii Sports
+  Resort (and of the disc's menu), under a heading a game and one for each game's jingles: 162
+  pieces (the streams, the fanfares and jingles, Resort's two sequences played through
+  `tools/music`'s model of the sequencer; pieces the disc has twice listed once), named in
+  Japanese as the channel's are. They play as native streams (`engine/audio/stream.h`: NSTM
+  files, 32 kHz DSP-ADPCM, read from the SD card a frame ahead and mixed into the AX output), each
+  brought to the same loudness, with a tempo found from its onsets for the dances. L and R jump
+  from heading to heading.
 - On the bottom screen: the list, in the channel's list window with the message board's rows (the
   room's cyan for focus), four rows at a time (the tabs on its edges, held, or the D-pad), the
   video player's own controls (previous, play/pause, next, stop) and the Home tab, worked by touch

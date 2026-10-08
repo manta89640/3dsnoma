@@ -58,6 +58,7 @@ endif()
 set(ENGINE_SOURCES
   engine/audio/aux.cpp
   engine/audio/ax_render.cpp
+  engine/audio/stream.cpp
   engine/collision/kcl.cpp
   engine/cw/int64.cpp
   engine/cx/uncompress.cpp
@@ -247,4 +248,8 @@ else()
   add_executable(ng3d-pvs tools/ng3d_pvs.cpp)
   target_compile_options(ng3d-pvs PRIVATE -O2)
   target_link_libraries(ng3d-pvs Threads::Threads)
+  # nstm-enc: 32 kHz PCM to an NSTM music stream, DSP-ADPCM (tools/nstm_enc.cpp; tools/music/stage_music.py)
+  add_executable(nstm-enc tools/nstm_enc.cpp)
+  target_include_directories(nstm-enc PRIVATE ${CMAKE_SOURCE_DIR})
+  target_compile_options(nstm-enc PRIVATE -O2)
 endif()
