@@ -391,6 +391,7 @@ private:
     void draw_batch(const PkgRes& r, const fmt::Batch& b) { draw_indices(r, b.first_index, b.n_indices); }
     void draw_indices(const PkgRes& r, u32 first, u32 count);
     void forget_state();
+    void show_shadow_map(PkgRes& r);
     bool make_shadow(u32 size);
     void shadow_pass(const g3::Packet& p, PkgRes& r);
     void position_rows(const g3::Packet& p, int matrix, const VbRes& vb, const f32 (*rows)[4], u32 n, int slot);
@@ -1479,7 +1480,10 @@ void PicaBackend::shadow_pass(const g3::Packet& p, PkgRes& r) {
         cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
         layout_ = vbuf_ = -1;
         comb.stage[0].src_rgb[0] = comb.stage[0].src_a[0] = tev::SRC_CONSTANT;
-        comb.stage[0].konst = 0xFFFFFFFF;
+        // (NOMA_G3D_SHADOW_CLEAR=0xAABBGGRR: another clear, to tell on a console or an emulator
+        // whether the receivers sample the map at all -- 0: depth 0 everywhere, all in shadow)
+        static const char* clear_env = getenv("NOMA_G3D_SHADOW_CLEAR");
+        comb.stage[0].konst = clear_env ? (u32)strtoul(clear_env, nullptr, 0) : 0xFFFFFFFF;
         set_texenv(comb);
         UnitRes none[3];
         set_units(none, 1);
@@ -1555,6 +1559,65 @@ void PicaBackend::shadow_pass(const g3::Packet& p, PkgRes& r) {
     shadow_ready_ = true;
     st_.shadow_maps++, st_.shadow_draws += (u32)p.casters.size(), st_.shadow_triangles += tris;
     st_.shadow_ticks += svcGetSystemTick() - t0;
+}
+
+// NOMA_G3D_SHADOW_SHOW: the shadow map drawn as an ordinary RGBA8 texture on a quad in a corner of
+// the target (its depth bytes as colours: white where nothing was drawn into it), to see on a console
+// or an emulator whether the casters reach it: the clear's quad, scaled into the corner, its texture
+// coordinates from its position (rows on unit 0: s = (x + 1) / 2, t = (y + 1) / 2, q = 1), no depth
+// test or write, no blending. Then nothing kept about the GPU's state.
+void PicaBackend::show_shadow_map(PkgRes& r) {
+    const u8 lay = layout_of(fmt::VA_POS, 0, 12);
+    const Layout& L = s_layouts[lay];
+    const u32 fmt_words[2] = {L.format_low, L.format_high};
+    use_base(r.base, r);
+    cmd_incremental(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
+    cmd_masked(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
+    cmd_write(GPUREG_VSH_NUM_ATTR, 4);
+    const u32 perm[2] = {L.permutation, 0};
+    cmd_incremental(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
+    for (u32 i = 0; i < L.n_fixed; i++) {
+        cmd_write(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
+        C3D_ImmSendAttrib(L.fixed[i][0], L.fixed[i][1], L.fixed[i][2], L.fixed[i][3]);
+    }
+    const u32 buf[3] = {r.quad_offset, L.buf_config1, L.buf_config2};
+    cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
+    layout_ = vbuf_ = -1;
+    tev::Combiners comb;
+    for (int i = 0; i < 6; i++) {
+        tev::CombinerStage& st = comb.stage[i];
+        memset(&st, 0, sizeof(st));
+        for (int k = 0; k < 3; k++)
+            st.src_rgb[k] = st.src_a[k] = tev::SRC_PREVIOUS;
+        st.func_rgb = st.func_a = tev::FUNC_REPLACE;
+    }
+    comb.buf_rgb = comb.buf_a = 0;
+    comb.stage[0].src_rgb[0] = tev::SRC_TEXTURE0;
+    comb.stage[0].src_a[0] = tev::SRC_CONSTANT;
+    comb.stage[0].konst = 0xFF000000;
+    set_texenv(comb);
+    UnitRes units[3];
+    units[0] = shadow_unit_;
+    units[0].regs[2] = GPU_TEXTURE_MAG_FILTER(GPU_NEAREST) | GPU_TEXTURE_MIN_FILTER(GPU_NEAREST) |
+                       GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE) |
+                       GPU_TEXTURE_MODE(GPU_TEX_2D);
+    set_units(units, 1);
+    const u32 pixel[8] = {0, (u32)GPU_WRITE_COLOR << 8,
+                          GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_ONE << 16 | GPU_ZERO << 20 | GPU_ONE << 24 |
+                              (u32)GPU_ZERO << 28,
+                          0xE40100, GPU_LOGICOP_COPY, 0, (u32)GPU_ALWAYS << 4, 0};
+    set_pixel(pixel);
+    set_bools(1u << R.b_proj0);
+    // (clip x, y within -1 .. -0.35: a corner; z -0.5, w 1)
+    uni(R.mvp + 0, 0.325f, 0, 0, -0.675f);
+    uni(R.mvp + 1, 0, 0.325f, 0, -0.675f);
+    uni(R.mvp + 2, 0, 0, 0, -0.5f);
+    uni(R.mvp + 3, 0, 0, 0, 1.0f);
+    uni(R.tmtx + 0, 0.5f, 0, 0, 0.5f);
+    uni(R.tmtx + 1, 0, 0.5f, 0, 0.5f);
+    uni(R.tmtx + 2, 0, 0, 0, 1.0f);
+    draw_indices(r, r.quad_first, 6);
+    forget_state();
 }
 
 // ---------------------------------------------------------------- draw
@@ -1685,8 +1748,27 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             if (recv) {
                 tev::Combiners c2;
                 g3::shadow_receiver_combiners(base, smap_.darkness, &c2);
+                UnitRes u3[3] = {shadow_unit_, mr.unit[1], mr.unit[0]};
+                // (NOMA_G3D_SHADOW_PROBE=1: the map shown on the receivers as an ordinary texture
+                // where it falls on them -- its coordinates checked apart from its compare)
+                static const bool probe = getenv("NOMA_G3D_SHADOW_PROBE") && atoi(getenv("NOMA_G3D_SHADOW_PROBE"));
+                if (probe) {
+                    for (int i = 0; i < 6; i++) {
+                        tev::CombinerStage& st = c2.stage[i];
+                        memset(&st, 0, sizeof(st));
+                        for (int k = 0; k < 3; k++)
+                            st.src_rgb[k] = st.src_a[k] = tev::SRC_PREVIOUS;
+                        st.func_rgb = st.func_a = tev::FUNC_REPLACE;
+                    }
+                    c2.stage[0].src_rgb[0] = tev::SRC_TEXTURE0;
+                    c2.stage[0].src_a[0] = tev::SRC_CONSTANT;
+                    c2.stage[0].konst = 0xFF000000;
+                    c2.buf_rgb = c2.buf_a = 0;
+                    // (=2: the shadow compare's result shown as it comes, the unit left comparing)
+                    if (atoi(getenv("NOMA_G3D_SHADOW_PROBE")) == 1)
+                        u3[0].regs[2] = (u3[0].regs[2] & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_2D);
+                }
                 set_texenv(c2);
-                const UnitRes u3[3] = {shadow_unit_, mr.unit[1], mr.unit[0]};
                 set_units(u3, tex_shadow);
             } else if (fade) {
                 tev::Combiners c2;
@@ -1742,6 +1824,10 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             st_.fog_draws++;
         }
     }
+    // NOMA_G3D_SHADOW_SHOW=1: the shadow map in a corner, over the translucent pass
+    static const bool show_map = getenv("NOMA_G3D_SHADOW_SHOW") && atoi(getenv("NOMA_G3D_SHADOW_SHOW"));
+    if (show_map && shadow_ready_ && p.pass == g3::Pass::TRANSLUCENT)
+        show_shadow_map(*r);
     // the stencil test off again (the GX path never uses it), the package's base
     if (pixel_[6] != ~0u && (pixel_[6] & 1)) {
         cmd_write(GPUREG_STENCIL_TEST, (u32)GPU_ALWAYS << 4);

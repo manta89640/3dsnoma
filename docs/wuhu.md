@@ -674,6 +674,23 @@ Gaps:
   shapes.
 - **The Mii's shape:** the Mii casts as a capsule.
 
+**Open on the 3DS (2026-10-08, Azahar 2126.1.2, Vulkan):** the shadow map darkens nothing on the PICA
+path, though the host's software backend shows it. Narrowed down with three debug switches
+(platform/3ds/g3d_pica.cpp, for env.txt):
+- `NOMA_G3D_SHADOW_SHOW=1` draws the map in a corner as an ordinary RGBA8 texture: the casters reach
+  it (the trees' crowns, the Mii's stand-in as coloured depth bytes on white).
+- `NOMA_G3D_SHADOW_PROBE=1` shows the map on the receivers as an ordinary texture: their coordinates
+  are right (the Mii's and the trees' shadows land where they should); `=2` leaves the unit in its
+  shadow mode and shows the compare's result as it comes, without the darkening stages (not yet
+  seen: that run never reached the island).
+- `NOMA_G3D_SHADOW_CLEAR=0xAABBGGRR` clears the map to another value: at 0 (depth 0, all in shadow)
+  the receivers still came out exactly as without the map, so either the PICA's compare (unit 0 in
+  GPU_TEX_SHADOW_2D, TEXUNIT0_SHADOW, texcoord0w as the reference) never runs or reads lit, or the
+  two combiner stages shadow_receiver_combiners appends (f = texture0 x darkness + (1 - darkness),
+  then the buffered material colour x f) don't take effect. Azahar's sampler (its fragment shader
+  generator's shadowTexture) returns 1 only outside the texture or where the stored depth is past
+  the reference, so a depth-0 clear that reaches it must darken.
+
 ## Left out (fidelity gaps)
 
 - Indirect texturing: the open sea's warp of `jog_waterB` by `jog_waterA` (the engine has no
