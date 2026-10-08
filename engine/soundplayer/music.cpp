@@ -20,11 +20,15 @@
 // (ticks a quarter note), +0xEC u16 tempo, +0x160 u32 ticks.
 #include "engine/soundplayer/music.h"
 
+#include "engine/audio/stream.h"
 #include "engine/math/vecmath.h"
+#include "engine/soundplayer/catalog.h"
 #include "engine/wuhu/music.h"
 #include "noma_decomp.h"
 
 namespace engine::soundplayer {
+
+namespace stream = engine::audio;
 
 namespace {
 
@@ -62,7 +66,11 @@ void cut_room_theme() {
 
 }  // namespace
 
+// A stream: the BGM player is cut first (StopNow: its slots 0 and 1 stop, the room's theme in slot
+// 2 pauses), as before a piece of the archive, and the stream stops before one of those plays.
+// Leaving, the BGM player is then where an archive piece's StopNow would have left it.
 void Music::leave() {
+    stream::stream_stop();
     if (slot() == 2 && current() != NO_SOUND) {
         resume();  // the room's theme: on into the room
         return;
@@ -81,32 +89,65 @@ void Music::play(u32 id) {
         if (s == PlayState::PLAYING || s == PlayState::SWITCHING)
             return;
     }
+    const Track* track = track_of(id);
+    if (track && !track->stream.empty()) {
+        stop_now();
+        stream_id_ = id;
+        if (!stream::stream_play(track->stream))
+            guest::log("soundplayer: can't play %s", track->stream.c_str());
+        return;
+    }
+    stream::stream_stop();
     stop_now();  // the last piece cut off (or one that has ended: asked for again, it would do nothing)
     play_by_id(id);
     cut_room_theme();
 }
 
 void Music::pause() {
-    if (current() != NO_SOUND)
+    if (stream::stream_active())
+        stream::stream_pause(true);
+    else if (current() != NO_SOUND)
         pause_current(true);
 }
+
+namespace {
+
+// the piece current of the channel's BGM player (its next one, while it switches), or NO_SOUND
+u32 bgm_current() {
+    u32 next = guest::load32(bgm() + 0x2C);
+    return next != Music::NO_SOUND ? next : guest::load32(bgm() + 0x28);
+}
+
+}  // namespace
 
 // (StopNow leaves the room's theme paused in slot 2: resuming with nothing current would play it
 // behind the player's back. Only a piece current resumes, and not while the application holds
 // everything paused.)
 void Music::resume() {
-    if (current() != NO_SOUND && !guest::load8(bgm() + 0x3A))
+    if (stream::stream_active())
+        stream::stream_pause(false);
+    else if (current() != NO_SOUND && !guest::load8(bgm() + 0x3A))
         pause_current(false);
 }
 
-void Music::stop() { stop_now(); }
+void Music::stop() {
+    stream::stream_stop();
+    stop_now();
+}
 
+void Music::update() { stream::stream_pump(); }
+
+// the stream's ID while one is current (a stream that has ended is no longer: as an archive
+// piece's that has ended, its row isn't marked)
 u32 Music::current() const {
-    u32 next = guest::load32(bgm() + 0x2C);
-    return next != NO_SOUND ? next : guest::load32(bgm() + 0x28);
+    if (stream::stream_active())
+        return stream_id_;
+    return bgm_current();
 }
 
 PlayState Music::state() const {
+    if (stream::stream_active())
+        return stream::stream_paused() ? PlayState::PAUSED : PlayState::PLAYING;
     if (guest::load32(bgm() + 0x2C) != NO_SOUND)
         return PlayState::SWITCHING;
     if (guest::load32(bgm() + 0x28) == NO_SOUND)
@@ -120,6 +161,16 @@ PlayState Music::state() const {
 
 Beat Music::beat() const {
     Beat b;
+    if (stream::stream_active()) {
+        const engine::audio::NstmHeader& h = stream::stream_header();
+        b.bar = h.beats_per_bar ? h.beats_per_bar : 4;
+        if (h.bpm <= 0 || stream::stream_paused())
+            return b;
+        b.valid = true;
+        b.bpm = h.bpm;
+        b.beats = (stream::stream_seconds() - h.first_beat) * h.bpm / 60.0;
+        return b;
+    }
     b.bar = engine::wuhu::music_bar_beats(current());
     u32 seq = sequence_in(slot());
     if (!seq || state() != PlayState::PLAYING)

@@ -29,6 +29,7 @@
 
 #include "hw.h"
 #include "engine/audio/ax_render.h"
+#include "engine/audio/stream.h"
 
 namespace guest {
 
@@ -152,6 +153,7 @@ void mix_aux(int aux, u32 write_addr, u32 read_addr, u16 volume) {
 // frame's to this one's) and clamped, as 16-bit R L pairs. As a rule the volume stays the same (no
 // ramp, no division), at 1.0 (the sum only clamped), and both buffers are RAM.
 void output(u32 surround_addr, u32 lr_addr, u16 volume) {
+    engine::audio::stream_mix(s_buf[MAIN_L], s_buf[MAIN_R], SPF);  // a native music stream, if one plays
     u16 v0 = s_last_master;
     s_last_master = volume;
     u8* s_out = span(surround_addr, 4 * SPF);

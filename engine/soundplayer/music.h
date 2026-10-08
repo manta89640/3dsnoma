@@ -1,5 +1,6 @@
-// The Sound Player's playback: the channel's own BGM player plays the tracks, and the music's
-// sequencer tells the Miis where the beat is.
+// The Sound Player's playback: the channel's own BGM player plays the channel's tracks, and the
+// music's sequencer tells the Miis where the beat is; the two games' music plays as a native
+// stream (engine/audio/stream.h), its beat from the tempo staged with it.
 #pragma once
 
 #include "runtime/runtime.h"
@@ -15,7 +16,7 @@ enum class PlayState {
 
 // where the music is, read once a frame from the sequencer of the piece playing
 struct Beat {
-    bool valid = false;   // a sequence plays (a wave jingle has no sequencer: no beat)
+    bool valid = false;   // a sequence plays, or a stream with a tempo (a wave jingle: no beat)
     f32 bpm = 0;          // quarter notes a minute now (the sequence can change it as it plays)
     double beats = 0;     // quarter notes since the piece started, with the fraction
     u32 bar = 4;          // quarter notes a bar, valid or not (engine::wuhu::music_bar_beats)
@@ -34,8 +35,9 @@ public:
     ~Music() { leave(); }
     void leave();
 
-    // play this sound (an ID of the archive), cutting off the last piece; the piece current is
-    // resumed if paused, played again if it had ended, and left alone if it plays
+    // play this sound (an ID of the archive, or a stream's: catalog.h), cutting off the last
+    // piece; the piece current is resumed if paused, played again if it had ended, and left alone
+    // if it plays
     void play(u32 sound_id);
     void pause();
     void resume();
@@ -47,6 +49,12 @@ public:
     static const u32 NO_SOUND = ~0u;
 
     Beat beat() const;
+
+    // once a frame: a stream reads ahead
+    void update();
+
+private:
+    u32 stream_id_ = NO_SOUND;  // the stream last played (current while the stream plays)
 };
 
 }  // namespace engine::soundplayer
