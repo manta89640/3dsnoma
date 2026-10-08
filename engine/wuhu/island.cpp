@@ -455,6 +455,13 @@ bool Island::enter_vehicle() {
     vehicles_->enter(v);
     player_->set_obstacles(vehicles_->obstacles(v));
     sand_->end_trail();
+    // the camera framed for the vehicle: as for a Mii as tall as 0.8 of half the vehicle's length (a
+    // car a little further off than the Mii, a cruiser well back: further and a car's camera swings
+    // through the hedges and house fronts the collision doesn't have)
+    const Obstacle box = vehicles_->box(v);
+    FollowCameraParams cp = FollowCameraParams::make(std::max(pp.height, 0.8f * box.half_length));
+    cp.aspect = mii_->aspect();
+    camera_->set_params(cp);
     guest::log("wuhu: into the %s (vehicle %u)", vehicles_->boat() ? "boat" : "car", (unsigned)v);
     return true;
 }
@@ -490,6 +497,9 @@ bool Island::leave_vehicle() {
         return false;
     }
     vehicles_->leave();
+    FollowCameraParams cp = FollowCameraParams::make(pp.height);
+    cp.aspect = mii_->aspect();
+    camera_->set_params(cp);
     camera_->reset(player_->position(), player_->yaw());
     guest::log("wuhu: out of vehicle %u at (%.1f, %.1f, %.1f)", (unsigned)v, player_->position().x,
                player_->position().y, player_->position().z);
@@ -502,6 +512,9 @@ void Island::park_vehicle() {
         return;
     vehicles_->leave();
     player_->set_obstacles(vehicles_->obstacles());
+    FollowCameraParams cp = FollowCameraParams::make(player_->params().height);
+    cp.aspect = mii_->aspect();
+    camera_->set_params(cp);
 }
 
 // the parachute over the Mii while it glides (its model hidden otherwise)
@@ -724,7 +737,8 @@ void Island::log_frame() {
                (unsigned)s.translations, (unsigned)s.translations_cached, (unsigned)s.shadow_casters,
                (unsigned)s.shadow_instances, (unsigned)s.shadow_triangles, (unsigned)s.shadow_receivers,
                (unsigned)s.shadow_faded, p.x, p.y, p.z,
-               (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
+               (unsigned)player_->ground_attribute(), controlled_yaw(),
+               vehicles_->driven() != Vehicles::NONE ? (vehicles_->boat() ? "boat" : "car") : STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
 }
 

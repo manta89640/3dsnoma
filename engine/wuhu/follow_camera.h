@@ -48,6 +48,9 @@ public:
 
     // behind the Mii at once (no smoothing): at the start and after a jump cut
     void reset(Vec3 feet, f32 mii_yaw);
+    // another framing (FollowCameraParams::make for another height: a vehicle's), the distance the
+    // player chose kept in proportion; the camera eases to it (no cut)
+    void set_params(const FollowCameraParams& params);
     // speed: the Mii's speed over its run speed (0..1), how fast to swing behind it
     void update(const FollowCameraInput& in, Vec3 feet, f32 mii_yaw, f32 speed, f32 dt);
 
