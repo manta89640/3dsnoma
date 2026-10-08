@@ -313,3 +313,10 @@ theme (Sound Player semantics).
   gravity (1.1 Mii heights), a tap twice it (0.4), the way down 1.45 times; a ceiling stops the rise
   and ground rising over the feet (a slope jumped up) ends it.
   `NOMA_WUHU_BY_FRAMES=1` restores frame steps for repeatable host runs.
+- **Shadows (2026-10-08, the user chose both):** WSR's silhouette decals under the trees, props and
+  cars, cut from the render terrain at staging (no cost but their draws), plus a PICA shadow map of
+  480 units around the Mii (512 texels; `NOMA_WUHU_SHADOWS=0` off, `NOMA_WUHU_SHADOW_MAP=N` its size).
+  The map's casters are the trees and props (CAST), the instances (windmills, vehicles) and a capsule
+  standing in for the Mii. Its receivers are the island's materials, their unit 0 moved to unit 2 and
+  the map on unit 0. Decals fade out where the map covers. The host's soft backend draws the same.
+  docs/wuhu.md "Shadows" has the details, the costs and the gaps.

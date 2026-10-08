@@ -1776,6 +1776,86 @@ void test_real_package(const std::string& path) {
         log("selftest g3d: the World a frame, the mean of %u views: %.3f ms with the speed-ups, %.3f without (host; "
             "the 3DS's ARM11 at 804 MHz some 20-30 times slower: an estimate)",
             views, sum_on / views, sum_off / views);
+    // the shadows (SHDW, CAST): through each view with a 512-texel map about its target, both packets
+    // carry the map, the opaque one its casters (each a run within its batch, under a matrix it has), the
+    // translucent one none; every receiver and faded decal of a material that can take it; the World's
+    // time a frame with the map against without it; with no map, no item flagged
+    if (const fm::ShadowEnv* se = pkg->shadow_env()) {
+        u32 caster_batches = 0;
+        for (const fm::Batch& b : pkg->batches())
+            caster_batches += (b.flags & fm::BATCH_CASTER) != 0;
+        log("selftest g3d: shadows: %u casters in %u batches, light %s, darkness %.2f, map %g units (%g toward the "
+            "sun, %g below)",
+            pkg->casters().count, caster_batches, pkg->str(pkg->lights()[se->light].name), (double)se->darkness,
+            (double)se->map_extent, (double)se->map_depth, (double)se->map_floor);
+        double sum_map = 0, sum_none = 0;
+        u32 n_views = 0;
+        for (const fm::Marker& m : pkg->markers()) {
+            const char* name = pkg->str(m.name);
+            if (strncmp(name, "view_", 5) != 0)
+                continue;
+            g3::Camera cam;
+            cam.eye = {m.position[0], m.position[1], m.position[2]};
+            cam.target = Vec3{m.dir[0], m.dir[1], m.dir[2]};
+            cam.aspect = 400.0f / 240.0f, cam.near_ = 1.5f, cam.far_ = 80000;
+            g3::Packet opa, xlu;
+            double ms[2];
+            g3::WorldStats st;
+            for (int map = 1; map >= 0; map--) {
+                w.set_shadow_map(map ? 512 : 0);
+                const int frames = 100;
+                const auto t2 = std::chrono::steady_clock::now();
+                for (int f = 0; f < frames; f++) {
+                    w.update(600.0f + f);
+                    w.set_camera(cam, ground_under(cam.eye));
+                    w.build_packet(g3::Pass::OPAQUE, &opa);
+                    w.build_packet(g3::Pass::TRANSLUCENT, &xlu);
+                }
+                ms[map] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count() / frames;
+                if (map) {
+                    st = w.stats();
+                    expect(opa.shadow.size == 512 && xlu.shadow.size == 512 && xlu.casters.empty(),
+                           "%s: the map in both packets, its casters in the opaque one", name);
+                    bool runs_ok = true;
+                    for (const g3::ShadowCaster& c : opa.casters) {
+                        const fm::Batch& b = pkg->batches()[c.batch];
+                        runs_ok &= c.batch < pkg->batches().count && c.first_index >= b.first_index &&
+                                   c.first_index + c.n_indices <= b.first_index + b.n_indices && c.n_indices % 3 == 0 &&
+                                   12 * ((size_t)c.matrix + 1) <= opa.matrices.size() &&
+                                   !w.materials()[b.material].translucent;
+                    }
+                    expect(runs_ok, "%s: %zu casters, each an opaque run of its batch under a matrix of the packet", name,
+                           opa.casters.size());
+                    bool flags_ok = true;
+                    for (const g3::Packet* p : {&opa, &xlu})
+                        for (const g3::DrawItem& it : p->items) {
+                            const g3::Material& mt = w.materials()[pkg->batches()[it.batch].material];
+                            if (it.flags & g3::DRAW_SHADOW_RECEIVER)
+                                flags_ok &= mt.shadow_receiver;
+                            if (it.flags & g3::DRAW_SHADOW_FADE)
+                                flags_ok &= mt.shadow_decal;
+                        }
+                    expect(flags_ok, "%s: receivers and faded decals of materials that can take them", name);
+                } else {
+                    bool none = opa.shadow.size == 0 && opa.casters.empty();
+                    for (const g3::Packet* p : {&opa, &xlu})
+                        for (const g3::DrawItem& it : p->items)
+                            none &= !(it.flags & (g3::DRAW_SHADOW_RECEIVER | g3::DRAW_SHADOW_FADE));
+                    expect(none, "%s: no map, no shadow flags", name);
+                }
+            }
+            log("selftest g3d: %s: shadow map: %u casters (%u instances), %u triangles, %u receiving items, %u decals "
+                "faded; the World %.3f ms a frame with it, %.3f without (host)",
+                name, st.shadow_casters, st.shadow_instances, st.shadow_triangles, st.shadow_receivers, st.shadow_faded,
+                ms[1], ms[0]);
+            sum_map += ms[1], sum_none += ms[0];
+            n_views++;
+        }
+        w.set_shadow_map(0);
+        if (n_views)
+            log("selftest g3d: shadows: the World a frame, the mean of %u views: %.3f ms with the map, %.3f without", n_views,
+                sum_map / n_views, sum_none / n_views);
+    }
     if (!views)
         log("selftest g3d: the package has no view_* markers");
     delete pkg;

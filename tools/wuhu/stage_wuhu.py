@@ -1309,7 +1309,8 @@ class Stager:
 
     def car_shadow(self, model):
         """WSR's car shadow (WS2_common_car_shadow) as a quad under the car's body, a batch of its root
-        node: it goes with every car, parked, driven, or on its route."""
+        node: it goes with every car, parked, driven, or on its route (BATCH_DETAIL: drawn within the
+        detail distance)."""
         pkg, cv = self.pkg, self.cv
         m = pkg.models[model]
         if m.first_batch + m.n_batches != len(pkg.batches):
@@ -1318,7 +1319,8 @@ class Stager:
         ctr = (lo + hi) / 2
         hx, hz = (hi[0] - lo[0]) / 2 * CAR_SHADOW_SIZE, (hi[2] - lo[2]) / 2 * CAR_SHADOW_SIZE
         c = shadow_decals.quad_corners((ctr[0], lo[1] + 0.25, ctr[2]), (hx, 0, 0), (0, 0, -hz), self.shadow_rects["car"])
-        b = convert.build_single_batch(cv, cv.prepare(c, self.decal_mat), self.decal_mat, 0)
+        # (detail: a car's shadow is a draw of its own, gone beyond the detail distance with the edge strips)
+        b = convert.build_single_batch(cv, cv.prepare(c, self.decal_mat), self.decal_mat, 0, detail=True)
         m.n_batches += 1
         return b
 

@@ -435,9 +435,9 @@ ground-level day (research env_choice/env.md, its set (f), decoded from the file
   aren't markers.
 - Camera presets (kind 2, position = eye, dir = target): `seqcam_0`..`seqcam_14` (the title
   sequence's shots) and `view_town`, `view_coast`, `view_beach`, `view_interior`, `view_distant`,
-  `view_overview` (the research's reference views) and `view_wedge` (research env_choice's
+  `view_overview` (the research's reference views), `view_wedge` (research env_choice's
   quay_wedge: from the plaza's sea front at a walking eye's height toward Wedge Island, 27,000
-  units off). Their vertical fields of view (55, 55, 55, 65, 40, 50, 50 degrees) are in
+  units off) and `view_windmill` (Wind Park, for the shadows). Their vertical fields of view (55, 55, 55, 65, 40, 50, 50 degrees) are in
   `stage_wuhu.py` VIEWS.
 - **Warps** (kind 3, `MK_WARP`): the exploration menu's 40 places, in the order it lists them,
   each with its name, the feet on the ground and a facing (unit vector on x/z):
@@ -512,6 +512,102 @@ points, the follow camera at rest behind the Mii at three yaws, with and without
 60 identical (the rows hide 1.6 % of the cells there); from 20 points in the cells whose rows hide
 the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 
+## Shadows
+
+Wii Sports Resort has no shadow map and bakes no object's shadow into the island (research
+shadow/report.md, from main.dol): each tree, parasol and venue prop has a 32x32 silhouette drawn as
+alpha-blended geometry on the ground under it, and the cars and the spectators have silhouettes of
+their own. The staged island has those, and on top of them a shadow map around the player. The user
+asked for both, because baked shadows miss what moves (the windmills' blades, the boats, the cars, the
+Mii). The shadow map is switchable: `NOMA_WUHU_SHADOWS=0` turns it off, and `NOMA_WUHU_SHADOW_MAP=N`
+sets its size.
+
+- **Decals** (`tools/g3d/shadow_decals.py`):
+  - **Types and textures:** WSR's table at main.dol 0x8066F1C0 (size, offset, depth, straight down)
+    by PMP class: parasol 21, tent 43, conifer 100, broadleaf 80, palm 28, archery target 35,
+    table-tennis table 20, cycling gate 85. The silhouettes come from StageArc `Tree/`, `Parasol/`,
+    `Tent/`, `IslandLowObj/`, `Car/` and `Audience/G3D/*_shadow.brres`, packed in one 128x128 I8 atlas
+    with 3 levels (10 of its 16 cells used).
+  - **Placement** (fn_802874B0):
+    - Find the ground under the object's raised centre: its origin plus (size + offset) x scale up.
+    - A straight-down shadow is the object's top view, size x scale each way, along its axes.
+    - A sun shadow is the raised centre pushed along the light onto the ground's plane. It is
+      size x scale wide and as long as a sphere of that radius casts (WSR measures the object's extent
+      along the light in a function not traced closely enough to copy). Its image's top is at the far
+      end.
+  - **Mesh:** each decal is WSR's near mesh: the ground's triangles that face the light under the
+    footprint, clipped to it and to the depth range, and lifted 0.15 units. They are cut from the
+    render terrain, not the collision (unlike WSR), so the overlay depth pull keeps them on what is
+    drawn.
+  - **Counts:** 499 decals, 16,490 triangles, one detail batch a cell (culled beyond the detail
+    distance like the edge strips).
+  - **Material:** WSR's GX state. Black at alpha 0.45 x coverage, blended, depth tested and not
+    written (an overlay), drawn first among the translucent (the strips and water go over it).
+- **The cars:** WSR's car silhouette is a quad under the car's body, part of the car model, so it goes
+  with every car (parked, driven, on its route). It is a detail batch.
+- **The Mii's blob:** WSR's spectators' blob, `shadow_blob`, an instance the island puts on the ground
+  under the Mii's feet, lying along the slope. It is hidden while the Mii swims or drives. The shadow
+  map fades it out where it covers, so it shows only without the map.
+- **The static sun bake** (`tools/g3d/shadows.py`) stays for the terrain, buildings and cliffs
+  shading each other (no cost at run time). The placed objects (`BATCH_CASTER`) no longer cast in it:
+  a tree's shadow fell between the terrain's vertices (texels of 30 units, vertices 70-140 apart), and
+  the trees shaded themselves as solid cards. They still receive the terrain's and buildings' shadows.
+- **The shadow map** (`engine/g3d/world.h`, `native_draw.h` ShadowMap):
+  - **Coverage:** a square of 480 units seen along Map_Light (the light the static lighting has),
+    512 texels (0.94 units a texel). It reaches from 6,000 units toward the sun down to 1,500 below
+    the Mii. On the ground it is 480 x 825 units, pushed 120 units ahead of the Mii along the camera's
+    heading.
+  - **Snapping:** the square is snapped to the map's texels, so a still caster's shadow doesn't swim
+    as the Mii moves.
+  - **Casters:**
+    - the trees and props of the cells (`CAST`: 525 runs of their level-0 batches, 33,870
+      triangles; the leaves alpha-tested);
+    - the instances' opaque batches: windmills with turning blades, cars, boats, birds, the airship;
+      an instance off-screen is posed for the map;
+    - the Mii's stand-in, `shadow_proxy`, a 64-triangle capsule as tall as the Mii. It casts only
+      (`INST_CASTER_ONLY`), and only while the Mii is on foot.
+  - **Receivers:** the island's materials (`MAT_SHADOW_RECEIVER`), where they fit: at most four
+    combiner stages and two texture units, unit 0 not projected (material.h).
+  - **Decals:** inside the square the decals fade out through a window texture (its outer 4 %
+    blends), so nothing darkens twice.
+  - **Darkness:** a shadow keeps 55 % of the light, as a decal's does.
+- **On the 3DS** (`platform/3ds/g3d_pica.cpp`):
+  - **Pass:** the opaque packet first draws the map into a shadow texture (VRAM, 1 MB at 512) through
+    `pica_native_target` (gx_pica.cpp).
+  - **Clear:** a quad clears it.
+  - **Casters:** drawn in the GPU's shadow mode: green 0 (no penumbra), depth scale -1, no depth test
+    (the GPU keeps the nearer depth), no culling, the leaves cut out by their alpha test.
+  - **Receivers:** the material's unit 0 moves to unit 2 and the map takes unit 0 (only unit 0 can be
+    a shadow texture: orthographic, a bias). Two combiner stages are added: darkness x lit +
+    (1 - darkness), times the material's colour kept in the combiner buffer.
+  - **Fade:** a decal's fade window is on unit 1.
+  - **Shader:** the vertex shader is unchanged (unit 0's position mapping carries the depth in
+    texcoord0w).
+- **On the host:** the software backend draws the same map in 24-bit depths and samples it with the
+  2x2 compare Azahar uses (`soft_backend.cpp`). `NOMA_SOFT3D_SHADOW_DUMP` writes it as a picture.
+- **The package:**
+  - 382,464 bytes more (VDAT +236 KB, IDAT +98 KB for the decals, CAST 18,900 bytes, SHDW 32
+    bytes).
+  - `CAST` and `SHDW` are optional; a package without them has no shadow map.
+- **Cost a frame** (host counts through the views and runs; the 3DS's times are the user's to
+  measure):
+  - **Decals:** 0-9 more translucent draws (view_town +9, the others +0-2), 0-5,700 more triangles
+    (view_town, its many trees).
+  - **The map:** a clear of 512² texels and its casters: 2-21 runs, 100-1,800 triangles (the plaza
+    21 / 1,787, Wind Park 16-18 / 830-905 with 7-8 instances).
+  - **Receivers:** 6-22 items take one more texture unit and two combiner stages.
+  - **The World:** about 0.0015 ms a frame more on the host (selftest g3d: 0.008 against 0.007 ms
+    over the views).
+
+Gaps:
+- **Materials that can't receive:** the town walls `kabeAD`/`kabeBC`, the harbour ship and lava use
+  three texture units, and the open sea and the cells' water aren't receivers. So boats shadow the
+  shore but not deep water.
+- **What doesn't receive:** props, vehicles and the Mii (drawn by GX) don't receive.
+- **The map's edge:** shadows end at the map's edge, where the decals take over, with a seam in their
+  shapes.
+- **The Mii's shape:** the Mii casts as a capsule.
+
 ## Left out (fidelity gaps)
 
 - Indirect texturing: the open sea's reflection and wave warp are approximated by a 16-frame
@@ -534,10 +630,10 @@ the most, looking toward what they hide: 60 of 60 identical (6.7 % hidden).
 - Bloom and depth of field (`WS2_bic_F0_Bloom.pblm`, `_dof.pdof`). The stage reads the 42
   shadow-area boxes (PMP group 5/type 3) and bakes an initial ambient fade into prelit geometry:
   up to 45% within 5 units of a box's interior. It also bakes soft directional sun occlusion from
-  opaque static island geometry into prelit vertex colours (1536-square light-space depth map,
-  5x5 PCF, at most 40% darkening), with no per-frame cost. Moving and translucent objects do not
-  cast or receive these shadows yet. Both are first approximations and need comparison against the
-  original scene.
+  opaque static island geometry (not the placed objects: "Shadows") into prelit vertex colours
+  (1536-square light-space depth map, 5x5 PCF, at most 40% darkening), with no per-frame cost. Both
+  are first approximations and need comparison against the original scene. The objects' shadows are
+  WSR's decals and the shadow map ("Shadows").
 - Flags' cloth motion (SHP0) and every PAT0: flags stand at rest.
 - Rigid multi-bone shapes (gulls, hawks, whales): a triangle that spans two bones (270 of them)
   is kept with the bone most of its corners use, so it is exact at rest and stretches a little
