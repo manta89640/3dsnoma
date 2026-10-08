@@ -160,6 +160,9 @@ struct PkgRes {
     u32 vtx_bytes = 0, idx_bytes = 0;
     u32 base = 0;             // the attribute buffers' base (physical)
     u32 idx_offset = 0;       // the indices' offset from it
+    // the shadow map's clear (shadow_pass): a quad over the whole target, f32 positions in clip space,
+    // after the package's vertices (its offset from the base) and indices (its first index)
+    u32 quad_offset = 0, quad_first = 0;
     std::vector<VbRes> vbs;
     std::vector<TexRes> texs;
     u32 tex_bytes = 0, tex_missing = 0;
@@ -271,6 +274,7 @@ private:
     u32 texenv_buf_ = ~0u;
     u32 units_[3][6];
     u32 unit_config_ = ~0u;
+    u32 tex_shadow_ = ~0u;  // GPUREG_TEXUNIT0_SHADOW
     u32 pixel_[6];
     int layout_ = -1, vbuf_ = -1;
     int light_set_ = -2;   // whose lights the uniforms hold
@@ -309,7 +313,7 @@ private:
     MatrixEntry mtable_[MATRIX_TABLE];
     MatrixEntry* mcur_ = nullptr;  // the item's (what the uniforms hold)
     MatrixKey mkey_;               // ... made for this key
-    u32 mat_key_ = ~0u;    // material << 16 | its state
+    u64 mat_key_ = ~0ull;  // material << 16 | its state, and its shadow variant << 32
     f32 rows_uv_[2] = {};  // the coordinates' scale the texture rows were made with
 
     // ---- the packet's: the clip matrix times the GX projection (double, and in float with the
@@ -320,12 +324,26 @@ private:
     // ---- the item's: model (the buffer's positions) -> view, in the guest's units
     double mv_[3][4];
 
+    // ---- the shadow map (native_draw.h ShadowMap): a shadow texture (in VRAM if there is room) the
+    // opaque packet's casters are drawn into, its frame buffer; the map's parameters and whether this
+    // frame's is drawn; the decals' fade window (an A8 texture), the units' registers for both
+    C3D_Tex shadow_tex_;
+    C3D_FrameBuf shadow_fb_;
+    u32 shadow_size_ = 0;          // (the texture's; 0: none made)
+    bool shadow_failed_ = false;
+    bool shadow_ready_ = false;
+    g3::ShadowMap smap_;
+    UnitRes shadow_unit_, fade_unit_;
+    u32 shadow_word_ = 1;          // GPUREG_TEXUNIT0_SHADOW for the receivers: orthographic, the bias
+    void* fade_tex_ = nullptr;
+
     // ---- NOMA_G3D_STATS
     int stats_every_ = 0;
     struct Stats {
         u32 frames, draws, fog_draws, prelit_draws, triangles, indices, items_skipped;
         u32 mat_changes, matrices, matrices_made, uniform_vectors, cmd_words;
-        u64 ticks, ticks_max_frame, ticks_frame;
+        u32 shadow_maps, shadow_draws, shadow_triangles, shadow_receivers, shadow_faded;
+        u64 ticks, ticks_max_frame, ticks_frame, shadow_ticks;
     } st_ = {};
     bool skipped_logged_ = false;
 
@@ -340,14 +358,20 @@ private:
     void begin_packet(const PkgRes& r);
     void set_layout(const PkgRes& r, int vbuf);
     void set_texenv(const tev::Combiners& comb);
-    void set_units(const UnitRes units[3]);
+    void set_units(const UnitRes units[3], u32 tex_shadow = 1);
     void set_pixel(const u32 pixel[6]);
-    void draw_batch(const PkgRes& r, const fmt::Batch& b);
+    void draw_batch(const PkgRes& r, const fmt::Batch& b) { draw_indices(r, b.first_index, b.n_indices); }
+    void draw_indices(const PkgRes& r, u32 first, u32 count);
+    void forget_state();
+    bool make_shadow(u32 size);
+    void shadow_pass(const g3::Packet& p, PkgRes& r);
+    void position_rows(const g3::Packet& p, int matrix, const VbRes& vb, const f32 (*rows)[4], u32 n, int slot);
     void make_material(PkgRes& r, u32 index, const g3::Material& m);
     MatrixEntry& matrices(const g3::Packet& p, const MatrixKey& key);
     void normal_rows(MatrixEntry& e);
     void material_uniforms(const g3::Packet& p, const g3::Material& m, const g3::MatDynamic* dyn);
-    void texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb);
+    void texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb,
+                      const int slot[3] = nullptr);
     bool fog_rows(const g3::Packet& p, const g3::GxView& view, const g3::Material& m, const fmt::Batch& b,
                   const VbRes& vb, double pull, f32 rows[3][4], u32* color);
     void fog_pass(const g3::Material& m, const fmt::Batch& b, const PkgRes& r, const f32 rows[3][4], u32 color);
@@ -415,6 +439,28 @@ bool PicaBackend::init() {
     s_fog_regs[3] = 0;
     s_fog_regs[4] = osConvertVirtToPhys(s_fog_tex) >> 3;
     s_fog_regs[5] = GPU_A8;
+    // the decals' fade window (native_draw.h shadow_fade_alpha): A8, SHADOW_FADE_TEXELS square in 8x8
+    // tiles of Z order (it is the same flipped and turned: the tiles' and the rows' order don't matter)
+    const u32 fn = g3::SHADOW_FADE_TEXELS;
+    if (!(fade_tex_ = linearAlloc(fn * fn)))
+        return false;
+    u8* ft = (u8*)fade_tex_;
+    for (u32 y = 0; y < fn; y++)
+        for (u32 x = 0; x < fn; x++) {
+            const u32 tile = (y >> 3) * (fn >> 3) + (x >> 3);
+            ft[tile * 64 + ((x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3)] =
+                (u8)lroundf(255.0f * g3::shadow_fade_alpha(((f32)x + 0.5f) / fn, ((f32)y + 0.5f) / fn));
+        }
+    GSPGPU_FlushDataCache(fade_tex_, fn * fn);
+    fade_unit_.on = true;
+    fade_unit_.regs[0] = 0;
+    fade_unit_.regs[1] = fn | fn << 16;
+    fade_unit_.regs[2] = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+                         GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE) |
+                         GPU_TEXTURE_MODE(GPU_TEX_2D);
+    fade_unit_.regs[3] = 0;
+    fade_unit_.regs[4] = osConvertVirtToPhys(fade_tex_) >> 3;
+    fade_unit_.regs[5] = GPU_A8;
     log("g3d pica: backend ready (shader %u bytes)%s", (unsigned)g3d_shbin_size,
         stats_every_ > 0 ? "; NOMA_G3D_STATS on" : "");
     return true;
@@ -434,8 +480,9 @@ void PicaBackend::prepare(g3::Package& pkg) {
         if (vb.count)
             lo = std::min(lo, vb.data), hi = std::max(hi, vb.data + vb.count * vb.stride);
     const auto idx = pkg.indices();
-    r->vtx_bytes = hi > lo ? (hi - lo + 15) & ~15u : 0;
-    r->idx_bytes = (idx.count * 2 + 15) & ~15u;
+    const u32 vtx_data = hi > lo ? (hi - lo + 15) & ~15u : 0, idx_data = (idx.count * 2 + 15) & ~15u;
+    r->vtx_bytes = vtx_data + 64;  // (the quad's 4 vertices, 12 bytes each)
+    r->idx_bytes = idx_data + 16;  // (its 6 indices)
     // (room for it all: the GX path's textures no recent frame drew make way -- the room's, while
     // the island loads)
     u32 need = r->vtx_bytes + r->idx_bytes;
@@ -455,11 +502,18 @@ void PicaBackend::prepare(g3::Package& pkg) {
         r->vtx = r->idx = nullptr;
         return;
     }
-    memcpy(r->vtx, pkg.at(lo), hi - lo);
+    if (hi > lo)
+        memcpy(r->vtx, pkg.at(lo), hi - lo);
     memcpy(r->idx, idx.data, idx.count * 2);
+    static const f32 k_quad[12] = {-1, -1, -0.5f, 1, -1, -0.5f, 1, 1, -0.5f, -1, 1, -0.5f};
+    static const u16 k_quad_idx[6] = {0, 1, 2, 0, 2, 3};
+    memcpy((u8*)r->vtx + vtx_data, k_quad, sizeof(k_quad));
+    memcpy((u8*)r->idx + idx_data, k_quad_idx, sizeof(k_quad_idx));
     const u32 vpa = osConvertVirtToPhys(r->vtx), ipa = osConvertVirtToPhys(r->idx);
     r->base = std::min(vpa, ipa) & ~0xFu;
     r->idx_offset = ipa - r->base;
+    r->quad_offset = vpa + vtx_data - r->base;
+    r->quad_first = idx_data / 2;
     // ---- each buffer's origin: a compact one's own; for f32 positions its cell's centre (the first
     // cell that draws it), else its box's
     r->vbs.resize(vbs.count);
@@ -655,6 +709,11 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     // overlays are pulled so, at most 4 units at their furthest corner (native_draw.h overlay_pull).
     cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
     cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
+    forget_state();
+}
+
+// nothing the GPU has taken as known (a packet's start; after the shadow pass)
+void PicaBackend::forget_state() {
     memset(uv_, 0xFF, sizeof(uv_));  // (a NaN: no value compares equal to it)
     dirty_lo_ = 0, dirty_hi_ = 0;
     bools_ = int0_ = ~0u;
@@ -662,6 +721,7 @@ void PicaBackend::begin_packet(const PkgRes& r) {
     texenv_buf_ = ~0u;
     memset(units_, 0xFF, sizeof(units_));
     unit_config_ = ~0u;
+    tex_shadow_ = ~0u;
     memset(pixel_, 0xFF, sizeof(pixel_));
     layout_ = vbuf_ = -1;
     light_set_ = -2;
@@ -669,7 +729,7 @@ void PicaBackend::begin_packet(const PkgRes& r) {
         e.valid = false;
     mcur_ = nullptr;
     mkey_ = MatrixKey();
-    mat_key_ = ~0u;
+    mat_key_ = ~0ull;
 }
 
 // the vertex buffer: its layout (the loaders, the shader inputs they feed, the fixed values) and
@@ -718,8 +778,8 @@ void PicaBackend::set_texenv(const tev::Combiners& comb) {
 
 // the texture units (the ones that differ), then which are on, with the texture cache cleared (as
 // citro3d does when it binds a texture)
-void PicaBackend::set_units(const UnitRes units[3]) {
-    bool changed = false;
+void PicaBackend::set_units(const UnitRes units[3], u32 tex_shadow) {
+    bool changed = tex_shadow != tex_shadow_;
     u32 on = 0;
     for (int u = 0; u < 3; u++) {
         if (!units[u].on)
@@ -737,7 +797,8 @@ void PicaBackend::set_units(const UnitRes units[3]) {
     unit_config_ = on;
     cmd_masked(GPUREG_TEXUNIT_CONFIG, 0xB, 1u << 12 | on);
     cmd_masked(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
-    cmd_write(GPUREG_TEXUNIT0_SHADOW, 1);
+    cmd_write(GPUREG_TEXUNIT0_SHADOW, tex_shadow);
+    tex_shadow_ = tex_shadow;
 }
 
 // the pixel pipeline's registers that differ (as citro3d's effect binding writes them)
@@ -759,14 +820,14 @@ void PicaBackend::set_pixel(const u32 px[6]) {
     memcpy(pixel_, px, sizeof(pixel_));
 }
 
-// the batch's triangles (as C3D_DrawElements draws GPU_TRIANGLES from u16 indices)
-void PicaBackend::draw_batch(const PkgRes& r, const fmt::Batch& b) {
+// triangles from u16 indices (as C3D_DrawElements draws GPU_TRIANGLES): a batch's, a caster's run
+void PicaBackend::draw_indices(const PkgRes& r, u32 first, u32 count) {
     upload_uniforms();
     pica_native_draw_noted();
     cmd_masked(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
     cmd_write(GPUREG_RESTART_PRIMITIVE, 1);
-    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + b.first_index * 2) | 1u << 31);
-    cmd_write(GPUREG_NUMVERTICES, b.n_indices);
+    cmd_write(GPUREG_INDEXBUFFER_CONFIG, (r.idx_offset + first * 2) | 1u << 31);
+    cmd_write(GPUREG_NUMVERTICES, count);
     cmd_write(GPUREG_VERTEX_OFFSET, 0);
     cmd_masked(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
     cmd_masked(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
@@ -878,10 +939,12 @@ void PicaBackend::material_uniforms(const g3::Packet& p, const g3::Material& m, 
 // camera env map (0.5 + 0.5 nx, 0.5 - 0.5 ny) folded in) as (s, t, 1, 1) through the material's
 // 2x4 matrix; the position for a projection map, (0.5 w + 0.5 x, 0.5 w - 0.5 y, w) in GX's clip
 // space through the matrix (q = w); then the texture's padding.
-void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb) {
+void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3::MatDynamic* dyn, const VbRes& vb,
+                               const int slot[3]) {
     for (int u = 0; u < 3; u++) {
-        if (!mr.unit[u].on)
+        if (!mr.unit[u].on || (slot && slot[u] < 0))
             continue;
+        const int k = slot ? slot[u] : u;  // (the unit it is sampled on: a receiver's 0 is on 2)
         const g3::TexUnit& tu = m.unit[u];
         const f32(*T)[4] = tu.matrix >= 0 && tu.matrix < 3 ? (dyn ? dyn->tex_mtx[tu.matrix] : m.tex_mtx[tu.matrix])
                                                             : k_identity24;
@@ -923,9 +986,33 @@ void PicaBackend::texture_rows(const g3::Material& m, const MatRes& mr, const g3
         }
         }
         for (int i = 0; i < 3; i++)
-            uni(R.tmtx + 3 * u + i, rows[i]);
-        uni(R.tsel + u, sel);
+            uni(R.tmtx + 3 * k + i, rows[i]);
+        uni(R.tsel + k, sel);
     }
+}
+
+// A unit's rows of coordinates from the position (the shadow map's s, t and depth, or the fade
+// window's s, t and q = 1): world rows times the item's matrix, its buffer's origin and step, in double
+// (the island's coordinates less the map's are a few hundred units: what the GPU's 24-bit floats get is
+// within a hundredth of a texel)
+void PicaBackend::position_rows(const g3::Packet& p, int matrix, const VbRes& vb, const f32 (*rows)[4], u32 n,
+                                int slot) {
+    const f32* M = &p.matrices[12 * (size_t)matrix];
+    for (u32 i = 0; i < 3; i++) {
+        f32 out[4] = {0, 0, 0, 1};
+        if (i < n) {
+            double w[4];
+            for (int c = 0; c < 4; c++)
+                w[c] = (double)rows[i][0] * M[c] + (double)rows[i][1] * M[4 + c] + (double)rows[i][2] * M[8 + c] +
+                       (c == 3 ? (double)rows[i][3] : 0.0);
+            w[3] += w[0] * vb.origin[0] + w[1] * vb.origin[1] + w[2] * vb.origin[2];
+            for (int c = 0; c < 3; c++)
+                out[c] = (f32)(w[c] * vb.scale);
+            out[3] = (f32)w[3];
+        }
+        uni(R.tmtx + 3 * slot + (int)i, out);
+    }
+    uni(R.tsel + slot, 0, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------- matrices
@@ -1089,7 +1176,178 @@ void PicaBackend::fog_pass(const g3::Material& m, const fmt::Batch& b, const Pkg
     draw_batch(r, b);
     // (the next item sends its material's state and rows again: the per-register caches skip what
     // is the same)
-    mat_key_ = ~0u;
+    mat_key_ = ~0ull;
+}
+
+// ---------------------------------------------------------------- the shadow map
+// The map's texture: the size the first map asks for (a later size takes the same texture: what a
+// texel covers is the World's choice, the receivers sample whatever the texture has), in VRAM if there
+// is room (the GPU draws into it and reads it back every frame), else in linear memory; RGBA8 as the
+// GPU's shadow mode keeps its texels (depth in 24 bits, intensity in 8); no depth buffer.
+bool PicaBackend::make_shadow(u32 size) {
+    if (shadow_size_)
+        return true;
+    if (shadow_failed_ || size < 8 || size > 1024 || (size & (size - 1)))
+        return false;
+    bool vram = C3D_TexInitShadow(&shadow_tex_, (u16)size, (u16)size);
+    if (!vram && !C3D_TexInitWithParams(&shadow_tex_, nullptr,
+                                        (C3D_TexInitParams){(u16)size, (u16)size, 0, GPU_RGBA8, GPU_TEX_SHADOW_2D, false})) {
+        log("g3d pica: no memory for a %u-texel shadow map: no shadows", (unsigned)size);
+        shadow_failed_ = true;
+        return false;
+    }
+    C3D_FrameBufTex(&shadow_fb_, &shadow_tex_, GPU_TEXFACE_2D, 0);
+    C3D_FrameBufDepth(&shadow_fb_, nullptr, GPU_RB_DEPTH24);
+    shadow_size_ = size;
+    UnitRes& u = shadow_unit_;
+    u.on = true;
+    u.regs[0] = 0xFFFFFFFF;  // (off the map: nothing in front: lit)
+    u.regs[1] = size | size << 16;
+    u.regs[2] = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+                GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_BORDER) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_BORDER) |
+                GPU_TEXTURE_MODE(GPU_TEX_SHADOW_2D);
+    u.regs[3] = 0;
+    u.regs[4] = osConvertVirtToPhys(shadow_tex_.data) >> 3;
+    u.regs[5] = GPU_RGBA8;
+    log("g3d pica: shadow map %u x %u in %s (%u KB)", (unsigned)size, (unsigned)size, vram ? "VRAM" : "linear memory",
+        (unsigned)(size * size * 4 >> 10));
+    return true;
+}
+
+// rows (affine, 4: the last (0 0 0 1)) of the world times an item's matrix, its buffer's origin and
+// step, into float rows for the positions the GPU reads
+void compose_rows(const f32* M, const VbRes& vb, const double rows[4][4], f32 out[4][4]) {
+    for (int i = 0; i < 4; i++) {
+        double w[4];
+        for (int c = 0; c < 4; c++)
+            w[c] = rows[i][0] * M[c] + rows[i][1] * M[4 + c] + rows[i][2] * M[8 + c] + (c == 3 ? rows[i][3] : 0.0);
+        w[3] += w[0] * vb.origin[0] + w[1] * vb.origin[1] + w[2] * vb.origin[2];
+        for (int c = 0; c < 3; c++)
+            out[i][c] = (f32)(w[c] * vb.scale);
+        out[i][3] = (f32)w[3];
+    }
+}
+
+// The map, before the opaque packet's items: the frame's target swapped for the map's texture
+// (gx_pica.cpp pica_native_target); the texture cleared by a quad over it in the ordinary fragment mode
+// (white: depth 0xFFFFFF, intensity 255 -- nothing in front of anything); then, in the GPU's shadow
+// mode, each caster's triangles (no culling: both faces cast), clip x, y = 2 s - 1, 2 t - 1 and z = -depth
+// (w 1, an orthographic view), depth mapped by scale -1 to the map's 0..1, the GPU keeping the nearer
+// depth itself (no depth test); their combiners' green 0 (a hard shadow, no penumbra) and alpha the
+// material's texture's where it is alpha-tested (a tree's leaves cut out), tested as the material
+// tests it. Then the frame's target again, and nothing kept about the GPU's state.
+void PicaBackend::shadow_pass(const g3::Packet& p, PkgRes& r) {
+    shadow_ready_ = false;
+    if (!make_shadow(p.shadow.size))
+        return;
+    const u64 t0 = svcGetSystemTick();
+    smap_ = p.shadow;
+    const u32 iBias = std::min((u32)((1u << 24) - 1), (u32)lroundf(smap_.bias * (f32)(1u << 24)));
+    shadow_word_ = (iBias & ~1u) | 1u;  // (orthographic: s, t used as they are; C3D_TexShadowParams)
+    pica_native_target(&shadow_fb_);
+    tev::Combiners comb;
+    for (int i = 0; i < 6; i++) {
+        tev::CombinerStage& st = comb.stage[i];
+        memset(&st, 0, sizeof(st));
+        for (int k = 0; k < 3; k++)
+            st.src_rgb[k] = st.src_a[k] = tev::SRC_PREVIOUS;
+        st.func_rgb = st.func_a = tev::FUNC_REPLACE;
+    }
+    comb.buf_rgb = comb.buf_a = 0;
+    // ---- the clear
+    {
+        const u8 lay = layout_of(fmt::VA_POS, 0, 12);
+        const Layout& L = s_layouts[lay];
+        const u32 fmt_words[2] = {L.format_low, L.format_high};
+        cmd_incremental(GPUREG_ATTRIBBUFFERS_FORMAT_LOW, fmt_words, 2);
+        cmd_masked(GPUREG_VSH_INPUTBUFFER_CONFIG, 0xB, 0xA0000000 | 4);
+        cmd_write(GPUREG_VSH_NUM_ATTR, 4);
+        const u32 perm[2] = {L.permutation, 0};
+        cmd_incremental(GPUREG_VSH_ATTRIBUTES_PERMUTATION_LOW, perm, 2);
+        for (u32 i = 0; i < L.n_fixed; i++) {
+            cmd_write(GPUREG_FIXEDATTRIB_INDEX, L.fixed_id[i]);
+            C3D_ImmSendAttrib(L.fixed[i][0], L.fixed[i][1], L.fixed[i][2], L.fixed[i][3]);
+        }
+        const u32 buf[3] = {r.quad_offset, L.buf_config1, L.buf_config2};
+        cmd_incremental(GPUREG_ATTRIBBUFFER0_OFFSET, buf, 3);
+        layout_ = vbuf_ = -1;
+        comb.stage[0].src_rgb[0] = comb.stage[0].src_a[0] = tev::SRC_CONSTANT;
+        comb.stage[0].konst = 0xFFFFFFFF;
+        set_texenv(comb);
+        UnitRes none[3];
+        set_units(none, 1);
+        const u32 pixel[6] = {0, (u32)GPU_WRITE_COLOR << 8,
+                              GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_ONE << 16 | GPU_ZERO << 20 | GPU_ONE << 24 |
+                                  (u32)GPU_ZERO << 28,
+                              0xE40100, GPU_LOGICOP_COPY, 0};
+        set_pixel(pixel);
+        set_bools(0);
+        for (int i = 0; i < 4; i++)
+            uni(R.mvp + i, i == 0 ? 1.0f : 0.0f, i == 1 ? 1.0f : 0.0f, i == 2 ? 1.0f : 0.0f, i == 3 ? 1.0f : 0.0f);
+        draw_indices(r, r.quad_first, 6);
+    }
+    // ---- the casters
+    cmd_write(GPUREG_FRAGOP_SHADOW, 0x3C00u | 0x8000u << 16);  // (C3D_FragOpShadow(0, 1): no penumbra in use)
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(-1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(0.0f));
+    double clip[4][4];
+    for (int j = 0; j < 4; j++) {
+        clip[0][j] = 2.0 * smap_.light[0][j] - (j == 3 ? 1.0 : 0.0);
+        clip[1][j] = 2.0 * smap_.light[1][j] - (j == 3 ? 1.0 : 0.0);
+        clip[2][j] = -(double)smap_.light[2][j];
+        clip[3][j] = j == 3 ? 1.0 : 0.0;
+    }
+    const auto batches = p.package->batches();
+    u32 tris = 0;
+    for (const g3::ShadowCaster& c : p.casters) {
+        if (c.batch >= batches.count || 12 * ((size_t)c.matrix + 1) > p.matrices.size())
+            continue;
+        const fmt::Batch& b = batches[c.batch];
+        if (b.vbuf >= r.vbs.size() || !r.vbs[b.vbuf].ok || b.material >= r.mats.size())
+            continue;
+        const g3::Material& m = p.materials[b.material];
+        MatRes& mr = r.mats[b.material];
+        if (!mr.made)
+            make_material(r, b.material, m);
+        const VbRes& vb = r.vbs[b.vbuf];
+        set_layout(r, b.vbuf);
+        f32 mvp[4][4];
+        compose_rows(&p.matrices[12 * (size_t)c.matrix], vb, clip, mvp);
+        for (int i = 0; i < 4; i++)
+            uni(R.mvp + i, mvp[i]);
+        // the alpha test's texture: unit 0's, at uv0 or uv1
+        const g3::TexUnit& tu = m.unit[0];
+        const bool cut = m.pixel.alpha_test && m.pixel.alpha_func != GPU_ALWAYS && mr.drawable && mr.unit[0].on &&
+                         (tu.source == g3::TexCoordSource::UV0 || tu.source == g3::TexCoordSource::UV1);
+        comb.stage[0].src_rgb[0] = tev::SRC_CONSTANT;
+        comb.stage[0].src_a[0] = cut ? tev::SRC_TEXTURE0 : tev::SRC_CONSTANT;
+        comb.stage[0].op_a[0] = cut && (m.lum_units & 1) ? tev::OP_A_SRC_R : tev::OP_A_SRC_ALPHA;
+        comb.stage[0].konst = 0xFF000000;
+        set_texenv(comb);
+        UnitRes units[3];
+        if (cut) {
+            units[0] = mr.unit[0];
+            static const int k_slot0[3] = {0, -1, -1};
+            texture_rows(m, mr, nullptr, vb, k_slot0);
+        }
+        set_units(units, 1);
+        const u32 pixel[6] = {cut ? mr.pixel[0] : 0, (u32)GPU_WRITE_COLOR << 8,
+                              GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_ONE << 16 | GPU_ZERO << 20 | GPU_ONE << 24 |
+                                  (u32)GPU_ZERO << 28,
+                              0xE40103, GPU_LOGICOP_COPY, 0};
+        set_pixel(pixel);
+        set_bools(0);
+        draw_indices(r, c.first_index, c.n_indices);
+        tris += c.n_indices / 3;
+    }
+    // ---- the frame's target again
+    cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
+    cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
+    pica_native_target(nullptr);
+    forget_state();
+    shadow_ready_ = true;
+    st_.shadow_maps++, st_.shadow_draws += (u32)p.casters.size(), st_.shadow_triangles += tris;
+    st_.shadow_ticks += svcGetSystemTick() - t0;
 }
 
 // ---------------------------------------------------------------- draw
@@ -1132,6 +1390,15 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             o[4 + j] = u8f(l.rgba[j]);
     }
     begin_packet(*r);
+    // the shadow map: drawn by the opaque packet (when it has casters), sampled by both
+    if (!p.shadow.size)
+        shadow_ready_ = false;
+    else if (p.pass == g3::Pass::OPAQUE) {
+        shadow_ready_ = false;
+        if (!p.casters.empty())
+            shadow_pass(p, *r);
+    }
+    const u32 tex_shadow = shadow_ready_ ? shadow_word_ : 1;
     const auto batches = p.package->batches();
     for (size_t n = 0; n < p.items.size(); n++) {
         const g3::DrawItem& it = p.items[n];
@@ -1184,16 +1451,35 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             mkey_ = key;
             st_.matrices++;
         }
-        // its material
-        const u32 mkey = (u32)b.material << 16 | it.mat_state;
+        // its material, as a receiver of the shadow map (its unit 0 on unit 2, the map on 0: material.h)
+        // or a decal faded where the map covers (the fade window on unit 1)
+        const bool recv = shadow_ready_ && (it.flags & g3::DRAW_SHADOW_RECEIVER) && m.shadow_receiver;
+        const bool fade = shadow_ready_ && !recv && (it.flags & g3::DRAW_SHADOW_FADE) && m.shadow_decal;
+        const u64 mkey = (u64)(recv ? 1 : fade ? 2 : 0) << 32 | (u32)b.material << 16 | it.mat_state;
         const bool new_mat = mkey != mat_key_;
         if (new_mat) {
-            set_texenv(dyn ? dyn->comb : m.comb);
-            set_units(mr.unit);
+            const tev::Combiners& base = dyn ? dyn->comb : m.comb;
+            if (recv) {
+                tev::Combiners c2;
+                g3::shadow_receiver_combiners(base, smap_.darkness, &c2);
+                set_texenv(c2);
+                const UnitRes u3[3] = {shadow_unit_, mr.unit[1], mr.unit[0]};
+                set_units(u3, tex_shadow);
+            } else if (fade) {
+                tev::Combiners c2;
+                g3::shadow_decal_combiners(base, &c2);
+                set_texenv(c2);
+                const UnitRes u3[3] = {mr.unit[0], fade_unit_, mr.unit[2]};
+                set_units(u3, tex_shadow);
+            } else {
+                set_texenv(base);
+                set_units(mr.unit, tex_shadow);
+            }
             material_uniforms(p, m, dyn);
             mat_key_ = mkey;
             st_.mat_changes++;
         }
+        st_.shadow_receivers += recv, st_.shadow_faded += fade;
         // the normal rows, for a material that reads normals (lit, or mapping the environment)
         if (mr.bools >> R.b_usenrm & 1) {
             normal_rows(*mcur_);
@@ -1205,9 +1491,20 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
         if (sky)  // (no depth test or write)
             pixel[1] = 1 | (u32)GPU_ALWAYS << 4 | (pixel[1] & 0xF00);
         set_pixel(pixel);
-        set_bools(mr.bools | (n_lights_ && (mr.bools >> R.b_lit & 1) ? 1u << R.b_haslights : 0));
-        if (new_mat || vb.uv_scale[0] != rows_uv_[0] || vb.uv_scale[1] != rows_uv_[1] || (moved && mr.projects)) {
-            texture_rows(m, mr, dyn, vb);
+        u32 bools = mr.bools;
+        if (recv)  // (the map's coordinates from the position on unit 0, the material's unit 0 on unit 2)
+            bools |= 1u << R.b_proj0 | 1u << R.b_tc2on;
+        else if (fade)  // (the fade window's from the position on unit 1)
+            bools |= 1u << (R.b_proj0 + 1) | 1u << R.b_tc1on;
+        set_bools(bools | (n_lights_ && (mr.bools >> R.b_lit & 1) ? 1u << R.b_haslights : 0));
+        if (new_mat || vb.uv_scale[0] != rows_uv_[0] || vb.uv_scale[1] != rows_uv_[1] ||
+            (moved && (mr.projects || recv || fade))) {
+            static const int k_receiver_slots[3] = {2, 1, -1};
+            texture_rows(m, mr, dyn, vb, recv ? k_receiver_slots : nullptr);
+            if (recv)
+                position_rows(p, it.matrix, vb, smap_.light, 3, 0);
+            else if (fade)
+                position_rows(p, it.matrix, vb, smap_.fade, 2, 1);
             rows_uv_[0] = vb.uv_scale[0], rows_uv_[1] = vb.uv_scale[1];
         }
         draw_batch(*r, b);
@@ -1221,9 +1518,12 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
         }
     }
     // unit 0 left an ordinary 2D texture (a projection one samples by texcoord0w, which the GX
-    // shader doesn't write)
-    if (units_[0][2] != ~0u && ((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION)
+    // shader doesn't write; a shadow one compares), its shadow register as citro3d keeps it
+    if (units_[0][2] != ~0u && (((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION ||
+                                ((units_[0][2] >> 28) & 7) == GPU_TEX_SHADOW_2D))
         cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
+    if (tex_shadow_ != 1)
+        cmd_write(GPUREG_TEXUNIT0_SHADOW, 1);
     // the GX path uses the same complemented clip depth
     cmd_write(GPUREG_DEPTHMAP_SCALE, f32tof24(1.0f));
     cmd_write(GPUREG_DEPTHMAP_OFFSET, f32tof24(1.0f));
@@ -1256,13 +1556,15 @@ void PicaBackend::stats_packet(const g3::Packet& p, const PkgRes& r, u64 ticks, 
         "%.2f ms a frame in the backend (at most %.2f); %.0f material changes, %.0f matrix changes (%.0f made), "
         "%.0f uniform vectors, %.0f command words a frame; %u items not drawn (command list full; the last frame's "
         "list %.0f %% of it); resident: %u textures %u KB, vertices %u KB, indices %u KB; %u KB of the linear heap "
-        "free",
+        "free; shadow map %u: %.0f casters, %.0f triangles, %.2f ms in its pass, %.0f receiving items, %.0f decals "
+        "faded a frame (%u maps)",
         (unsigned)st_.frames, st_.draws / f, st_.prelit_draws / f, st_.fog_draws / f, st_.triangles / f,
         st_.indices / f, (double)st_.ticks * ms / f, max_ms, st_.mat_changes / f, st_.matrices / f,
         st_.matrices_made / f, st_.uniform_vectors / f, st_.cmd_words / f, (unsigned)st_.items_skipped,
         (double)C3D_GetCmdBufUsage() * 100.0, (unsigned)textures,
         (unsigned)(r.tex_bytes >> 10), (unsigned)(r.vtx_bytes >> 10), (unsigned)(r.idx_bytes >> 10),
-        (unsigned)(linearSpaceFree() >> 10));
+        (unsigned)(linearSpaceFree() >> 10), (unsigned)shadow_size_, st_.shadow_draws / f, st_.shadow_triangles / f,
+        (double)st_.shadow_ticks * ms / f, st_.shadow_receivers / f, st_.shadow_faded / f, (unsigned)st_.shadow_maps);
     st_ = Stats();
 }
 

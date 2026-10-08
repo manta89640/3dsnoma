@@ -2274,6 +2274,23 @@ void pica_native_begin(f32 clip[4][4]) {
     memcpy(clip, P.clip, sizeof(P.clip));
 }
 
+void pica_native_target(C3D_FrameBuf* fb) {
+    // (what was drawn into the target so far goes to memory before another is bound)
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    if (fb) {
+        C3D_SetFrameBuf(fb);
+        C3D_SetViewport(0, 0, fb->width, fb->height);  // (and no scissor)
+        C3Di_UpdateContext();
+        return;
+    }
+    // the frame's target, its whole viewport, then the GX state's scissor (set_xform; a direct write
+    // after citro3d's, or citro3d's own)
+    C3D_FrameDrawOn(P.top);
+    C3Di_UpdateContext();
+    set_xform();
+    C3Di_UpdateContext();
+}
+
 void pica_native_end(shaderProgram_s* used) {
     // citro3d: the GX shader program configured again at the next draw (its code too: the native
     // program's was loaded over it), with its attribute layout and buffers. Its bool uniforms are

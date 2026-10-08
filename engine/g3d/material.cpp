@@ -1,6 +1,8 @@
 // Materials of the native g3d at run time (material.h).
 #include "engine/g3d/material.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "engine/g3d/anim.h"
@@ -215,6 +217,94 @@ void build_material(const Package& pkg, u32 index, Material* out) {
     r.priority = m.priority;
     r.indirect = (m.flags & fmt::MAT_INDIRECT) || m.n_ind;
     r.prelit = (m.flags & fmt::MAT_PRELIT) && m.n_chans > 0;
+    r.shadow_receiver = (m.flags & fmt::MAT_SHADOW_RECEIVER) && shadow_receiver_fits(r, r.comb);
+    r.shadow_decal = (m.flags & fmt::MAT_SHADOW_DECAL) && shadow_decal_fits(r, r.comb);
+}
+
+namespace {
+
+// whether a stage reads a source (colour or alpha)
+bool reads(const engine::gx::CombinerStage& st, u8 src) {
+    for (int i = 0; i < 3; i++)
+        if ((st.src_rgb[i] & 15) == src || (st.src_a[i] & 15) == src)
+            return true;
+    return false;
+}
+
+engine::gx::CombinerStage pass_on() {
+    engine::gx::CombinerStage s;
+    memset(&s, 0, sizeof(s));
+    for (int k = 0; k < 3; k++)
+        s.src_rgb[k] = s.src_a[k] = engine::gx::SRC_PREVIOUS;
+    s.func_rgb = s.func_a = engine::gx::FUNC_REPLACE;
+    return s;
+}
+
+}  // namespace
+
+bool shadow_receiver_fits(const Material& m, const engine::gx::Combiners& comb) {
+    const u32 n = std::max<u32>(1, comb.n_stages);
+    if (n > 4 || m.unit[2].texture != fmt::NONE16 || m.unit[0].source == TexCoordSource::PROJECTION)
+        return false;
+    for (u32 i = 0; i < n; i++)
+        if (reads(comb.stage[i], engine::gx::SRC_TEXTURE2))
+            return false;
+    return true;
+}
+
+void shadow_receiver_combiners(const engine::gx::Combiners& in, f32 darkness, engine::gx::Combiners* out) {
+    using namespace engine::gx;
+    *out = in;
+    const u32 n = std::max<u32>(1, in.n_stages);
+    for (u32 i = 0; i < n; i++)
+        for (int k = 0; k < 3; k++) {
+            if ((out->stage[i].src_rgb[k] & 15) == SRC_TEXTURE0)
+                out->stage[i].src_rgb[k] = SRC_TEXTURE2;
+            if ((out->stage[i].src_a[k] & 15) == SRC_TEXTURE0)
+                out->stage[i].src_a[k] = SRC_TEXTURE2;
+        }
+    // the material's result into the buffer (read two stages on: the PICA's buffer is a stage behind)
+    out->buf_rgb |= (u8)(1u << (n - 1));
+    const u32 k = (u32)std::lround(std::max(0.0f, std::min(1.0f, darkness)) * 255.0f);
+    // f = TEXTURE0 x darkness + (1 - darkness)
+    CombinerStage& f = out->stage[n];
+    f = pass_on();
+    f.src_rgb[0] = SRC_TEXTURE0, f.src_rgb[1] = SRC_CONSTANT, f.src_rgb[2] = SRC_CONSTANT;
+    f.op_rgb[2] = OP_RGB_ONE_MINUS_SRC_COLOR;
+    f.func_rgb = FUNC_MULTIPLY_ADD;
+    f.konst = k | k << 8 | k << 16 | 0xFF000000u;
+    // the material's colour (the buffer) x f, its alpha passed on
+    CombinerStage& c = out->stage[n + 1];
+    c = pass_on();
+    c.src_rgb[0] = SRC_PREVIOUS, c.src_rgb[1] = SRC_PREVIOUS_BUFFER;
+    c.func_rgb = FUNC_MODULATE;
+    for (u32 i = n + 2; i < 6; i++)
+        out->stage[i] = pass_on();
+    out->n_stages = (u8)(n + 2);
+}
+
+bool shadow_decal_fits(const Material& m, const engine::gx::Combiners& comb) {
+    const u32 n = std::max<u32>(1, comb.n_stages);
+    if (n > 5 || m.unit[1].texture != fmt::NONE16)
+        return false;
+    for (u32 i = 0; i < n; i++)
+        if (reads(comb.stage[i], engine::gx::SRC_TEXTURE1))
+            return false;
+    return true;
+}
+
+void shadow_decal_combiners(const engine::gx::Combiners& in, engine::gx::Combiners* out) {
+    using namespace engine::gx;
+    *out = in;
+    const u32 n = std::max<u32>(1, in.n_stages);
+    // the alpha times the fade window's (TEXTURE1's alpha), the colour passed on
+    CombinerStage& a = out->stage[n];
+    a = pass_on();
+    a.src_a[0] = SRC_PREVIOUS, a.src_a[1] = SRC_TEXTURE1;
+    a.func_a = FUNC_MODULATE;
+    for (u32 i = n + 1; i < 6; i++)
+        out->stage[i] = pass_on();
+    out->n_stages = (u8)(n + 1);
 }
 
 }  // namespace engine::g3d

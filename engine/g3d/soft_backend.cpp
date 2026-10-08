@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -84,10 +85,15 @@ inline s32 wrap(s32 i, s32 n, bool pow2, u8 mode) {
 }
 
 // ---------------------------------------------------------------- per item
-constexpr int NA = 10;  // attributes: colour RGBA (0-255), then (s, t) for texture units 0-2
+constexpr int NA = 11;  // attributes: colour RGBA (0-255), (s, t) for texture units 0-2, the shadow map's depth
+
+// what a unit samples: its material's texture, the shadow map (unit 0 of a receiver: (s, t) and the
+// depth from the position), or a texture at coordinates from the position (the decals' fade window)
+enum UnitKind : u8 { UK_TEXTURE = 0, UK_SHADOW = 1, UK_POSITION = 2 };
 
 struct Unit {
     bool on = false;            // sampled by the combiners
+    u8 kind = UK_TEXTURE;
     TexCoordSource source = TexCoordSource::UV0;
     const f32 (*mtx)[4] = nullptr;  // the texture matrix (2x4) or none
     const SoftTexture* tex = nullptr;  // none: reads white
@@ -109,6 +115,9 @@ struct LightIn {
 struct Item {
     const fmt::Batch* batch = nullptr;
     const CombinerStage* stage = nullptr;
+    Combiners own;               // the combiners when the shadows change the material's (stage points here)
+    bool shadow = false, fade = false;  // DRAW_SHADOW_RECEIVER, DRAW_SHADOW_FADE (as the backend takes them)
+    f64 prow[3][4] = {};         // the buffer's positions -> the shadow map's (s, t, depth) or the fade's (s, t)
     u8 n_stages = 1, buf_rgb = 0, buf_a = 0;
     Unit unit[3];
     bool need_color = false;     // the combiners read the colour channel
@@ -183,6 +192,35 @@ struct SoftBackend::Impl {
     f32 k = 1;            // package units -> guest units
     // the overlays' pull toward the eye (native_draw.h overlay_pull; the test hook's when set)
     f64 pull = OVERLAY_DEPTH_PULL, pull_limit = OVERLAY_PULL_LIMIT;
+    // The shadow map (native_draw.h ShadowMap): drawn by an opaque packet's casters, sampled by both
+    // passes' receivers. Texels as the 3DS GPU keeps them: the depth in 24 bits (0xFFFFFF: nothing),
+    // row t = 0 first; the fade window as the texture both backends sample.
+    std::vector<u32> smap;
+    u32 smap_size = 0;
+    f64 smap_bias = 0;
+    SoftTexture fade_tex;
+
+    void draw_shadow_map(const Packet& p, const Prepared& prep, Stats& st);
+    // the shadow map's filtered compare at (s, t) for a receiver at depth d (0-255: 255 lit), as the
+    // 3DS GPU makes it (Azahar's shadowTexture): the four texels about the point, each lit when what it
+    // holds lies beyond the receiver's depth less the bias (a texel off the map: lit), mixed bilinearly
+    s32 shadow_sample(f32 s, f32 t, f32 d) const {
+        const s64 z = std::max<s64>(0, (s64)(std::min(std::fabs((f64)d), 1.0) * 16777215.0) - (s64)(smap_bias * 16777216.0));
+        const f32 x = s * (f32)smap_size - 0.5f, y = t * (f32)smap_size - 0.5f;
+        if (!(x > -2 && x < (f32)smap_size + 1 && y > -2 && y < (f32)smap_size + 1))
+            return 255;
+        const f32 fx0 = std::floor(x), fy0 = std::floor(y);
+        const s32 ix = (s32)fx0, iy = (s32)fy0;
+        const f32 fx = x - fx0, fy = y - fy0;
+        auto lit = [&](s32 u, s32 v) -> f32 {
+            if (u < 0 || v < 0 || u >= (s32)smap_size || v >= (s32)smap_size)
+                return 1.0f;
+            return (s64)smap[(u32)v * smap_size + (u32)u] <= z ? 0.0f : 1.0f;
+        };
+        const f32 top = lit(ix, iy) + (lit(ix + 1, iy) - lit(ix, iy)) * fx;
+        const f32 bottom = lit(ix, iy + 1) + (lit(ix + 1, iy + 1) - lit(ix, iy + 1)) * fx;
+        return (s32)((top + (bottom - top) * fy) * 255.0f + 0.5f);
+    }
 
     void setup(const Packet& p, const GxView& view, Stats& st);
     void make_item(const Packet& p, const DrawItem& di, const Prepared& prep, Item& it);
@@ -597,6 +635,47 @@ void SoftBackend::Impl::make_item(const Packet& p, const DrawItem& di, const Pre
             }
         }
     }
+    // the shadows: a receiver's unit 0 the shadow map (its own unit 0 as unit 2), a decal's unit 1 the
+    // fade window, their combiners with the stages that take them (material.h); coordinates from the
+    // position: the map's rows times the item's matrix and its buffer's origin and scale
+    const ShadowMap& sm = p.shadow;
+    it.shadow = (di.flags & DRAW_SHADOW_RECEIVER) && m.shadow_receiver && sm.size && sm.size == smap_size;
+    it.fade = (di.flags & DRAW_SHADOW_FADE) && m.shadow_decal && sm.size && !it.shadow;
+    if (it.shadow || it.fade) {
+        if (it.shadow) {
+            shadow_receiver_combiners(comb, sm.darkness, &it.own);
+            it.unit[2] = it.unit[0];
+        } else {
+            shadow_decal_combiners(comb, &it.own);
+        }
+        it.stage = it.own.stage;
+        it.n_stages = (u8)std::max<u32>(1, std::min<u32>(it.own.n_stages, 6));
+        it.buf_rgb = it.own.buf_rgb, it.buf_a = it.own.buf_a;
+        Unit& un = it.unit[it.shadow ? 0 : 1];
+        un = Unit();
+        un.on = true;
+        un.kind = it.shadow ? UK_SHADOW : UK_POSITION;
+        un.tex = it.shadow ? nullptr : &fade_tex;
+        un.mag_linear = un.min_linear = true;
+        const f32(*rows)[4] = it.shadow ? sm.light : sm.fade;
+        for (int r = 0; r < (it.shadow ? 3 : 2); r++) {
+            f64 w[4];
+            for (int c = 0; c < 4; c++)
+                w[c] = (f64)rows[r][0] * mm[c] + (f64)rows[r][1] * mm[4 + c] + (f64)rows[r][2] * mm[8 + c] +
+                       (c == 3 ? (f64)rows[r][3] : 0.0);
+            if (it.pos16) {
+                w[3] += w[0] * vb.pos_origin[0] + w[1] * vb.pos_origin[1] + w[2] * vb.pos_origin[2];
+                for (int c = 0; c < 3; c++)
+                    w[c] *= vb.pos_scale;
+            }
+            memcpy(it.prow[r], w, sizeof(w));
+        }
+        reads = 0;
+        for (u32 st = 0; st < it.n_stages; st++)
+            for (int i = 0; i < 3; i++)
+                reads |= 1u << (it.stage[st].src_rgb[i] & 15) | 1u << (it.stage[st].src_a[i] & 15);
+        it.need_color = reads & 1u << engine::gx::SRC_PRIMARY_COLOR;
+    }
     // colour channel 0
     const Lighting& L = m.light;
     const u8* mat_color = dyn ? dyn->mat_color : L.mat_color;
@@ -671,6 +750,12 @@ const Vtx& SoftBackend::Impl::vertex(const Item& it, const fmt::VertexBuffer& vb
     }
     for (int r = 0; r < 4; r++)
         v.c[r] = it.pmv[r][0] * pos[0] + it.pmv[r][1] * pos[1] + it.pmv[r][2] * pos[2] + it.pmv[r][3];
+    if (it.shadow || it.fade) {  // (the map's s, t on unit 0's attributes and its depth last; the fade's on unit 1's)
+        const int at0 = it.shadow ? 4 : 6;
+        for (int r = 0; r < (it.shadow ? 3 : 2); r++)
+            v.a[r < 2 ? at0 + r : 10] = (f32)(it.prow[r][0] * pos[0] + it.prow[r][1] * pos[1] + it.prow[r][2] * pos[2] +
+                                              it.prow[r][3]);
+    }
     f32 n[3] = {0, 0, 0};
     bool has_n = false;
     if (vb.attrs & fmt::VA_NRM) {
@@ -752,7 +837,7 @@ const Vtx& SoftBackend::Impl::vertex(const Item& it, const fmt::VertexBuffer& vb
     // texture coordinates (the projection's come from the pixel)
     for (int u = 0; u < 3; u++) {
         const Unit& un = it.unit[u];
-        if (!un.on || un.source == TexCoordSource::PROJECTION)
+        if (!un.on || un.kind != UK_TEXTURE || un.source == TexCoordSource::PROJECTION)
             continue;
         f32 s, t;
         switch (un.source) {
@@ -1046,6 +1131,15 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
                     if (!un.on)
                         continue;
                     C4& out = src[engine::gx::SRC_TEXTURE0 + u];
+                    if (un.kind == UK_SHADOW) {
+                        const s32 v = shadow_sample(a[4] * w, a[5] * w, a[10] * w);
+                        out = {{v, v, v, v}};
+                        continue;
+                    }
+                    if (un.kind == UK_POSITION) {
+                        out = unpack(sample(un, a[4 + 2 * u] * w, a[5 + 2 * u] * w, -64.0f));
+                        continue;
+                    }
                     if (!un.tex) {
                         out = {{255, 255, 255, 255}};
                         continue;
@@ -1088,7 +1182,177 @@ void SoftBackend::Impl::draw_rows(u32 band, u32 bands, Stats& st) const {
 }
 
 // ---------------------------------------------------------------- SoftBackend
-SoftBackend::SoftBackend() : impl_(new Impl) {}
+SoftBackend::SoftBackend() : impl_(new Impl) {
+    // the decals' fade window (native_draw.h shadow_fade_alpha), sampled as its texture
+    SoftTexture& f = impl_->fade_tex;
+    const u32 n = SHADOW_FADE_TEXELS;
+    f.texels.resize(n * n);
+    for (u32 y = 0; y < n; y++)
+        for (u32 x = 0; x < n; x++) {
+            const u32 a = (u32)std::lround(255.0f * shadow_fade_alpha(((f32)x + 0.5f) / n, ((f32)y + 0.5f) / n));
+            f.texels[y * n + x] = 0x00FFFFFFu | a << 24;
+        }
+    f.levels = 1;
+    f.width = f.height = (f32)n;
+    f.level[0] = {f.texels.data(), n, (s32)n, (s32)n, true};
+}
+
+// The casters into the shadow map (native_draw.h ShadowMap), as the 3DS GPU draws them in its shadow
+// mode: each pixel whose centre a triangle covers keeps the nearer of its depth (0-1, 24 bits) and what
+// is there; no culling (both faces cast); an alpha-tested material's texture alpha tested as the
+// material tests it (a tree's leaves), its texture's level from the coordinates' rate across the map.
+void SoftBackend::Impl::draw_shadow_map(const Packet& p, const Prepared& prep, Stats& st) {
+    const ShadowMap& sm = p.shadow;
+    const Package& pkg = *p.package;
+    smap_size = sm.size;
+    smap_bias = sm.bias;
+    smap.assign((size_t)sm.size * sm.size, 0xFFFFFFu);
+    const f64 S = sm.size;
+    for (const ShadowCaster& c : p.casters) {
+        if (c.batch >= pkg.batches().count || 12 * ((size_t)c.matrix + 1) > p.matrices.size())
+            continue;
+        const fmt::Batch& b = pkg.batches()[c.batch];
+        const Material& m = p.materials[b.material];
+        const fmt::VertexBuffer& vb = pkg.vertex_buffers()[b.vbuf];
+        const f32* mm = &p.matrices[12 * (size_t)c.matrix];
+        // the buffer's positions -> the map's (X, Y in texels, depth)
+        f64 rows[3][4];
+        for (int r = 0; r < 3; r++) {
+            for (int k = 0; k < 4; k++)
+                rows[r][k] = (f64)sm.light[r][0] * mm[k] + (f64)sm.light[r][1] * mm[4 + k] +
+                             (f64)sm.light[r][2] * mm[8 + k] + (k == 3 ? (f64)sm.light[r][3] : 0.0);
+            if (vb.attrs & fmt::VA_POS16) {
+                rows[r][3] += rows[r][0] * vb.pos_origin[0] + rows[r][1] * vb.pos_origin[1] + rows[r][2] * vb.pos_origin[2];
+                for (int k = 0; k < 3; k++)
+                    rows[r][k] *= vb.pos_scale;
+            }
+            if (r < 2)
+                for (int k = 0; k < 4; k++)
+                    rows[r][k] *= S;
+        }
+        // the alpha test's texture: unit 0's, at its coordinates (uv0 or uv1 through its matrix)
+        const TexUnit& tu = m.unit[0];
+        const SoftTexture* tex = m.pixel.alpha_test && m.pixel.alpha_func != 1 && tu.texture != fmt::NONE16 &&
+                                         tu.texture < prep.textures.size() && prep.textures[tu.texture].levels &&
+                                         (tu.source == TexCoordSource::UV0 || tu.source == TexCoordSource::UV1)
+                                     ? &prep.textures[tu.texture]
+                                     : nullptr;
+        const int uvk = tu.source == TexCoordSource::UV1;
+        const bool lum = m.lum_units & 1;
+        Unit un;
+        if (tex) {
+            un.tex = tex, un.wrap_s = tu.wrap_s, un.wrap_t = tu.wrap_t, un.mag_linear = tu.mag_linear;
+            un.min_linear = tu.min_linear, un.mip = tu.mip, un.lod_bias = tu.lod_bias, un.min_lod = tu.min_lod;
+            un.max_lod = std::max(tu.min_lod, std::min(tu.max_lod, (f32)(tex->levels - 1)));
+        }
+        const f32(*T)[4] = tu.matrix >= 0 && tu.matrix < 3 ? m.tex_mtx[tu.matrix] : nullptr;
+        u32 uv_at = ((vb.attrs & fmt::VA_POS16) ? 8 : 12) + ((vb.attrs & fmt::VA_NRM) ? 4 : 0) +
+                    ((vb.attrs & fmt::VA_CLR) ? 4 : 0);
+        const u32 uv_size = (vb.flags & fmt::VB_UV_FLOAT) ? 8 : 4;
+        if (uvk)
+            uv_at += (vb.attrs & fmt::VA_UV0) ? uv_size : 0;
+        const bool has_uv = vb.attrs & (uvk ? fmt::VA_UV1 : fmt::VA_UV0);
+        const u8* data = pkg.at(vb.data);
+        const u16* idx = pkg.indices().data;
+        struct V {
+            f64 x, y, d;
+            f32 s, t;
+        };
+        auto vertex = [&](u16 i) {
+            const u8* q = data + (size_t)i * vb.stride;
+            f64 pos[3];
+            if (vb.attrs & fmt::VA_POS16) {
+                s16 sp[3];
+                memcpy(sp, q, 6);
+                pos[0] = sp[0], pos[1] = sp[1], pos[2] = sp[2];
+            } else {
+                f32 fp[3];
+                memcpy(fp, q, 12);
+                pos[0] = fp[0], pos[1] = fp[1], pos[2] = fp[2];
+            }
+            V v;
+            v.x = rows[0][0] * pos[0] + rows[0][1] * pos[1] + rows[0][2] * pos[2] + rows[0][3];
+            v.y = rows[1][0] * pos[0] + rows[1][1] * pos[1] + rows[1][2] * pos[2] + rows[1][3];
+            v.d = rows[2][0] * pos[0] + rows[2][1] * pos[1] + rows[2][2] * pos[2] + rows[2][3];
+            v.s = v.t = 0;
+            if (tex && has_uv) {
+                f32 uv[2];
+                if (vb.flags & fmt::VB_UV_FLOAT) {
+                    memcpy(uv, q + uv_at, 8);
+                } else {
+                    s16 su[2];
+                    memcpy(su, q + uv_at, 4);
+                    uv[0] = su[0] * vb.uv_scale[uvk], uv[1] = su[1] * vb.uv_scale[uvk];
+                }
+                v.s = T ? T[0][0] * uv[0] + T[0][1] * uv[1] + T[0][2] + T[0][3] : uv[0];
+                v.t = T ? T[1][0] * uv[0] + T[1][1] * uv[1] + T[1][2] + T[1][3] : uv[1];
+            }
+            return v;
+        };
+        for (u32 k = c.first_index; k + 2 < c.first_index + c.n_indices; k += 3) {
+            const V a = vertex(idx[k]), bb = vertex(idx[k + 1]), cc = vertex(idx[k + 2]);
+            st.shadow_triangles++;
+            const f64 area = (bb.x - a.x) * (cc.y - a.y) - (cc.x - a.x) * (bb.y - a.y);
+            if (std::fabs(area) < 1e-12)
+                continue;
+            // (depth outside 0..1 is clipped, as the GPU clips z)
+            const s32 x0 = std::max(0, (s32)std::floor(std::min({a.x, bb.x, cc.x}) - 0.5) + 1);
+            const s32 x1 = std::min((s32)sm.size - 1, (s32)std::floor(std::max({a.x, bb.x, cc.x}) - 0.5));
+            const s32 y0 = std::max(0, (s32)std::floor(std::min({a.y, bb.y, cc.y}) - 0.5) + 1);
+            const s32 y1 = std::min((s32)sm.size - 1, (s32)std::floor(std::max({a.y, bb.y, cc.y}) - 0.5));
+            if (x0 > x1 || y0 > y1)
+                continue;
+            const f64 inv = 1.0 / area;
+            // the planes: depth and the texture coordinates over the map (affine: an orthographic view)
+            auto plane = [&](f64 va, f64 vb2, f64 vc, f64* gx, f64* gy) {
+                *gx = ((vb2 - va) * (cc.y - a.y) - (vc - va) * (bb.y - a.y)) * inv;
+                *gy = ((vc - va) * (bb.x - a.x) - (vb2 - va) * (cc.x - a.x)) * inv;
+            };
+            f64 dzx, dzy, dsx = 0, dsy = 0, dtx = 0, dty = 0;
+            plane(a.d, bb.d, cc.d, &dzx, &dzy);
+            f32 lod = 0;
+            if (tex) {
+                plane(a.s, bb.s, cc.s, &dsx, &dsy);
+                plane(a.t, bb.t, cc.t, &dtx, &dty);
+                const f64 rho = std::max(std::max(std::fabs(dsx) * tex->width, std::fabs(dtx) * tex->height),
+                                         std::max(std::fabs(dsy) * tex->width, std::fabs(dty) * tex->height));
+                lod = rho > 1e-15 ? fast_log2((f32)rho) : -64.0f;
+            }
+            for (s32 y = y0; y <= y1; y++)
+                for (s32 x = x0; x <= x1; x++) {
+                    const f64 px = x + 0.5, py = y + 0.5;
+                    const f64 e0 = (bb.x - a.x) * (py - a.y) - (bb.y - a.y) * (px - a.x);
+                    const f64 e1 = (cc.x - bb.x) * (py - bb.y) - (cc.y - bb.y) * (px - bb.x);
+                    const f64 e2 = (a.x - cc.x) * (py - cc.y) - (a.y - cc.y) * (px - cc.x);
+                    if (!((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0)))
+                        continue;
+                    const f64 d = a.d + dzx * (px - a.x) + dzy * (py - a.y);
+                    if (d < 0 || d > 1)
+                        continue;
+                    if (tex) {
+                        const f32 s = (f32)(a.s + dsx * (px - a.x) + dsy * (py - a.y));
+                        const f32 t = (f32)(a.t + dtx * (px - a.x) + dty * (py - a.y));
+                        const u32 texel = sample(un, s, t, lod);
+                        const u32 alpha = lum ? texel & 255 : texel >> 24;
+                        if (!test(m.pixel.alpha_func, alpha, m.pixel.alpha_ref))
+                            continue;
+                    }
+                    u32& at = smap[(u32)y * sm.size + (u32)x];
+                    const u32 di = (u32)(d * 16777215.0);
+                    if (di < at)
+                        at = di;
+                    st.shadow_texels++;
+                }
+        }
+    }    // NOMA_SOFT3D_SHADOW_DUMP=file.pgm: the map as a picture (white: nothing; darker: nearer the sun)
+    if (const char* dump = getenv("NOMA_SOFT3D_SHADOW_DUMP"))
+        if (FILE* f = fopen(dump, "wb")) {
+            fprintf(f, "P5\n%u %u\n255\n", (unsigned)sm.size, (unsigned)sm.size);
+            for (u32 v : smap)
+                fputc((int)(v >> 16), f);
+            fclose(f);
+        }
+}
 SoftBackend::~SoftBackend() { delete impl_; }
 
 void SoftBackend::set_overlay_pull(f64 pull, f64 limit) { impl_->pull = pull, impl_->pull_limit = limit; }
@@ -1144,6 +1408,11 @@ void SoftBackend::draw(const Packet& packet, const GxView& view, const guest::Ho
     m.efb = target;
     if (m.efb.scissor_left > m.efb.scissor_right || m.efb.scissor_top > m.efb.scissor_bottom)
         return;
+    // the shadow map, before the opaque packet's items (a packet without one: none for its receivers)
+    if (!packet.shadow.size)
+        m.smap_size = 0;
+    else if (packet.pass == Pass::OPAQUE)
+        m.draw_shadow_map(packet, *(const Prepared*)packet.package->backend_data, stats_);
     m.setup(packet, view, stats_);
     if (m.tris.empty())
         return;

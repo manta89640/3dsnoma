@@ -20,7 +20,9 @@
 // Per pixel: perspective-correct colour and texture coordinates; the level of detail from the
 // coordinates' screen-space derivatives, bilinear within a level, trilinear between two when the
 // material's filter asks; projection-mapped units (the water's camera projection) from the pixel's
-// own screen position; linear fog by view depth for the materials that have it; overlays (material.h
+// own screen position; linear fog by view depth for the materials that have it; the shadow map
+// (native_draw.h ShadowMap: its casters drawn into a 24-bit depth map of its own, sampled by the
+// receivers with the 3DS GPU's 2x2 compare) and the decals' fade window; overlays (material.h
 // is_overlay) pulled toward the eye as the PICA backend pulls them (native_draw.h overlay_pull). Vertex
 // depth is computed in double, so a strip lying just above the terrain stays in front of it however far
 // away it is (the pull is there for the 3DS GPU's 24-bit floats: here it makes the frames alike).
@@ -62,6 +64,8 @@ public:
         u32 clipped = 0;      // cut by the near or far plane or the guard band
         u64 fragments = 0;    // pixels covered
         u64 written = 0;      // pixels that passed the depth and alpha tests
+        u32 shadow_triangles = 0;  // caster triangles drawn into the shadow map
+        u64 shadow_texels = 0;     // ... the map's texels they covered (passing the alpha test)
     };
     const Stats& stats() const { return stats_; }
     void reset_stats() { stats_ = Stats(); }

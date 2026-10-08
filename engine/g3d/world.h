@@ -36,6 +36,17 @@
 // trees, an instance only while it is drawn, a small one every second or fourth update (by the size its
 // meshes have on the screen and how fast its nodes move there: what it lags behind stays within a
 // pixel and a half), a static one once (until its LOD model changes); billboards turn every frame.
+// Shadows (the package's SHDW and CAST; native_draw.h ShadowMap): with a shadow map set (set_shadow_map),
+// a square of ShadowEnv::map_extent units seen along the sun, about the shadow focus (the player:
+// set_shadow_focus; else the camera's target) pushed a quarter of it ahead of the camera, its corner
+// snapped to the map's texels (so the shadows don't swim as the focus moves), from ShadowEnv::map_depth
+// toward the sun to map_floor under the focus. Its casters, each frame: the placed objects of the cells
+// (CAST: a run of a level-0 batch) and the instances' opaque batches (posed: a windmill's blades, a car on
+// its route; INST_CASTER_ONLY ones -- the Mii's stand-in -- are drawn only there, INST_NO_CAST ones never)
+// whose spheres meet the square and its depth; its receivers, the items of the cells whose material can
+// take it (material.h shadow_receiver) and whose box meets the square (DRAW_SHADOW_RECEIVER); the shadow
+// decals whose box meets it fade out within it (DRAW_SHADOW_FADE). An instance of the stand-in model is
+// never drawn in the colour passes, with or without the map.
 #pragma once
 
 #include <vector>
@@ -76,6 +87,11 @@ struct WorldStats {
     u32 poses = 0;              // instances posed this frame (animated ones due, new LOD models)
     u32 translations = 0;       // material combiner translations in this frame's packets
     u32 translations_cached = 0;  // ... and register sets found among the last translations
+    u32 shadow_casters = 0;       // runs drawn into the shadow map (0: no map this frame)
+    u32 shadow_triangles = 0;     // ... their triangles
+    u32 shadow_instances = 0;     // instances among the casters (posed for it when out of view)
+    u32 shadow_receivers = 0;     // items darkened by the map (both passes)
+    u32 shadow_faded = 0;         // decal items faded within it
 };
 
 // what a World's speed-ups do (all on by default; off: as it was without them, for comparisons)
@@ -122,6 +138,12 @@ public:
     // are drawn at rest.
     int instance_node(u32 instance, const char* name) const;
     void set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]);
+
+    // The shadow map: `size` texels a side (0: none: the decals are drawn whole), if the package has
+    // shadows (SHDW); and the point its square is about (package units), each frame before the cull.
+    void set_shadow_map(u32 size);
+    u32 shadow_map() const;
+    void set_shadow_focus(Vec3 focus);
 
     // the speed-ups in use (WorldFeature bits)
     void set_features(u32 features);

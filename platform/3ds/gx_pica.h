@@ -1,6 +1,7 @@
 // The GX renderer on the 3DS GPU (gx_pica.cpp).
 #pragma once
 #include <3ds.h>
+#include <citro3d.h>
 
 #include "runtime/hw/gx/gx.h"
 
@@ -33,6 +34,10 @@ void pica_watchdog();
 //     the program the backend ran (citro3d only notices a program that differs from the last).
 void pica_native_begin(f32 clip[4][4]);
 void pica_native_end(shaderProgram_s* used);
+// Between begin and end: the native draws go into another frame buffer (a texture's: the shadow map),
+// whole (its viewport, no scissor); nullptr: back into the frame's, with the GX state's viewport and
+// scissor. What was drawn before the switch is flushed to memory first.
+void pica_native_target(C3D_FrameBuf* fb);
 // a native draw goes into the command list (NOMA_CHECK_PICA_STATE pairs its snapshots with the
 // list's draws: a native one is skipped)
 void pica_native_draw_noted();

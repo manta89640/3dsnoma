@@ -45,6 +45,8 @@ struct DrawItem {
 };
 enum : u16 {
     DRAW_SKY = 1,      // the sky dome: follows the camera, no depth test or write, drawn first
+    DRAW_SHADOW_RECEIVER = 16,  // the shadow map darkens it (Packet::shadow; material.h shadow_receiver)
+    DRAW_SHADOW_FADE = 32,      // a shadow decal the shadow map covers part of: faded out there
 };
 
 // Overlays (material.h is_overlay: translucent, depth tested, writing no depth -- the island's Kiwa and
@@ -93,6 +95,40 @@ struct MatDynamic {
                                  // a colour animation can change what the translation folds
 };
 
+// The shadow map of a frame (world.h): a square texture seen along the sun, `size` texels a side, into
+// which the casters are drawn (their depth along the light; the opaque packet draws it first, before
+// its items) and which the receivers of both passes sample. light: world (package units) -> (s, t,
+// depth): s, t from 0 to 1 across the map, the depth 0 toward the sun to 1 away from it (a receiver
+// whose depth less `bias` is behind what the map holds there is in shadow: it keeps 1 - darkness of
+// its colour, the four texels about it compared and filtered as the 3DS GPU does). fade: world -> the
+// decals' fade window (s, t): 0 to 1 across the map (a decal is faded out within it, in where the map
+// holds its object's shadow: shadow_fade_alpha).
+struct ShadowMap {
+    u16 size = 0;              // 0: no shadow map
+    f32 light[3][4] = {};
+    f32 fade[2][4] = {};
+    f32 darkness = 0;          // 0..1
+    f32 bias = 0;              // depth units (0..1 across the map's depth)
+};
+// a caster drawn into the shadow map: a run of a batch's indices, under a matrix of the packet
+struct ShadowCaster {
+    u16 batch;
+    u16 matrix;                // Packet::matrices index
+    u32 first_index, n_indices;
+};
+// the decals' fade window (ShadowMap::fade): their alpha's factor at (s, t), 0 inside the window,
+// rising to 1 at its edge over its outer SHADOW_FADE_BAND (and 1 outside), so that a decal shows only
+// where the map's shadows end (the band, about 20 units of the island's 480-unit map, has both) -- the
+// same in both backends, which sample it from a SHADOW_FADE_TEXELS-square texture made from it
+// (bilinear, its edge clamped: what the 3DS GPU does with it)
+constexpr float SHADOW_FADE_BAND = 0.04f;
+constexpr int SHADOW_FADE_TEXELS = 64;
+inline float shadow_fade_alpha(float s, float t) {
+    const float r = std::fmax(std::fabs(2 * s - 1), std::fabs(2 * t - 1));  // 0 at the middle, 1 at the edge
+    const float x = (r - (1 - 2 * SHADOW_FADE_BAND)) / (2 * SHADOW_FADE_BAND);
+    return x <= 0 ? 0.0f : x >= 1 ? 1.0f : x * x * (3 - 2 * x);
+}
+
 enum class PacketKind : u8 {
     DRAW,      // draw the items
     PREPARE,   // the backend uploads the package (at load time, under the loading screen)
@@ -123,6 +159,8 @@ struct Packet {
     std::vector<f32> matrices;     // 12 floats each (3x4), [0] = identity
     std::vector<MatDynamic> mat_states;
     std::vector<DrawItem> items;   // in draw order
+    ShadowMap shadow;              // (size 0: none)
+    std::vector<ShadowCaster> casters;  // drawn into the shadow map before the items (the opaque packet's)
 
     void reset();                  // empty, for the next frame (keeps the vectors' memory)
 };

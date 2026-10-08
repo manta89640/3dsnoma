@@ -88,6 +88,8 @@ struct Material {
     s8 priority = 0;               // nw4r draw priority (lower first)
     bool indirect = false;         // the source had indirect stages (dropped: the scroll stays)
     bool prelit = false;           // fmt::MAT_PRELIT: lit by its vertex colours (Lighting: unlit)
+    bool shadow_receiver = false;  // fmt::MAT_SHADOW_RECEIVER, and room for the shadow map (below)
+    bool shadow_decal = false;     // fmt::MAT_SHADOW_DECAL, and room for the fade window (below)
     u32 approximated = 0;          // what the translation approximated (combiners, texgens, matrix modes)
 };
 
@@ -99,6 +101,23 @@ struct Material {
 // fraction of a unit over the ground): both backends pull it toward the eye (native_draw.h
 // overlay_pull) so that it isn't lost in the ground at a distance.
 inline bool is_overlay(const Material& m) { return m.translucent && m.pixel.depth_test && !m.pixel.depth_write; }
+
+// The shadow map's receivers (fmt::MAT_SHADOW_RECEIVER, native_draw.h ShadowMap). Only the 3DS GPU's
+// texture unit 0 can sample a shadow map, so a receiver's own unit 0 moves to unit 2 (its coordinates
+// on texcoord2) and its combiners read TEXTURE2 for it; two stages are added after its own: the
+// shadow's factor f = TEXTURE0 x darkness + (1 - darkness) (TEXTURE0: 1 lit, 0 in shadow, filtered
+// between), then the material's colour, kept in the combiner buffer by its last stage, times f, its
+// alpha as it was. So a material can receive when its combiners take at most four stages (the buffer
+// takes only the first four's results) and it samples no third unit, and its unit 0 isn't projected
+// (a projection divides per pixel on unit 0 only): the island's terrain and buildings (one or two
+// stages and units) can, its town walls and the harbour's ship (three units) can't.
+bool shadow_receiver_fits(const Material& m, const engine::gx::Combiners& comb);
+void shadow_receiver_combiners(const engine::gx::Combiners& in, f32 darkness, engine::gx::Combiners* out);
+// The shadow decals (fmt::MAT_SHADOW_DECAL) where the shadow map covers them: texture unit 1 samples the
+// fade window (native_draw.h shadow_fade_alpha) and a stage after their own multiplies their alpha by
+// its alpha. A decal material with unit 1 free and at most five stages can (WSR's: one of each).
+bool shadow_decal_fits(const Material& m, const engine::gx::Combiners& comb);
+void shadow_decal_combiners(const engine::gx::Combiners& in, engine::gx::Combiners* out);
 
 // the TEV register image of a package material (with registers and konst colours as given)
 engine::gx::TevRegs tev_regs(const fmt::Material& m, const s16 (*reg)[4], const s16 (*konst)[4]);

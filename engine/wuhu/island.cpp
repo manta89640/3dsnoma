@@ -43,6 +43,14 @@
 // camera and the World move a sixtieth of a second a game frame, whatever the time (repeatable host
 // runs). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the scene's
 // shell without the package).
+//
+// Shadows (docs/wuhu.md "Shadows"): the package's decals (WSR's silhouettes under the trees and props,
+// the cars' under them) are drawn always; the shadow map about the Mii (world.h: the trees, props,
+// windmills, vehicles and the Mii itself casting) unless NOMA_WUHU_SHADOWS=0, NOMA_WUHU_SHADOW_MAP=N
+// texels a side (512; 256 and 1024 the others worth trying on the console). The Mii casts through its
+// stand-in (the package's shadow_proxy, a capsule its height, never seen; on foot only: in a vehicle the
+// vehicle casts), and has a blob under it (shadow_blob, WSR's spectators' silhouette) on the ground
+// below its feet, which the map fades out where it covers: so the blob shows only without the map.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -83,6 +91,13 @@ constexpr u32 NONE32 = 0xFFFFFFFFu;
 // shown over the Mii while it glides (Player::gliding)
 constexpr u16 PARACHUTE_CLASS = 0xFFFEu;
 const char* const PARACHUTE_MODEL = "WS2_omk_parachute_01";
+// the Mii's stand-ins for the shadows (stage_wuhu.py shadow_models): a caster a unit tall, a blob a
+// unit across; the blob is BLOB_WIDTH Mii heights across, the stand-in as wide as the Mii's height x 0.16
+constexpr u16 SHADOW_PROXY_CLASS = 0xFFFDu, SHADOW_BLOB_CLASS = 0xFFFCu;
+const char* const SHADOW_PROXY_MODEL = "shadow_proxy";
+const char* const SHADOW_BLOB_MODEL = "shadow_blob";
+constexpr f32 BLOB_WIDTH = 0.6f;
+constexpr u32 SHADOW_MAP_DEFAULT = 512;
 // how the load's progress is shared: the file's reading, the rest of the worker's work, the Mii
 constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
 
@@ -191,6 +206,7 @@ private:
     bool leave_vehicle();
     void park_vehicle();
     void update_parachute();
+    void update_shadows();
     Vec3 controlled_position() const;
     f32 controlled_yaw() const;
     static void world_frame(void* self);
@@ -208,6 +224,8 @@ private:
     std::unique_ptr<SandTracks> sand_;
     u32 parachute_instance_ = NONE32;
     bool parachute_visible_ = false;
+    u32 proxy_instance_ = NONE32, blob_instance_ = NONE32;
+    bool proxy_visible_ = true, blob_visible_ = true;
     bool ready_ = false, prepared_ = false;
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
     f32 k_ = 1;
@@ -220,6 +238,7 @@ private:
     bool job_ = false;                   // a job is out (the World is the helper's until take_job)
     engine::g3d::Camera job_camera_;
     f32 job_ground_ = 0;                 // the ground under its eye (found on the game's thread)
+    Vec3 job_focus_{0, 0, 0};            // where the shadow map is about (the Mii, or its vehicle)
     f32 job_frame_ = 0;
     engine::g3d::Packet built_[2];       // the passes' packets, made by the job
     bool built_ready_[2] = {false, false};
@@ -295,9 +314,27 @@ void Island::finish_loading() {
     world_ = std::make_unique<engine::g3d::World>(*package_);
     world_->set_world_scale(k_);
     world_->set_features(features_from_env());
-    for (u32 i = 0; i < world_->instance_count() && parachute_instance_ == NONE32; i++)
-        if (world_->instance_class(i) == PARACHUTE_CLASS)
+    for (u32 i = 0; i < world_->instance_count(); i++) {
+        const u16 c = world_->instance_class(i);
+        if (c == PARACHUTE_CLASS && parachute_instance_ == NONE32)
             parachute_instance_ = i;
+        if (c == SHADOW_PROXY_CLASS && proxy_instance_ == NONE32)
+            proxy_instance_ = i;
+        if (c == SHADOW_BLOB_CLASS && blob_instance_ == NONE32)
+            blob_instance_ = i;
+    }
+    // the shadow map (NOMA_WUHU_SHADOWS=0: none; NOMA_WUHU_SHADOW_MAP: its size)
+    {
+        const char* on = std::getenv("NOMA_WUHU_SHADOWS");
+        const char* size = std::getenv("NOMA_WUHU_SHADOW_MAP");
+        world_->set_shadow_map(on && !std::atoi(on) ? 0 : size ? (u32)std::atoi(size) : SHADOW_MAP_DEFAULT);
+        if (package_->shadow_env())
+            guest::log("wuhu: shadows: decals, the shadow map %s (%u texels a side, %.0f units), the Mii's stand-in %s",
+                       world_->shadow_map() ? "on" : "off", (unsigned)world_->shadow_map(),
+                       package_->shadow_env()->map_extent, proxy_instance_ != NONE32 ? "there" : "missing");
+        else
+            guest::log("wuhu: shadows: the package has none (staged before them)");
+    }
     if (parachute_instance_ != NONE32)
         world_->set_group_visible(PARACHUTE_MODEL, false);
     vehicles_ = std::make_unique<Vehicles>(*world_, *package_, *collision_);
@@ -484,6 +521,47 @@ void Island::update_parachute() {
     world_->set_instance_transform(parachute_instance_, m);
 }
 
+// The Mii's stand-in caster and its blob, where the Mii stands (on foot only; in a vehicle the vehicle
+// casts and its shadow is its own): the stand-in at its feet, turned with it, as tall as it; the blob on
+// the ground under its feet (the collision's, facing up, within a few heights below), lying along the
+// ground's slope, lifted a little; none while it swims (the ground is the sea's floor) or over nothing.
+void Island::update_shadows() {
+    const bool on_foot = vehicles_->driven() == Vehicles::NONE;
+    const PlayerParams& pp = player_->params();
+    const Vec3 p = player_->position();
+    auto show = [&](u32 inst, const char* model, bool* visible, bool want) {
+        if (inst != NONE32 && want != *visible) {
+            world_->set_group_visible(model, want);
+            *visible = want;
+        }
+    };
+    show(proxy_instance_, SHADOW_PROXY_MODEL, &proxy_visible_, on_foot);
+    if (on_foot && proxy_instance_ != NONE32) {
+        const f32 a = player_->yaw() * DEG, h = pp.height, c = std::cos(a) * h, sn = std::sin(a) * h;
+        world_->set_instance_transform(proxy_instance_, Mtx34{{{c, 0, sn, p.x}, {0, h, 0, p.y}, {-sn, 0, c, p.z}}});
+    }
+    if (blob_instance_ == NONE32)
+        return;
+    engine::collision::Hit hit;
+    auto floor = [](u16 attr, Vec3 n) { return n.y > 0.5f && !engine::collision::kcl_is_fence(attr); };
+    const bool ground = on_foot && !player_->swimming() &&
+                        collision_->ground(p.x, p.z, p.y + 0.5f * pp.height, p.y - 4 * pp.height, floor, &hit);
+    show(blob_instance_, SHADOW_BLOB_MODEL, &blob_visible_, ground);
+    if (!ground)
+        return;
+    // the blob's axes: x across the ground's slope, z along it, y the ground's normal; a unit across,
+    // BLOB_WIDTH Mii heights here, a twentieth of a unit up the normal
+    const Vec3 n = engine::math::normalize(hit.normal);
+    Vec3 x = engine::math::cross(Vec3{0, 0, 1}, n);
+    x = engine::math::normalize(engine::math::dot(x, x) > 1e-6f ? x : Vec3{1, 0, 0});
+    const Vec3 z = engine::math::cross(x, n);
+    const f32 w = BLOB_WIDTH * pp.height;
+    const Vec3 at = hit.point + n * 0.05f;
+    world_->set_instance_transform(blob_instance_, Mtx34{{{x.x * w, n.x * w, z.x * w, at.x},
+                                                          {x.y * w, n.y * w, z.y * w, at.y},
+                                                          {x.z * w, n.z * w, z.z * w, at.z}}});
+}
+
 void Island::warp(u32 marker) {
     if (!world_ || marker >= package_->markers().count)
         return;
@@ -542,6 +620,7 @@ void Island::update(const Controls& controls, bool frozen) {
     camera_->update(look, at, yaw, camera_speed, dt);
     const engine::g3d::Camera& cam = camera_->camera();
     update_parachute();
+    update_shadows();
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -559,12 +638,13 @@ void Island::update(const Controls& controls, bool frozen) {
                      : cam.eye.y - reach;
     }
     built_ready_[0] = built_ready_[1] = false;
-    job_camera_ = cam, job_ground_ = ground, job_frame_ = (f32)frame_;
+    job_camera_ = cam, job_ground_ = ground, job_frame_ = (f32)frame_, job_focus_ = at;
     job_ = on_helper_ = guest::platform_job_start(&Island::world_frame, this);
     if (!job_) {
         const u64 t0 = guest::host_time_us();
         world_->update((f32)frame_);
         world_->set_camera(cam, ground);
+        world_->set_shadow_focus(at);
         world_us_ += guest::host_time_us() - t0;
     }
     mii_->update(engine::g3d::scaled(cam, k_), at * k_, yaw,
@@ -580,6 +660,7 @@ void Island::world_frame(void* self) {
     const u64 t0 = guest::host_time_us();
     i.world_->update(i.job_frame_);
     i.world_->set_camera(i.job_camera_, i.job_ground_);
+    i.world_->set_shadow_focus(i.job_focus_);
     i.world_->build_packet(engine::g3d::Pass::OPAQUE, &i.built_[0]);
     i.world_->build_packet(engine::g3d::Pass::TRANSLUCENT, &i.built_[1]);
     i.world_us_ += guest::host_time_us() - t0;
@@ -634,12 +715,15 @@ void Island::log_frame() {
     static const char* const STATES[] = {"wait", "walk", "run", "fall", "jump", "swim"};
     static_assert(sizeof(STATES) / sizeof(STATES[0]) == (size_t)PlayerState::SWIM + 1, "a name a state");
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
-               "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, "
+               "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, shadow "
+               "casters %u (%u instances, %u tris), receivers %u, decals faded %u, pos (%.1f, "
                "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
                fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
                (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
-               (unsigned)s.translations, (unsigned)s.translations_cached, p.x, p.y, p.z,
+               (unsigned)s.translations, (unsigned)s.translations_cached, (unsigned)s.shadow_casters,
+               (unsigned)s.shadow_instances, (unsigned)s.shadow_triangles, (unsigned)s.shadow_receivers,
+               (unsigned)s.shadow_faded, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), player_->yaw(), STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());
 }

@@ -23,7 +23,9 @@
 //    them (an unlimited one's gain is written as a picture).
 //
 // The camera: NOMA_G3D_FOV (degrees, default 45), near 1.5 and far 80,000 package units, the
-// world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views.
+// world's animations at NOMA_G3D_FRAME (default 600); NOMA_G3D_VIEWS=a,b picks views; the shadow map
+// NOMA_G3D_SHADOW_MAP texels a side (default 512, 0: none) about each view's target;
+// NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz puts the views' camera there instead.
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -490,6 +492,9 @@ void test_views() {
     g3::World w(*pkg);
     const f32 k = w.world_scale();
     w.update(frame);
+    // the shadow map (NOMA_G3D_SHADOW_MAP texels a side, 0: none; default 512 when the package has
+    // shadows), about each view's target
+    w.set_shadow_map(getenv("NOMA_G3D_SHADOW_MAP") ? (u32)atoi(getenv("NOMA_G3D_SHADOW_MAP")) : 512);
     g3::SoftBackend sb;
     t0 = std::chrono::steady_clock::now();
     sb.prepare(*pkg);
@@ -527,6 +532,12 @@ void test_views() {
         g3::Camera cam;
         cam.eye = {m.position[0], m.position[1], m.position[2]};
         cam.target = m.kind == 2 ? Vec3{m.dir[0], m.dir[1], m.dir[2]} : cam.eye + Vec3{m.dir[0], m.dir[1], m.dir[2]};
+        // NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz: every view picked from there instead (a look at a place)
+        if (const char* c = getenv("NOMA_G3D_CAMERA")) {
+            float e[6];
+            if (sscanf(c, "%f,%f,%f,%f,%f,%f", &e[0], &e[1], &e[2], &e[3], &e[4], &e[5]) == 6)
+                cam.eye = {e[0], e[1], e[2]}, cam.target = {e[3], e[4], e[5]};
+        }
         cam.fovy_deg = fov, cam.aspect = (f32)W / H, cam.near_ = NEAR, cam.far_ = FAR;
         g3::Packet opa, xlu;
         opa.reset(), xlu.reset();
@@ -582,6 +593,12 @@ void test_views() {
             "%llu drawn; %.1f ms (opaque %.1f + translucent %.1f), one thread %.1f ms%s",
             name, st.items, (u32)opa.items.size(), st.triangles, st.culled, st.clipped,
             (unsigned long long)st.fragments, (unsigned long long)st.written, ms, ms_opa, ms_xlu, ms_one, vs.c_str());
+        const g3::WorldStats& ws = w.stats();
+        if (opa.shadow.size)
+            log("selftest g3drender: %s: shadow map %u: %u casters (%u instances), %u triangles (%llu texels); %u "
+                "receiving items, %u decal items faded",
+                name, (u32)opa.shadow.size, ws.shadow_casters, ws.shadow_instances, ws.shadow_triangles,
+                (unsigned long long)st.shadow_texels, ws.shadow_receivers, ws.shadow_faded);
         expect(st.written > W * H / 2, "%s: the frame is drawn (%llu pixels)", name, (unsigned long long)st.written);
 
         // 3. the overlays: the opaque pass's frame and depth kept; the translucent pass drawn again

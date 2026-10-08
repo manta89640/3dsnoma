@@ -281,9 +281,38 @@ struct World::Impl {
     std::vector<u64> keys;
     std::vector<Cand> gathered;
 
+    // ---- shadows (world.h): the light's frame (lz toward the sun), the casters' spheres, this frame's
+    // square, map and casters
+    const fmt::ShadowEnv* shadow_env = nullptr;
+    u32 shadow_size = 0;
+    bool focus_set = false;
+    Vec3 focus{0, 0, 0};
+    Vec3 lx{1, 0, 0}, ly{0, 0, 1}, lz{0, 1, 0};
+    struct Sphere {
+        Vec3 c;
+        f32 r;
+    };
+    std::vector<Sphere> cast_spheres;   // per CAST record
+    struct Square {
+        bool on = false;
+        f32 cu = 0, cv = 0, half = 0;   // its middle (light space x, y) and half its side
+        f32 wtop = 0, wbot = 0;         // its depth: light space z (toward the sun) from wbot to wtop
+        ShadowMap map;
+    } sq;
+    struct CastRef {
+        u16 batch;
+        u32 final;                      // finals index, ~0u: the identity (the cells)
+        u32 first, count;
+    };
+    std::vector<CastRef> casts;
+
     explicit Impl(const Package& p) : pkg(p) {}
 
     void init();
+    void shadow_frame();
+    bool meets_square(Vec3 c, f32 r) const;
+    bool box_meets_square(const f32* box) const;
+    u16 shadow_flags(const Material& m, const f32* box);
     const NodeMap* node_map(u16 anim, u16 model) const;
     void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base,
               const std::vector<NodeRot>* rots = nullptr);
@@ -463,6 +492,23 @@ void World::Impl::init() {
             scales.push_back(sc);
     }
     n_coords = std::max<u32>(1, (u32)scales.size());
+    // the shadows' light (as the World lights: a point light shines from its position toward the
+    // origin), its frame, the casters' spheres
+    shadow_env = pkg.shadow_env();
+    if (shadow_env) {
+        const fmt::Light& l = pkg.lights()[shadow_env->light];
+        Vec3 d = l.kind == fmt::LK_DIRECTIONAL ? Vec3{l.direction[0], l.direction[1], l.direction[2]}
+                                               : Vec3{-l.position[0], -l.position[1], -l.position[2]};
+        d = dot(d, d) == 0 ? Vec3{0, -1, 0} : normalize(d);
+        lz = -d;
+        lx = cross(Vec3{0, 1, 0}, lz);
+        lx = dot(lx, lx) < 1e-12f ? Vec3{1, 0, 0} : normalize(lx);
+        ly = cross(lz, lx);
+        for (const fmt::Caster& c : pkg.casters()) {
+            const Vec3 ctr = box_centre(c.bbox);
+            cast_spheres.push_back({ctr, length(Vec3{c.bbox[3], c.bbox[4], c.bbox[5]} - ctr)});
+        }
+    }
     matrix_of.reserve(slots);
     state_of.reserve(mats.size());
     vis_cells.reserve(pkg.cells().count);
@@ -690,7 +736,7 @@ void World::Impl::cull() {
     for (u32 i = 0; i < insts.size(); i++) {
         const fmt::Instance& in = pkg.instances()[i];
         const Inst& n = insts[i];
-        if (model_hidden[in.model] || !sphere_visible(fr, n.centre, n.radius))
+        if (model_hidden[in.model] || (in.flags & fmt::INST_CASTER_ONLY) || !sphere_visible(fr, n.centre, n.radius))
             continue;
         const f32 d = length(n.centre - eye);
         const f32 near_d = std::max(d - n.radius, 0.0f);
@@ -717,6 +763,7 @@ void World::Impl::cull() {
         vis_insts.push_back({i, model, d, n.slot});
     }
     stats->instances_visible = (u32)vis_insts.size();
+    shadow_frame();
     const fmt::Env& env = pkg.env();
     if (env.sea_model != NONE) {
         if (!sea_posed)
@@ -730,6 +777,114 @@ void World::Impl::cull() {
         vis_insts.push_back({~1u, env.sky_model, 0, sky_slot});
     }
     collect();
+}
+
+// a sphere (world) whose shadow may fall in the square: within it seen along the light, and within its
+// depth
+bool World::Impl::meets_square(Vec3 c, f32 r) const {
+    return std::fabs(dot(c, lx) - sq.cu) <= sq.half + r && std::fabs(dot(c, ly) - sq.cv) <= sq.half + r &&
+           dot(c, lz) - r <= sq.wtop && dot(c, lz) + r >= sq.wbot;
+}
+
+// a box (world) that the square covers some of, seen along the light
+bool World::Impl::box_meets_square(const f32* b) const {
+    const Vec3 c = box_centre(b), h = {(b[3] - b[0]) * 0.5f, (b[4] - b[1]) * 0.5f, (b[5] - b[2]) * 0.5f};
+    const f32 hu = std::fabs(lx.x) * h.x + std::fabs(lx.y) * h.y + std::fabs(lx.z) * h.z;
+    const f32 hv = std::fabs(ly.x) * h.x + std::fabs(ly.y) * h.y + std::fabs(ly.z) * h.z;
+    return std::fabs(dot(c, lx) - sq.cu) <= sq.half + hu && std::fabs(dot(c, ly) - sq.cv) <= sq.half + hv;
+}
+
+// an item's shadow flags: a receiver or a decal the square covers some of
+u16 World::Impl::shadow_flags(const Material& m, const f32* box) {
+    if (!sq.on || !(m.shadow_receiver || m.shadow_decal) || !box_meets_square(box))
+        return 0;
+    if (m.shadow_receiver) {
+        stats->shadow_receivers++;
+        return DRAW_SHADOW_RECEIVER;
+    }
+    stats->shadow_faded++;
+    return DRAW_SHADOW_FADE;
+}
+
+// This frame's shadow square and its casters (world.h). The square's middle: the focus pushed a
+// quarter of its side ahead along the camera's heading (a follow camera sees ahead of the Mii, little
+// of what is behind it), snapped to the map's texels in light space, so that a caster standing still
+// falls on the same texels however the focus moves (no swimming edges). Its depth: from map_depth
+// toward the sun from the focus down to map_floor under it (in the map's 0..1 depth, d = 0 at the top).
+void World::Impl::shadow_frame() {
+    sq.on = false;
+    casts.clear();
+    if (!shadow_env || !shadow_size)
+        return;
+    sq.on = true;
+    const f32 E = shadow_env->map_extent, texel = E / (f32)shadow_size;
+    Vec3 f = focus_set ? focus : cam.target;
+    Vec3 ahead = cam.target - cam.eye;
+    ahead.y = 0;
+    if (dot(ahead, ahead) > 1e-12f)
+        f = f + normalize(ahead) * (0.25f * E);
+    sq.half = 0.5f * E;
+    sq.cu = std::floor(dot(f, lx) / texel + 0.5f) * texel;
+    sq.cv = std::floor(dot(f, ly) / texel + 0.5f) * texel;
+    sq.wtop = dot(f, lz) + shadow_env->map_depth;
+    sq.wbot = dot(f, lz) - shadow_env->map_floor;
+    const f32 D = sq.wtop - sq.wbot;
+    ShadowMap& m = sq.map;
+    m.size = (u16)shadow_size;
+    const Vec3 rows[3] = {lx * (1 / E), ly * (1 / E), lz * (-1 / D)};
+    const f32 ofs[3] = {0.5f - sq.cu / E, 0.5f - sq.cv / E, sq.wtop / D};
+    for (int i = 0; i < 3; i++) {
+        m.light[i][0] = rows[i].x, m.light[i][1] = rows[i].y, m.light[i][2] = rows[i].z, m.light[i][3] = ofs[i];
+        if (i < 2)
+            memcpy(m.fade[i], m.light[i], sizeof(m.fade[i]));
+    }
+    m.darkness = shadow_env->darkness;
+    // (half a unit, or half a texel: receivers never cast, so this is only the ground under a caster
+    // that touches it -- a trunk, a wheel -- and the depth's rounding)
+    m.bias = std::max(0.5f, 0.5f * texel) / D;
+    // the cells' placed objects
+    const Span<fmt::Caster> cs = pkg.casters();
+    for (u32 i = 0; i < cs.count; i++)
+        if (meets_square(cast_spheres[i].c, cast_spheres[i].r)) {
+            casts.push_back({cs[i].batch, ~0u, cs[i].first_index, cs[i].n_indices});
+            stats->shadow_triangles += cs[i].n_indices / 3;
+        }
+    // the instances: by their spheres; an animated one whose sphere spans a route (it is always in
+    // the square) by where its meshes were at its last pose, moved on at most as fast as they went
+    for (u32 i = 0; i < insts.size(); i++) {
+        const fmt::Instance& in = pkg.instances()[i];
+        Inst& n = insts[i];
+        if (model_hidden[in.model] || (in.flags & fmt::INST_NO_CAST) || !meets_square(n.centre, n.radius))
+            continue;
+        const bool route = n.animated && n.radius > 2 * E;
+        if (route && n.posed_model != NONE &&
+            !meets_square(n.mesh_centre, n.mesh_r + n.speed * (f32)(tick - n.posed_tick) + texel))
+            continue;
+        const f32 d = length(n.centre - cam.eye);
+        u16 model = in.model;
+        for (u32 steps = 0; steps < pkg.models().count; steps++) {
+            const fmt::Model& md = pkg.models()[model];
+            if (md.lod_next == NONE || d < md.lod_distance * lod_scale)
+                break;
+            model = md.lod_next;
+        }
+        pose_instance(i, model, d);
+        if (n.animated && !meets_square(n.mesh_centre, n.mesh_r))
+            continue;
+        const fmt::Model& md = pkg.models()[model];
+        u32 drawn = 0;
+        for (u32 b = md.first_batch; b < md.first_batch + md.n_batches; b++) {
+            const fmt::Batch& bt = pkg.batches()[b];
+            const Material& mat = mats[bt.material];
+            if (mat.translucent || mat.pixel.cull_gx == 3 || !mat.pixel.color_write)
+                continue;
+            casts.push_back({(u16)b, n.slot + (bt.node < md.n_nodes ? bt.node : 0u), bt.first_index, bt.n_indices});
+            stats->shadow_triangles += bt.n_indices / 3;
+            drawn++;
+        }
+        stats->shadow_instances += drawn > 0;
+    }
+    stats->shadow_casters = (u32)casts.size();
 }
 
 // a model's batches as candidates of their passes (the sky's all in the opaque pass, first)
@@ -761,7 +916,7 @@ void World::Impl::add_model_items(const VisInst& v, f32 detail) {
         c.material = bt.material;
         c.coords = coords_of[bt.vbuf];
         c.plain = !sky && is_plain(mat);
-        c.item = {(u16)b, 0, 0xFFFF, (u16)(sky ? DRAW_SKY : 0)};
+        c.item = {(u16)b, 0, 0xFFFF, (u16)(sky ? DRAW_SKY : shadow_flags(mat, box))};
         c.tris = bt.n_indices / 3;
         out.push_back(c);
     }
@@ -802,7 +957,7 @@ void World::Impl::collect() {
             cd.material = bt.material;
             cd.coords = coords_of[bt.vbuf];
             cd.plain = is_plain(mat);
-            cd.item = {b, 0, 0xFFFF, 0};
+            cd.item = {b, 0, 0xFFFF, shadow_flags(mat, bt.bbox)};
             cd.tris = bt.n_indices / 3;
             out.push_back(cd);
         }
@@ -980,6 +1135,23 @@ void World::Impl::build(Pass pass, Packet* p) {
         p->items.push_back(it);
         tris += c.tris;
     }
+    // the shadow map: both passes sample it, the opaque one draws it (its casters, before its items)
+    p->casters.clear();
+    p->shadow = sq.on ? sq.map : ShadowMap();
+    if (sq.on && pass == Pass::OPAQUE)
+        for (const CastRef& c : casts) {
+            u16 mtx = 0;
+            if (c.final != ~0u) {
+                int& mi = matrix_of[c.final];
+                if (mi < 0) {
+                    mi = (int)(p->matrices.size() / 12);
+                    const f32* f = &finals[c.final].m[0][0];
+                    p->matrices.insert(p->matrices.end(), f, f + 12);
+                }
+                mtx = (u16)mi;
+            }
+            p->casters.push_back({c.batch, mtx, c.first, c.count});
+        }
     (pass == Pass::OPAQUE ? stats->items_opaque : stats->items_translucent) = (u32)p->items.size();
     pass_tris[pi] = tris;
     stats->triangles = pass_tris[0] + pass_tris[1];
@@ -1075,6 +1247,18 @@ void World::set_instance_node_rotation(u32 instance, u16 node, const f32 degrees
     }
     std::memcpy(it->r, degrees, sizeof(it->r));
     n.posed_model = NONE;  // (posed again when next drawn)
+    impl_->dirty = true;
+}
+
+void World::set_shadow_map(u32 size) {
+    impl_->shadow_size = package_.shadow_env() ? size : 0;
+    impl_->dirty = true;
+}
+u32 World::shadow_map() const { return impl_->shadow_size; }
+
+void World::set_shadow_focus(Vec3 focus) {
+    impl_->focus = focus;
+    impl_->focus_set = true;
     impl_->dirty = true;
 }
 
