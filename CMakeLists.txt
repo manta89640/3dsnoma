@@ -142,6 +142,7 @@ set(RUNTIME_SOURCES
   runtime/patches/heap.cpp
   runtime/patches/menus.cpp
   runtime/patches/offline.cpp
+  runtime/patches/sound.cpp
   runtime/patches/players.cpp
   runtime/patches/profile.cpp
   runtime/patches/vf.cpp

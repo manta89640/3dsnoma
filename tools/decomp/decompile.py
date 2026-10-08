@@ -178,6 +178,8 @@ PATCHED_NAMES = {
     "GXLoadLightObjImm", "GXLoadNrmMtxImm", "GXSetVtxDesc", "GXClearVtxDesc", "GXSetVtxAttrFmt",
     # the channel's heaps: allocations that fail are logged (runtime/patches/heap.cpp)
     "lib_allocator_HeapBase_AllocFromCurrent",
+    # nw4r::snd's reset: its AI DMA callback before the old one is kept (runtime/patches/sound.cpp)
+    "nw4r_snd_detail_AxManager_AiDmaCallbackFunc",
     # GXLoadPosMtxImm: NOMA_DEBUG_GX_NAN reports matrices holding NaNs (runtime/patches/debug.cpp)
     "GXLoadPosMtxImm",
     "nw4r_g3d_ScnMdlSimple_GetScnMtxPos",  # nw4r::g3d::ScnMdl: a node's world or view matrix (debug.cpp)
