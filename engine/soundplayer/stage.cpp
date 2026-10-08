@@ -503,7 +503,7 @@ void Stage::Impl::fit_camera() {
     Vec3 target = {(lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2};
     f32 aspect = g3d::camera_aspect(g3d::camera(g3d::stage_root(stage), 1));
     if (!(aspect > 0.5f && aspect < 3.0f))
-        aspect = 16.0f / 9;
+        aspect = 5.0f / 3;  // (the top screen's: runtime/patches/graphics.cpp)
     f32 elevation = miis.size() >= 5 ? ELEVATION_ROWS : ELEVATION;
     f32 tan_h = std::tan(deg_to_rad(FOVY) / 2), se = std::sin(deg_to_rad(elevation));
     f32 ce = std::cos(deg_to_rad(elevation));

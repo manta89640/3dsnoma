@@ -153,7 +153,7 @@ inline void g3d_destroy(u32 word) { g::g3d_SafeDestroy(word); }
 // Its current camera 1, set up as the stage's: ScnRoot::SetCurrentCamera (nw4r_g3d_ScnRoot_SetCurrentCamera), the viewport
 // the whole frame buffer (Camera::SetViewport nw4r_g3d_Camera_SetViewport: the render mode's width and height,
 // app_VideoMode_sInstance's +0 +4 and +8; SetViewportZRange nw4r_g3d_Camera_SetViewportZRange 0..1), the TV's aspect (app_VideoMode_sInstance
-// +8: wide), near 1 and far 3588 until the scene sets its own.
+// +8: wide: the top screen's 5:3), near 1 and far 3588 until the scene sets its own.
 inline void root_camera_setup(u32 root) {
     GFRAME(0x10);
     g::nw4r_g3d_ScnRoot_SetCurrentCamera(root, 1);
@@ -162,7 +162,8 @@ inline void root_camera_setup(u32 root) {
     u32 cam = (u32)&GS(u32, 0x8);
     g::nw4r_g3d_Camera_SetViewport(cam, 0.0, 0.0, (f64)guest::load16(mode + 0x4), (f64)guest::load16(mode + 0x8));
     g::nw4r_g3d_Camera_SetViewportZRange(cam, 0.0, 1.0);
-    store_f32(GS(u32, 0x8) + 0xB0, guest::load8(video + 0x8) ? 16.0f / 9.0f : 4.0f / 3.0f);
+    // (the channel's 16:9 TV is the 3DS top screen's 5:3: runtime/patches/graphics.cpp)
+    store_f32(GS(u32, 0x8) + 0xB0, guest::load8(video + 0x8) ? 5.0f / 3.0f : 4.0f / 3.0f);
     store_f32(GS(u32, 0x8) + 0xB4, 1.0f);
     store_f32(GS(u32, 0x8) + 0xB8, 3588.0f);
 }

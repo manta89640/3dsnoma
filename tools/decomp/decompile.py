@@ -174,6 +174,8 @@ NATIVE_NAMES = {
     *SCRAPPED_SCENES,
     # runtime/patches/offline.cpp: the channel's online steps replaced whole (OFFLINE_NATIVES below)
     *OFFLINE_NATIVES,
+    # runtime/patches/graphics.cpp: the layouts' squeeze for the top screen's 5:3
+    "layout_DrawInfo_SetLocationAdjust",
     # engine/os: mutexes (a free or own mutex without the scheduler)
     "OSLockMutex", "OSUnlockMutex", "OSTryLockMutex",
     # engine/snd: nw4r::snd's voice layer (VoiceManager::UpdateAllVoices and below), native
@@ -247,6 +249,9 @@ PATCHED_NAMES = {
     "profile_BirthYear_Max",
     # the frame renderer draws in one pass, not as two anti-aliased bands (runtime/patches/graphics.cpp)
     "app_Renderer_ctor", "app_Renderer_SetAntiAlias",
+    # the TV's 16:9 as the top screen's 5:3: the layout width, the cameras' aspect (graphics.cpp)
+    "app_VideoMode_Set", "nw4r_g3d_Camera_GXSetProjection", "nw4r_g3d_Camera_ProjectToScreen",
+    "nw4r_g3d_Camera_GetProjectionTexMtx",
     # the content players left out (runtime/patches/players.cpp): Flash never starts, the movie
     # manager starts MobiClip and its work area no more
     "flash_Manager_Init", "movie_Manager_ctor", "movie_Manager_dtor",
