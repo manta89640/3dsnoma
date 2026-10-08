@@ -19,15 +19,17 @@
 //
 // The walks, each for a Mii at both k: from the town's spawn north into the coin-toss fountain (its
 // rim and basin stop the Mii), into a building's wall by the plaza, up the volcano's dirt trail
-// (waypoints), into a tree's trunk, a rock shore and a beach into the sea (the shore stops it, at
-// most knee-deep), to the edge of a grass ledge north of the plaza (a drop of 100: refused, it stops
+// (waypoints), into a tree's trunk, a rock shore out into the sea and back (it wades in, swims once
+// out of its depth, and wades out again), a beach into the sea (off the sand's low edge it swims),
+// a tapped and a held jump (their heights) and a running one (its momentum), to the edge of a grass ledge north of the plaza (a drop of 100: refused, it stops
 // at the edge), off a lower ledge south of it (24: it falls and lands), to the top of a rock slope
 // too steep to stand on (178 down to the sand: refused), and from halfway down it (put there, it
 // slides down, keeping to it), across the suspension bridge (ハラハラつり橋), and random walking (10
 // minutes from the spawn, 5 on the hills, 5 on a beach) with the camera turned now and then. Every
-// tick of every walk checks that the Mii stands on the ground when not falling, is in no wall, isn't
-// in deep water, didn't pass through a wall since the last tick, and that nothing stands between the
-// camera and the Mii's head, nor water over the camera. Then the queries are timed.
+// tick of every walk checks that the Mii stands on the ground when not falling or swimming, is in no
+// wall, isn't in deep water unless swimming, swims only at a water surface with no land over it (the
+// sea's plane goes on under the island), didn't pass through a wall since the last tick, and that
+// nothing stands between the camera and the Mii's head, nor water over the camera. Then the queries are timed.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -184,6 +186,7 @@ void check_rasters(const World& w, const std::string& dir) {
 
 struct Tally {
     u32 ticks = 0, off_ground = 0, in_wall = 0, deep = 0, tunnel = 0, cam_blocked = 0, cam_wet = 0;
+    u32 swim = 0, swim_dry = 0, under_land = 0;  // swimming ticks; ... with no water at the surface; under land
     u32 air = 0, max_air = 0;
     bool fell = false;
     f32 max_overlap = 0, max_depth = 0, min_y = 1e30f, max_y = -1e30f;
@@ -194,7 +197,9 @@ struct Tally {
     u32 cam_pulled = 0;    // ticks the terrain held the camera in
     f32 cam_min = 1e30f;
     f32 max_over_slope = 0;  // the feet's height over a slope too steep to stand on, falling or sliding
-    bool broken() const { return off_ground || in_wall || deep || tunnel || cam_blocked || cam_wet; }
+    bool broken() const {
+        return off_ground || in_wall || deep || tunnel || cam_blocked || cam_wet || swim_dry || under_land;
+    }
 };
 
 // what the scene would do each tick: the drive gives the stick (camera-relative, as the player holds
@@ -204,7 +209,7 @@ struct Drive {
     bool world = false;           // ...or a world direction in wx, wz
     f32 wx = 0, wz = 0;
     bool run = false;
-    bool jump = false;
+    bool jump = false, jump_held = false;
     FollowCameraInput cam;
 };
 
@@ -235,6 +240,7 @@ public:
                 cam.stick_to_world(d.sx, d.sy, &in.move_x, &in.move_z);
             in.run = d.run;
             in.jump = d.jump;
+            in.jump_held = d.jump_held;
             w_.reset_stats();
             pl.update(in, TICK);
             cam.update(d.cam, pl.position(), pl.yaw(), pl.speed() / pp_.run_speed, TICK);
@@ -247,7 +253,17 @@ public:
                 t.max_tests = tests, t.max_at = p, t.max_state = (int)pl.state();
             t.ticks++;
             t.min_y = std::min(t.min_y, p.y), t.max_y = std::max(t.max_y, p.y);
-            if (pl.airborne()) {
+            if (pl.swimming()) {
+                // at a water surface within its height over the feet, and no land over that (the
+                // sea's plane goes on under the island)
+                t.swim++;
+                t.air = 0;
+                Hit h;
+                if (!w_.ground(p.x, p.z, p.y + pp_.height, p.y, water_of, &h))
+                    t.swim_dry++;
+                else if (w_.ground(p.x, p.z, h.point.y + 2 * pp_.height, h.point.y + 0.01f, floor_of, &h))
+                    t.under_land++;
+            } else if (pl.airborne()) {
                 t.fell = true;
                 t.max_air = std::max(t.max_air, ++t.air);
                 Hit h;
@@ -265,7 +281,7 @@ public:
             if (o > 0.05f * pp_.radius)
                 t.in_wall++;
             t.max_depth = std::max(t.max_depth, pl.water_depth());
-            if (pl.water_depth() > pp_.wade_depth + 1e-3f)
+            if (!pl.swimming() && pl.water_depth() > pp_.wade_depth + 1e-3f)
                 t.deep++;
             Hit h;
             if (w_.cast(prev + Vec3{0, pp_.knee, 0}, p + Vec3{0, pp_.knee, 0}, solid, &h))
@@ -288,13 +304,14 @@ public:
     void report(const char* name, const Player& pl, const Tally& t, bool ok, const char* what) {
         Vec3 p = pl.position();
         log("selftest walk %s%s: %s (%s) at (%.1f, %.1f, %.1f), walked %.0f, ground %04X, depth %.2f, y %.1f..%.1f, "
-            "%s%u ticks: off the ground %u, in a wall %u (worst %.3f), deep water %u, through a wall %u, camera "
+            "%s%u ticks (%u swimming): off the ground %u, in a wall %u (worst %.3f), deep water %u, swimming out of "
+            "water %u, under land %u, through a wall %u, camera "
             "blocked %u, under water %u, pulled in %.0f %% (to %.1f of %.1f); %.0f triangle tests a tick (%u at most, "
             "at (%.0f, %.0f, %.0f) state %d)",
             tag_, name, ok && !t.broken() ? "ok" : "MISMATCH", what, p.x, p.y, p.z, pl.distance(),
             pl.ground_attribute(),
-            pl.water_depth(), t.min_y, t.max_y, t.fell ? "fell, " : "", t.ticks, t.off_ground, t.in_wall,
-            t.max_overlap, t.deep, t.tunnel, t.cam_blocked, t.cam_wet, t.ticks ? 100.0 * t.cam_pulled / t.ticks : 0.0,
+            pl.water_depth(), t.min_y, t.max_y, t.fell ? "fell, " : "", t.ticks, t.swim, t.off_ground, t.in_wall,
+            t.max_overlap, t.deep, t.swim_dry, t.under_land, t.tunnel, t.cam_blocked, t.cam_wet, t.ticks ? 100.0 * t.cam_pulled / t.ticks : 0.0,
             t.cam_min, cp_.distance, t.ticks ? (double)t.tests / t.ticks : 0.0,
             t.max_tests, t.max_at.x, t.max_at.y, t.max_at.z, t.max_state);
     }
@@ -326,19 +343,24 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
     Walker wk(w, pp, out, tag);
     const Vec3 spawn{-2029, 69, 2330};
 
-    {  // one grounded press jumps, another press in the air does not; it lands at the same place
+    // A pressed and let go at once: the rise under twice gravity, half jump_height; another press in
+    // the air does nothing; held: under 0.72 of it, jump_height / 0.72 (player.cpp JUMP_CUT, JUMP_HELD)
+    for (int held = 0; held < 2; held++) {
         Player pl(w, pp);
         f32 ground_y = 0;
-        Tally t = wk.run("jump", spawn, 180, 2, pl, [&](const Player& p, u32 i, Drive& d) {
+        const char* name = held ? "jump_held" : "jump";
+        Tally t = wk.run(name, spawn, 180, 2, pl, [&](const Player& p, u32 i, Drive& d) {
             if (i == 0)
                 ground_y = p.position().y;
             d.jump = i == 0 || i == 20;
+            d.jump_held = held && i < 90;
             return true;
         });
-        const bool apex = t.max_y > ground_y + 0.6f * pp.jump_height &&
-                          t.max_y < ground_y + 1.15f * pp.jump_height;
+        const f32 want = held ? pp.jump_height / 0.72f : 0.5f * pp.jump_height, rise = t.max_y - ground_y;
         const bool landed = !pl.airborne() && std::fabs(pl.position().y - ground_y) < 0.1f;
-        wk.report("jump", pl, t, apex && landed, "one jump, no midair restart, landed");
+        char what[128];
+        snprintf(what, sizeof(what), "rose %.2f (%.2f wanted), one jump, landed", rise, want);
+        wk.report(name, pl, t, std::fabs(rise - want) < 0.1f * want && landed, what);
     }
 
     {  // running momentum carries through an intentional jump
@@ -412,15 +434,22 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
         wk.report("trail", pl, t, top && std::fabs(pl.position().y - trail[n - 1].y) < 5, what);
     }
     {  // a rock shore on the volcano's north coast whose bed goes gently under the sea (1 deep 48
-       // units out, 6 deep 96 out): stops knee-deep
+       // units out, 6 deep 96 out): wades in, then swims once out of its depth; turned back, it swims
+       // to the shore and wades out
         Player pl(w, pp);
-        Tally t = wk.run("shore", Vec3{3798.1f, 10, -6644.4f}, 80, 30, pl, [](const Player&, u32, Drive& d) {
-            d.world = true, d.wx = 0.5f * std::sin(80 * PI / 180), d.wz = 0.5f * std::cos(80 * PI / 180);
-            return true;
+        const Vec3 from{3798.1f, 10, -6644.4f};
+        bool swam = false, out = false;
+        Tally t = wk.run("shore", from, 80, 40, pl, [&](const Player& p, u32 i, Drive& d) {
+            swam |= p.swimming();
+            if (i < 20 * 60) {
+                d.world = true, d.wx = std::sin(80 * PI / 180), d.wz = std::cos(80 * PI / 180);
+                return true;
+            }
+            if (!p.swimming() && p.water_depth() <= pp.wade_depth && swam)
+                out = true;
+            return toward(p, from.x, from.z, 1.0f, d);
         });
-        // (held toward the sea at an angle, it then edges along the shore at that depth)
-        wk.report("shore", pl, t, pl.water_depth() > 0.5f * pp.wade_depth && pl.water_depth() <= pp.wade_depth,
-                  "knee-deep in the water");
+        wk.report("shore", pl, t, swam && out && !pl.swimming(), "swam out, came back and waded out");
     }
     {  // into a tree's trunk (a cylinder 8.2 wide, on the grass by the trail's foot)
         Player pl(w, pp);
@@ -440,8 +469,9 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
             d.run = true;
             return true;
         });
-        wk.report("beach", pl, t, pl.water_depth() <= pp.wade_depth && pl.speed() < 0.1f * pp.walk_speed,
-                  "stopped at the sea");
+        wk.report("beach", pl, t,
+                  pl.swimming() || (pl.water_depth() <= pp.wade_depth && pl.speed() < 0.1f * pp.walk_speed),
+                  pl.swimming() ? "swimming in the sea" : "stopped at the sea");
     }
     {  // to the edge of the grass ledge north of the plaza (y 169), whose rock face drops 100 to the
        // plaza (69): deeper than max_drop, so refused as a wall would be
@@ -512,14 +542,16 @@ void scripted(const World& w, f32 k, const char* tag, const std::vector<Vec3>& t
         wk.report("bridge", pl, t, pl.position().x < -1990 && t.min_y > 690 && !t.fell, "crossed");
     }
     // random walking, the camera turned now and then: ten minutes from the spawn, five from the
-    // trail's foot (grass, the river, the forest) and five on Powder White Beach
+    // trail's foot (grass, the river, the forest), five on Powder White Beach and five from the rock
+    // shore (into the sea and about in it)
     struct Start {
         const char* name;
         Vec3 at;
         f32 seconds;
     };
     for (const Start& st : {Start{"random", spawn, 600}, Start{"random_hills", Vec3{1356, 120, 456}, 300},
-                            Start{"random_beach", Vec3{6001, 100, 757}, 300}}) {
+                            Start{"random_beach", Vec3{6001, 100, 757}, 300},
+                            Start{"random_shore", Vec3{3798.1f, 10, -6644.4f}, 300}}) {
         Player pl(w, pp);
         Rng rng{std::hash<std::string>()(std::string(tag) + st.name) | 1};
         f32 sx = 0, sy = 0, cx = 0, cy = 0;

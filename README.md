@@ -154,7 +154,8 @@ Useful environment variables:
 | `NOMA_TRACE_OPEN=/dev/...` | print the last traced calls when the guest opens that IOS path (trace builds) |
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
 | `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
-| `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, the edge of a drop too deep to take, a ledge low enough to drop from, a slope too steep to stand on from above and from on it, the suspension bridge) and 20 minutes of random walking at two Mii sizes, every tick checked (on the ground, in no wall, no deep water, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale (10 and 9), `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
+| `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, the edge of a drop too deep to take, a ledge low enough to drop from, a slope too steep to stand on from above and from on it, the suspension bridge, a tapped and a held jump, a run out to sea and a swim back to the shore) and 25 minutes of random walking and swimming at two Mii sizes, every tick checked (on the ground, in no wall, no deep water unless swimming, a swimmer at a water surface with no land over it, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale (10 and 9), `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
+| `NOMA_SELFTEST=vehicles` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | Wuhu Island's cars and boats (`engine/wuhu/vehicles.h`) on the staged package and its collision: each taken and driven (ahead, ahead steering, back), every tick checked (a car on drivable ground, a boat on deep water with no land over it, no new overlap with another vehicle), and a way out beside each (host) |
 | `NOMA_SELFTEST=g3drender` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | the host's software backend for native draws (`engine/g3d/soft_backend`): its depth against the GX path's on random triangles (f32 positions, then compact ones), then each `view_*` camera of the package drawn (both passes, under the GX state of a 640x456 frame) to `NOMA_G3D_OUT` (PNGs; default `g3drender`), timed, checked through the GX stream, compared with `tools/g3d/preview_views.py`'s renders of the same cameras when `NOMA_G3D_REF` names their directory (PSNR, pixels off, a difference picture), and the overlays drawn again under a range of depth biases (`NOMA_G3D_FOV`, `NOMA_G3D_FRAME`, `NOMA_G3D_VIEWS`) (host) |
 | `NOMA_SOFT3D_THREADS=N` | host: the threads the software backend draws native draws (the island) with (default: as many as the machine has, at most 8) |
 | `NOMA_DUMP_AUDIO=file.wav`, `NOMA_DEBUG_AX` | record what the audio DMA plays; AX mixer statistics |
@@ -187,12 +188,14 @@ The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button su
 `engine/system/home_button.cpp` keeps it from loading or opening. Closing the app from the HOME
 Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
 progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
-On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs), hold ZR for
-a faster sprint and cliff leap, and press or hold A for a short or high jump. The C-stick (New 3DS)
-or L and R turn the camera round the Mii, the D-pad tilts the camera or brings it in and out, and Y
-brings it round behind the Mii; touch, START and B work
-the Home tab and the window that asks about going back.
-Near a parked car, X (Wii Remote 1) gets in or out; the circle pad accelerates/reverses and steers.
+On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs); ZR (New
+3DS) sprints, and a sprint off a ledge glides down under the Skydiving parachute; A jumps (a tap a
+short hop, held a higher one). Walked on into deep water (or off a low edge into it) the Mii swims,
+and wades or climbs out where the shore allows. Near a parked car or a boat at anchor (a boat from
+the water too), X (the Wii Remote's 1) gets in and out again; in it the circle pad's up and down
+speed up and back, its left and right steer. The C-stick (New 3DS) or L and R turn the camera round
+the Mii, the D-pad tilts the camera or brings it in and out, and Y brings it round behind the Mii;
+touch, START and B work the Home tab and the window that asks about going back.
 
 ## The Sound Player
 

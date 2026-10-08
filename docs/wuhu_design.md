@@ -196,8 +196,9 @@ Sections (v1):
   not water) under the feet within a step height (40 island units up, 200 down); walls = sphere
   (radius ~6 island units at knee and chest height) push-out against non-walkable triangles and
   invisible fences (attr high byte 0x08/0x00); water: the Mii may wade while the water surface
-  (attr 0x1106) is < 8 units above the ground; deeper water switches to surface swimming and the
-  nearby shore returns the Mii to walking; slopes
+  (attr 0x1106) is < 8 units above the ground; deeper water is swum in at the surface (only where the
+  water is the surface: the sea's KCL plane goes on under the whole island at y 0), and a shore no
+  higher than 0.45 Mii heights over it is waded or climbed out onto (engine/wuhu/player.cpp); slopes
   steeper than walkable push back; tree trunks = cylinders from INST (radius from the model). Must use
   the octree with neighbouring cells (the octree only lists triangles within its build radius).
 - Camera: third person, orbit yaw/pitch/distance around the Mii's head (island units: distance ~35,
@@ -205,8 +206,9 @@ Sections (v1):
   2 s; terrain avoidance (ray from target to camera against the KCL, pull in); FOV 45 deg;
   near 1.5 / far 80,000 island units (×k in guest units).
 - Controls. 3DS: circle pad = move and swim (stick mode: no pointer nudge while the island runs); X
-  enters or leaves a nearby car or anchored boat. In a car or boat, pad up/down accelerates or reverses
-  and left/right steers; boats float on the water and stop at shore. C-stick (New
+  enters or leaves a nearby car or anchored boat (engine/wuhu/vehicles.h). In a car or boat, pad
+  up/down accelerates or reverses and left/right steers; cars keep to drivable ground within a step,
+  boats to deep water, and both stop at walls and at the other vehicles' boxes. C-stick (New
   3DS, irrst) or L/R = orbit camera, D-pad up/down = pitch, D-pad left/right = orbit, Y = camera
   behind; START or B = the menu (B presses the Home tab like the Sound Player); touch = pointer
   (Home tab, dialog). Host: NOMA_INPUT tokens `S(x;y)[:secs]` (stick), `C(x;y)[:secs]` (camera
@@ -254,8 +256,9 @@ theme (Sound Player semantics).
   The sun model (StageArc Sun/G3D) belongs in the sky.
 - **Walking (research reach/reach.md):** slope limit 50 deg (walkable normal.y >= 0.643), step ~5 iu,
   head clearance 20, water and lava are walls, normal walking refuses drops higher than ~30 iu (2 Mii
-  heights: no falling into coves you can't leave). Holding ZR while sprinting carries momentum off a
-  ledge and deploys the staged Skydiving parachute; an unlanded fall resets after ten seconds. About
+  heights: no falling into coves you can't leave). A sprint (ZR) off a ledge may drop any height: a
+  Mii height down it glides under the staged Skydiving parachute, sinking 1.5 Mii heights a second;
+  a fall that hasn't landed in ten seconds (a glide: 90) goes back to where the Mii last stood. About
   73% of the main island is then reachable on foot, incl. tunnels,
   the volcano's lava chamber, the castle and the ruins. reach/warps.json holds warp points (27 warp-only:
   Wedge Island, islets, villa cove, summit rim...; 51 at reachable landmarks): they go into the package
@@ -305,8 +308,8 @@ theme (Sound Player semantics).
   animations move by the display's frames since the last update (at most 3), not one 1/60 s a game
   frame; PACE is per second, 2 x 25/60 of the WSR-scale pace (what the user approved at ~25 fps).
   The departure scene's Mii runs at a further 2.5 times that pace; walking is unchanged. Its height,
-  collision body and follow camera are 0.8 times the previous 1.7x size. A starts a grounded jump
-  about 0.8 Mii heights high; holding A gives a fuller rise, releasing early makes a short hop, and
-  the descent accelerates faster than the ascent. Seal.lex's Jump pose holds in the air, and a
-  ceiling stops the rise.
+  collision body and follow camera are 0.8 times the previous 1.7x size. A jumps from the ground at
+  the speed that rises jump_height (0.8 Mii heights) under plain gravity: held, the rise has 0.72 of
+  gravity (1.1 Mii heights), a tap twice it (0.4), the way down 1.45 times; a ceiling stops the rise
+  and ground rising over the feet (a slope jumped up) ends it.
   `NOMA_WUHU_BY_FRAMES=1` restores frame steps for repeatable host runs.

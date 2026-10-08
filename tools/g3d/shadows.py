@@ -17,7 +17,7 @@ def _cell_batches(pkg):
             material = pkg.materials[batch.material]
             if material.flags & ng3d.MAT_XLU or material.blend & 1:
                 continue
-            if material.zmode & 0x11 != 0x11:
+            if (material.zmode & 0x11) != 0x11:  # (depth tested and written)
                 continue
             yield batch_index, batch, material
 

@@ -11,6 +11,7 @@
 
 #include "engine/collision/kcl.h"
 
+#include <utility>
 #include <vector>
 
 namespace engine::wuhu {
@@ -66,9 +67,12 @@ struct PlayerInput {
 
 enum class PlayerState : u8 { WAIT, WALK, RUN, FALL, JUMP, SWIM };
 
+// a box the body can't enter (a parked car or boat): centred at `centre` on x/z, its own x axis
+// (cos_yaw, -sin_yaw) and z axis (sin_yaw, cos_yaw) on x/z, from `bottom` to `top`
 struct Obstacle {
     Vec3 centre;
-    f32 half_width, half_length, yaw;
+    f32 half_width, half_length;
+    f32 cos_yaw, sin_yaw;
     f32 bottom, top;
 };
 
@@ -76,9 +80,14 @@ class Player {
 public:
     Player(const engine::collision::World& world, const PlayerParams& params);
 
-    // puts the Mii on the ground at or below `feet` (up to a step above it), facing `yaw_deg`;
-    // false (and the Mii left at `feet`) if there is no ground there
-    bool place(Vec3 feet, f32 yaw_deg);
+    // puts the Mii on the ground at or below `feet` (up to a step above it, down to `lowest`), facing
+    // `yaw_deg`; false (and the Mii left at `feet`) if there is no ground there
+    bool place(Vec3 feet, f32 yaw_deg, f32 lowest = -1e9f);
+    // whether the Mii could stand at ground under `feet` (a step above it, down to `lowest`): walkable,
+    // not lava, no deeper than wading depth, the body free; where (`at`)
+    bool can_stand(Vec3 feet, f32 lowest, Vec3* at) const;
+    // puts the Mii swimming in deep water by `feet` (within its height above, two below), where the
+    // body is free; false (nothing changed) if there is none
     bool place_swimming(Vec3 feet, f32 yaw_deg);
     // advances `dt` seconds, in steps of at most 1/60 s (the same input and dt give the same result)
     void update(const PlayerInput& in, f32 dt);
@@ -92,10 +101,14 @@ public:
     f32 stride_phase() const { return phase_; }
     f32 distance() const { return distance_; }  // walked in all
     bool airborne() const { return airborne_; }  // falling or sliding down a steep slope
+    bool sliding() const { return airborne_ && sliding_; }
+    // gliding down from a sprint off a ledge (a Mii height and more below where it left the ground)
+    bool gliding() const { return airborne_ && run_leap_ && last_ground_.y - pos_.y > p_.height; }
+    f32 vertical_speed() const { return vy_; }  // island units a second, up
     bool swimming() const { return swimming_; }
-    void set_obstacles(const std::vector<Obstacle>& obstacles) { obstacles_ = obstacles; }
+    void set_obstacles(std::vector<Obstacle> obstacles) { obstacles_ = std::move(obstacles); }
     u16 ground_attribute() const { return ground_attr_; }
-    f32 water_depth() const { return depth_; }  // of the water the Mii stands in (0: dry)
+    f32 water_depth() const { return depth_; }  // of the water over the feet (0: dry)
     const PlayerParams& params() const { return p_; }
 
     // what the body can't pass: walls (upright faces), invisible fences, overhangs, tree trunks
@@ -114,6 +127,9 @@ private:
     Ground ground_at(f32 x, f32 z, f32 from_y, f32 to_y) const;
     f32 water_above(f32 x, f32 z, f32 ground_y, f32 top_y) const;
     bool water_surface(f32 x, f32 z, f32 from_y, f32 to_y, f32* y) const;
+    bool deep_water(f32 x, f32 z, f32 water_top, f32 water_bottom, f32 floor_top, f32* surface) const;
+    f32 swim_feet(f32 x, f32 z, f32 surface) const;
+    void start_swim(Vec3 at, f32 surface);
     bool blocked(Vec3 feet) const;
     bool landing_ok(f32 x, f32 z, f32 from_y, f32 lowest) const;
     Vec3 push(Vec3 sphere) const;
@@ -125,6 +141,7 @@ private:
     void ride_slope(Vec3 n);
     void fall(f32 frames, bool jump_held);
     void swim(const PlayerInput& in, f32 frames);
+    bool swim_step(Vec3 d, f32* surface);
 
     const engine::collision::World& world_;
     PlayerParams p_;

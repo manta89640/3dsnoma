@@ -121,7 +121,9 @@ set(ENGINE_SOURCES
   engine/wuhu/music.cpp
   engine/wuhu/places.cpp
   engine/wuhu/player.cpp
+  engine/wuhu/sand_tracks.cpp
   engine/wuhu/scene.cpp
+  engine/wuhu/vehicles.cpp
 )
 
 # ---- the Wii runtime (memory, threads, interrupts, hardware and IOS emulation) ----
@@ -215,7 +217,7 @@ if(NINTENDO_3DS)
   target_link_libraries(noma noma_decomp citro3d ctru m)
 else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
-                           platform/host/selftest.cpp platform/host/selftest_g3d.cpp platform/host/selftest_walk.cpp
+                           platform/host/selftest.cpp platform/host/selftest_g3d.cpp platform/host/selftest_walk.cpp platform/host/selftest_vehicles.cpp
                            engine/g3d/package_writer.cpp
                            engine/g3d/soft_backend.cpp platform/host/selftest_g3drender.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)

@@ -60,6 +60,8 @@
 #include "engine/wuhu/island_load.h"
 #include "engine/wuhu/island_mii.h"
 #include "engine/wuhu/player.h"
+#include "engine/wuhu/sand_tracks.h"
+#include "engine/wuhu/vehicles.h"
 #include "noma_decomp.h"
 
 namespace engine::wuhu {
@@ -73,25 +75,14 @@ using engine::g3d::Package;
 using engine::math::Mtx34;
 using engine::math::Vec3;
 
-// GX SDK enum values used by the small immediate-mode sand decal pass.
-enum : u32 {
-    GX_VA_POS = 9, GX_VA_CLR0 = 11, GX_DIRECT = 1, GX_POS_XYZ = 1, GX_F32 = 4, GX_CLR_RGBA = 1,
-    GX_RGBA8 = 5, GX_VTXFMT0 = 0, GX_COLOR0A0 = 4, GX_SRC_REG = 0, GX_SRC_VTX = 1, GX_DF_NONE = 0,
-    GX_AF_NONE = 2, GX_TEXCOORD_NULL = 0xFF, GX_TEXMAP_NULL = 0xFF, GX_CC_RASC = 10, GX_CC_ZERO = 15,
-    GX_CA_RASA = 5, GX_CA_ZERO = 7, GX_TEV_ADD = 0, GX_TB_ZERO = 0, GX_CS_SCALE_1 = 0, GX_TEVPREV = 0,
-    GX_ALWAYS = 7, GX_AOP_AND = 0, GX_LEQUAL = 3, GX_BM_NONE = 0, GX_BM_BLEND = 1, GX_BL_ONE = 1,
-    GX_BL_SRCALPHA = 4, GX_BL_INVSRCALPHA = 5, GX_LO_CLEAR = 0, GX_CULL_NONE = 0, GX_PNMTX0 = 0,
-};
-
 const char* const PACKAGE = "/wuhu/island.ng3d";
 constexpr f32 TICK = 1.0f / 60.0f;
 constexpr f32 DEG = 3.14159265f / 180.0f;
-constexpr u32 NO_VEHICLE = 0xFFFFFFFFu;
-constexpr u32 NO_PARACHUTE = 0xFFFFFFFFu;
+constexpr u32 NONE32 = 0xFFFFFFFFu;
+// the Skydiving parachute (tools/wuhu/stage_wuhu.py stages it as the one instance of this class):
+// shown over the Mii while it glides (Player::gliding)
 constexpr u16 PARACHUTE_CLASS = 0xFFFEu;
 const char* const PARACHUTE_MODEL = "WS2_omk_parachute_01";
-constexpr f32 CAR_MAX_SPEED = 180.0f, CAR_REVERSE_SPEED = 55.0f;
-constexpr f32 CAR_ACCEL = 115.0f, CAR_BRAKE = 190.0f, CAR_STEER = 115.0f;
 // how the load's progress is shared: the file's reading, the rest of the worker's work, the Mii
 constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
 
@@ -108,12 +99,11 @@ const u32 CHANNEL_CLEAR = 0;
 // cars, so it is drawn MII_SCALE times as big against the island (its body, steps, reach and camera
 // all follow k); and it crosses the island at PACE times the pace it has at WSR's scale (its own walk
     // and run, from the room, are per its size: MII_SCALE of that comes with the size, PACE / MII_SCALE
-    // is applied). Running gets a further 2.5x movement speed, with the run animation's pace slowed
-    // by the same factor so the Mii takes longer per gait cycle. The size here is 0.8x the earlier
-    // 1.7x. The pace is a second's: the user asked for twice the pace they saw at about 25 frames a second, when the Mii
-// moved a sixtieth of a second's worth a frame (41 % of its pace a second),
+// is applied). The pace is a second's: the user asked for twice the pace they saw at about 25 frames
+// a second, when the Mii moved a sixtieth of a second's worth a frame (41 % of its pace a second),
 // and the Mii now moves by the time a frame takes (FrameClock): 2 x 25 / 60 of its pace a second
-// whatever the frame rate (the per-frame pace of 1276ec5, 2, was that at 25 fps and 2.4 times it at 60).
+// whatever the frame rate (the per-frame pace of 1276ec5, 2, was that at 25 fps and 2.4 times it at
+// 60). Its run is RUN_SPEED_MULTIPLIER times faster again than that, its size 0.8 of the 1.7 it had.
 constexpr f32 MII_SCALE = 1.7f * 0.8f;
 constexpr f32 PACE = 2.0f * 25.0f / 60.0f;
 constexpr f32 RUN_SPEED_MULTIPLIER = 2.5f;
@@ -198,13 +188,11 @@ private:
     bool place_at(const fmt::Marker& m);
     void log_frame();
     bool enter_vehicle();
-    void leave_vehicle();
-    void drive_vehicle(const Controls& controls, f32 dt);
-    void update_sand_tracks(Vec3 before, f32 walked_before);
-    void draw_sand_tracks();
+    bool leave_vehicle();
+    void park_vehicle();
+    void update_parachute();
     Vec3 controlled_position() const;
     f32 controlled_yaw() const;
-    void update_vehicle_obstacles();
     static void world_frame(void* self);
     void take_job();
     void emit(engine::g3d::Pass pass);
@@ -216,22 +204,9 @@ private:
     std::unique_ptr<engine::g3d::World> world_;
     std::unique_ptr<Player> player_;
     std::unique_ptr<FollowCamera> camera_;
-    u32 vehicle_ = NO_VEHICLE;
-    bool vehicle_is_boat_ = false;
-    f32 vehicle_speed_ = 0, vehicle_yaw_ = 0;
-    f32 vehicle_scale_x_ = 1, vehicle_scale_y_ = 1, vehicle_scale_z_ = 1;
-    f32 vehicle_half_width_ = 0, vehicle_half_length_ = 0, vehicle_min_y_ = 0, vehicle_height_ = 0;
-    struct SandTrack {
-        Vec3 position;
-        f32 yaw, width, length;
-        u32 frame;
-        bool tire;
-    };
-    std::vector<SandTrack> sand_tracks_;
-    Vec3 track_player_position_{};
-    f32 track_player_distance_ = 0, track_vehicle_distance_ = 0;
-    bool track_player_ready_ = false;
-    u32 parachute_instance_ = NO_PARACHUTE;
+    std::unique_ptr<Vehicles> vehicles_;
+    std::unique_ptr<SandTracks> sand_;
+    u32 parachute_instance_ = NONE32;
     bool parachute_visible_ = false;
     bool ready_ = false, prepared_ = false;
     u32 clear_ = CHANNEL_CLEAR;  // the EFB's clear colour while the island shows (set_clear)
@@ -254,7 +229,6 @@ private:
 
 Island::~Island() {
     take_job();  // (the World is the helper's while a job is out)
-
     // the Mii's guest objects (the content's only ones); then the package's GPU resources, before
     // the package (native_draw.h), and what reads the package and the collision before them
     mii_.reset();
@@ -262,6 +236,8 @@ Island::~Island() {
         set_clear(CHANNEL_CLEAR);
     if (prepared_)
         engine::g3d::native_draw_release(*package_);
+    sand_.reset();
+    vehicles_.reset();
     world_.reset();
     camera_.reset();
     player_.reset();
@@ -319,13 +295,12 @@ void Island::finish_loading() {
     world_ = std::make_unique<engine::g3d::World>(*package_);
     world_->set_world_scale(k_);
     world_->set_features(features_from_env());
-    for (u32 i = 0; i < world_->instance_count(); ++i)
-        if (world_->instance_class(i) == PARACHUTE_CLASS) {
+    for (u32 i = 0; i < world_->instance_count() && parachute_instance_ == NONE32; i++)
+        if (world_->instance_class(i) == PARACHUTE_CLASS)
             parachute_instance_ = i;
-            break;
-        }
-    if (parachute_instance_ != NO_PARACHUTE)
+    if (parachute_instance_ != NONE32)
         world_->set_group_visible(PARACHUTE_MODEL, false);
+    vehicles_ = std::make_unique<Vehicles>(*world_, *package_, *collision_);
     const u64 t1 = guest::host_time_us();
     // (the uploads themselves happen on the renderer's thread when it reaches the command)
     engine::g3d::native_draw_prepare(*package_);
@@ -337,6 +312,8 @@ void Island::finish_loading() {
     pp.walk_speed *= PACE / MII_SCALE;
     pp.run_speed *= PACE / MII_SCALE * RUN_SPEED_MULTIPLIER;
     player_ = std::make_unique<Player>(*collision_, pp);
+    player_->set_obstacles(vehicles_->obstacles());
+    sand_ = std::make_unique<SandTracks>(*collision_);
     FollowCameraParams cp = FollowCameraParams::make(pp.height);
     cp.aspect = mii_->aspect();
     camera_ = std::make_unique<FollowCamera>(*collision_, cp);
@@ -422,444 +399,116 @@ bool Island::place_at(const fmt::Marker& m) {
 }
 
 Vec3 Island::controlled_position() const {
-    if (vehicle_ == NO_VEHICLE)
-        return player_->position();
-    const Mtx34 m = world_->instance_transform(vehicle_);
-    return {m.m[0][3], m.m[1][3], m.m[2][3]};
+    return vehicles_->driven() == Vehicles::NONE ? player_->position() : vehicles_->position();
 }
 
-f32 Island::controlled_yaw() const { return vehicle_ == NO_VEHICLE ? player_->yaw() : vehicle_yaw_; }
-
-void Island::update_vehicle_obstacles() {
-    std::vector<Obstacle> obstacles;
-    if (!world_ || !player_)
-        return;
-    for (u32 i = 0; i < world_->instance_count(); ++i) {
-        if (i == vehicle_ || world_->instance_animated(i))
-            continue;
-        const u16 cls = world_->instance_class(i);
-        if (cls != 15 && cls != 7 && cls != 8)
-            continue;
-        const Mtx34 m = world_->instance_transform(i);
-        const fmt::Instance& in = package_->instances()[i];
-        const fmt::Model& model = package_->models()[in.model];
-        const f32 sx = std::sqrt(m.m[0][0] * m.m[0][0] + m.m[1][0] * m.m[1][0] + m.m[2][0] * m.m[2][0]);
-        const f32 sz = std::sqrt(m.m[0][2] * m.m[0][2] + m.m[1][2] * m.m[1][2] + m.m[2][2] * m.m[2][2]);
-        obstacles.push_back({{m.m[0][3], m.m[1][3], m.m[2][3]},
-                             0.5f * (model.bbox[3] - model.bbox[0]) * sx,
-                             0.5f * (model.bbox[5] - model.bbox[2]) * sz,
-                             wrap_deg(std::atan2(m.m[0][2], m.m[2][2]) / DEG),
-                             m.m[1][3] + model.bbox[1] * std::sqrt(m.m[0][1] * m.m[0][1] +
-                                                                  m.m[1][1] * m.m[1][1] + m.m[2][1] * m.m[2][1]),
-                             m.m[1][3] + model.bbox[4] * std::sqrt(m.m[0][1] * m.m[0][1] +
-                                                                  m.m[1][1] * m.m[1][1] + m.m[2][1] * m.m[2][1])});
-    }
-    player_->set_obstacles(obstacles);
+f32 Island::controlled_yaw() const {
+    return vehicles_->driven() == Vehicles::NONE ? player_->yaw() : vehicles_->yaw();
 }
 
+// into the vehicle nearest the Mii, if one is within reach (not while in the air; a swimmer only
+// into a boat)
 bool Island::enter_vehicle() {
     if (player_->airborne())
         return false;
-    f32 best = 1e30f;
-    u32 nearest = NO_VEHICLE;
-    for (u32 i = 0; i < world_->instance_count(); i++) {
-        const u16 cls = world_->instance_class(i);
-        if ((cls != 15 && cls != 7 && cls != 8) || world_->instance_animated(i))
-            continue;
-        if (player_->swimming() && cls == 15)
-            continue;
-        const Mtx34 m = world_->instance_transform(i);
-        const f32 dx = m.m[0][3] - player_->position().x, dz = m.m[2][3] - player_->position().z;
-        const f32 d2 = dx * dx + dz * dz;
-        if (d2 < best)
-            best = d2, nearest = i;
-    }
-    if (nearest == NO_VEHICLE)
+    const PlayerParams& pp = player_->params();
+    const u32 v = vehicles_->nearest(player_->position(), pp.radius + 0.4f * pp.height, player_->swimming());
+    if (v == Vehicles::NONE)
         return false;
-
-    const Mtx34 m = world_->instance_transform(nearest);
-    const fmt::Instance& in = package_->instances()[nearest];
-    const fmt::Model& model = package_->models()[in.model];
-    vehicle_scale_x_ = std::sqrt(m.m[0][0] * m.m[0][0] + m.m[1][0] * m.m[1][0] + m.m[2][0] * m.m[2][0]);
-    vehicle_scale_y_ = std::sqrt(m.m[0][1] * m.m[0][1] + m.m[1][1] * m.m[1][1] + m.m[2][1] * m.m[2][1]);
-    vehicle_scale_z_ = std::sqrt(m.m[0][2] * m.m[0][2] + m.m[1][2] * m.m[1][2] + m.m[2][2] * m.m[2][2]);
-    vehicle_half_width_ = 0.5f * (model.bbox[3] - model.bbox[0]) * vehicle_scale_x_;
-    vehicle_half_length_ = 0.5f * (model.bbox[5] - model.bbox[2]) * vehicle_scale_z_;
-    vehicle_min_y_ = model.bbox[1] * vehicle_scale_y_;
-    vehicle_height_ = (model.bbox[4] - model.bbox[1]) * vehicle_scale_y_;
-    const f32 reach = std::sqrt(vehicle_half_width_ * vehicle_half_width_ +
-                                vehicle_half_length_ * vehicle_half_length_) + player_->params().radius + 2.0f;
-    if (best > reach * reach)
-        return false;
-
-    vehicle_ = nearest;
-    vehicle_is_boat_ = world_->instance_class(nearest) == 7 || world_->instance_class(nearest) == 8;
-    vehicle_speed_ = 0;
-    vehicle_yaw_ = wrap_deg(std::atan2(m.m[0][2], m.m[2][2]) / DEG);
-    guest::log("wuhu: entered %s instance %u", vehicle_is_boat_ ? "boat" : "car", (unsigned)vehicle_);
+    vehicles_->enter(v);
+    player_->set_obstacles(vehicles_->obstacles(v));
+    sand_->end_trail();
+    guest::log("wuhu: into the %s (vehicle %u)", vehicles_->boat() ? "boat" : "car", (unsigned)v);
     return true;
 }
 
-void Island::leave_vehicle() {
-    if (vehicle_ == NO_VEHICLE)
-        return;
-    const Vec3 p = controlled_position();
-    const f32 side_x = std::cos(vehicle_yaw_ * DEG), side_z = -std::sin(vehicle_yaw_ * DEG);
-    const f32 side = vehicle_half_width_ + player_->params().radius + 2.0f;
-    const Vec3 exit{p.x + side_x * side, p.y + player_->params().step_up, p.z + side_z * side};
-    const Vec3 other_exit{p.x - side_x * side, exit.y, p.z - side_z * side};
-    bool placed = vehicle_is_boat_ && player_->place_swimming(exit, vehicle_yaw_);
-    if (!placed)
-        placed = player_->place(exit, vehicle_yaw_);
-    if (!placed && vehicle_is_boat_)
-        placed = player_->place_swimming(other_exit, vehicle_yaw_);
-    if (!placed)
-        placed = player_->place(other_exit, vehicle_yaw_);
-    if (!placed) {
-        guest::log("wuhu: cannot leave parked car instance %u: no safe ground beside it", (unsigned)vehicle_);
-        return;
+// out of the vehicle: the Mii beside it (a side, else behind or before it) where it can stand or, by
+// a boat, swim; false (still in it) if there is nowhere
+bool Island::leave_vehicle() {
+    const u32 v = vehicles_->driven();
+    if (v == Vehicles::NONE)
+        return true;
+    const PlayerParams& pp = player_->params();
+    const bool boat = vehicles_->boat();
+    // (the vehicle is an obstacle again for where the Mii may be)
+    player_->set_obstacles(vehicles_->obstacles());
+    bool out = false;
+    for (const Vec3& at : vehicles_->exits(pp.radius + 0.1f * pp.height)) {
+        // (`at` is at the vehicle's bottom: a boat's is about the water's surface)
+        Vec3 feet;
+        if (boat && player_->place_swimming(at, vehicles_->yaw())) {
+            out = true;
+            break;
+        }
+        // ground no higher than a step over its bottom, no lower than a safe drop under it
+        if (player_->can_stand(Vec3{at.x, at.y + pp.step_up, at.z}, at.y - pp.max_drop, &feet)) {
+            player_->place(feet, vehicles_->yaw());
+            out = true;
+            break;
+        }
     }
-    guest::log("wuhu: left parked car instance %u", (unsigned)vehicle_);
-    vehicle_ = NO_VEHICLE;
-    vehicle_is_boat_ = false;
-    vehicle_speed_ = 0;
+    if (!out) {
+        player_->set_obstacles(vehicles_->obstacles(v));
+        guest::log("wuhu: no room to get out of vehicle %u here", (unsigned)v);
+        return false;
+    }
+    vehicles_->leave();
+    camera_->reset(player_->position(), player_->yaw());
+    guest::log("wuhu: out of vehicle %u at (%.1f, %.1f, %.1f)", (unsigned)v, player_->position().x,
+               player_->position().y, player_->position().z);
+    return true;
 }
 
-void Island::drive_vehicle(const Controls& controls, f32 dt) {
-    if (vehicle_ == NO_VEHICLE || !(dt > 0))
+// a warp from a vehicle: the vehicle stays where it is, the Mii goes
+void Island::park_vehicle() {
+    if (vehicles_->driven() == Vehicles::NONE)
         return;
-    const f32 max_speed = vehicle_is_boat_ ? 85.0f : CAR_MAX_SPEED;
-    const f32 reverse_speed = vehicle_is_boat_ ? 30.0f : CAR_REVERSE_SPEED;
-    const f32 throttle = std::fabs(controls.move_y) < 0.12f ? 0.0f : controls.move_y;
-    if (throttle > 0)
-        vehicle_speed_ = std::min(max_speed, vehicle_speed_ + throttle * CAR_ACCEL * dt);
-    else if (throttle < 0)
-        vehicle_speed_ = std::max(-reverse_speed, vehicle_speed_ + throttle * CAR_ACCEL * dt);
-    else if (vehicle_speed_ > 0)
-        vehicle_speed_ = std::max(0.0f, vehicle_speed_ - CAR_BRAKE * dt);
-    else
-        vehicle_speed_ = std::min(0.0f, vehicle_speed_ + CAR_BRAKE * dt);
-
-    const f32 steering = std::fabs(controls.move_x) < 0.12f ? 0.0f : -controls.move_x;
-    const f32 speed_fraction = std::min(std::fabs(vehicle_speed_) / max_speed, 1.0f);
-    if (speed_fraction > 0.01f) {
-        const f32 steering_response = 0.15f + 0.85f * std::sqrt(speed_fraction);
-        vehicle_yaw_ = wrap_deg(vehicle_yaw_ + steering * CAR_STEER * steering_response *
-                                                  (vehicle_speed_ < 0 ? -1.0f : 1.0f) * dt);
-    }
-
-    const Mtx34 old = world_->instance_transform(vehicle_);
-    const Vec3 forward{std::sin(vehicle_yaw_ * DEG), 0, std::cos(vehicle_yaw_ * DEG)};
-    Vec3 next{old.m[0][3] + forward.x * vehicle_speed_ * dt, old.m[1][3],
-              old.m[2][3] + forward.z * vehicle_speed_ * dt};
-    if (vehicle_is_boat_) {
-        const auto hull_wall = [](u16 attr, Vec3 n) {
-            return engine::collision::kcl_is_fence(attr) || (!engine::collision::kcl_is_water(attr) && n.y < 0.65f);
-        };
-        engine::collision::Hit water;
-        const auto water_surface = [](u16 attr, Vec3 n) {
-            return engine::collision::kcl_is_water(attr) && n.y > 0.05f;
-        };
-        if (!collision_->ground(next.x, next.z, old.m[1][3] + vehicle_height_,
-                                old.m[1][3] - vehicle_height_ - 100.0f, water_surface, &water)) {
-            vehicle_speed_ = 0;
-            return;
-        }
-        next.y = water.point.y - vehicle_min_y_ - 0.15f * vehicle_height_;
-        const Vec3 side{-forward.z, 0, forward.x};
-        const f32 hw = vehicle_half_width_ * 0.8f, hl = vehicle_half_length_ * 0.8f;
-        for (f32 x : {-hw, hw}) for (f32 z : {-hl, hl}) {
-            const Vec3 offset = side * x + forward * z;
-            engine::collision::Hit corner_water;
-            if (!collision_->ground(next.x + offset.x, next.z + offset.z, water.point.y + 100.0f,
-                                   water.point.y - 100.0f, water_surface, &corner_water)) {
-                vehicle_speed_ = 0;
-                return;
-            }
-            engine::collision::Hit shore;
-            if (collision_->cast(Vec3{old.m[0][3] + offset.x, water.point.y, old.m[2][3] + offset.z},
-                                 Vec3{next.x + offset.x, water.point.y, next.z + offset.z}, hull_wall, &shore)) {
-                vehicle_speed_ = 0;
-                return;
-            }
-        }
-        const f32 radius = std::sqrt(hw * hw + hl * hl);
-        for (u32 i = 0; i < world_->instance_count(); ++i) {
-            if (i == vehicle_ || world_->instance_animated(i)) continue;
-            const u16 cls = world_->instance_class(i);
-            if (cls != 15 && cls != 7 && cls != 8) continue;
-            const Mtx34 other = world_->instance_transform(i);
-            const f32 dx = next.x - other.m[0][3], dz = next.z - other.m[2][3];
-            if (dx * dx + dz * dz < radius * radius + vehicle_half_width_ * vehicle_half_width_ +
-                                       vehicle_half_length_ * vehicle_half_length_) {
-                vehicle_speed_ = 0;
-                return;
-            }
-        }
-        const f32 c = std::cos(vehicle_yaw_ * DEG), s = std::sin(vehicle_yaw_ * DEG);
-        Mtx34 moved{{{c * vehicle_scale_x_, 0, s * vehicle_scale_z_, next.x},
-                     {0, vehicle_scale_y_, 0, next.y},
-                     {-s * vehicle_scale_x_, 0, c * vehicle_scale_z_, next.z}}};
-        world_->set_instance_transform(vehicle_, moved);
-        return;
-    }
-    const f32 from_y = old.m[1][3] + vehicle_height_ + player_->params().step_up;
-    const f32 to_y = old.m[1][3] - vehicle_height_ - player_->params().step_up;
-    engine::collision::Hit ground;
-    const auto floor = [](u16 attr, Vec3 n) {
-        return n.y >= 0.55f && !engine::collision::kcl_is_water(attr) && !engine::collision::kcl_is_fence(attr);
-    };
-    if (!collision_->ground(next.x, next.z, from_y, to_y, floor, &ground)) {
-        vehicle_speed_ = 0;
-        return;
-    }
-    next.y = ground.point.y - vehicle_min_y_;
-
-    const f32 mid_y = ground.point.y + std::max(1.0f, vehicle_height_ * 0.4f);
-    const Vec3 side{-forward.z, 0, forward.x};
-    const f32 half_width = vehicle_half_width_ * 0.75f, half_length = vehicle_half_length_ * 0.75f;
-    const auto wall = [](u16 attr, Vec3 n) {
-        return engine::collision::kcl_is_fence(attr) || (!engine::collision::kcl_is_water(attr) && n.y < 0.65f);
-    };
-    for (f32 x : {-half_width, half_width}) {
-        for (f32 z : {-half_length, half_length}) {
-            const Vec3 offset = side * x + forward * z;
-            engine::collision::Hit hit;
-            if (collision_->cast(Vec3{old.m[0][3] + offset.x, mid_y, old.m[2][3] + offset.z},
-                                 Vec3{next.x + offset.x, mid_y, next.z + offset.z}, wall, &hit)) {
-                vehicle_speed_ = 0;
-                return;
-            }
-        }
-    }
-
-    for (u32 i = 0; i < world_->instance_count(); ++i) {
-        if (i == vehicle_ || world_->instance_animated(i)) continue;
-        const u16 cls = world_->instance_class(i);
-        if (cls != 15 && cls != 7 && cls != 8) continue;
-        const Mtx34 other = world_->instance_transform(i);
-        const fmt::Instance& oi = package_->instances()[i];
-        const fmt::Model& om = package_->models()[oi.model];
-        const f32 osx = std::sqrt(other.m[0][0] * other.m[0][0] + other.m[1][0] * other.m[1][0] + other.m[2][0] * other.m[2][0]);
-        const f32 osz = std::sqrt(other.m[0][2] * other.m[0][2] + other.m[1][2] * other.m[1][2] + other.m[2][2] * other.m[2][2]);
-        const f32 ow = 0.5f * (om.bbox[3] - om.bbox[0]) * osx;
-        const f32 ol = 0.5f * (om.bbox[5] - om.bbox[2]) * osz;
-        const f32 radius = std::sqrt(vehicle_half_width_ * vehicle_half_width_ + vehicle_half_length_ * vehicle_half_length_) +
-                           std::sqrt(ow * ow + ol * ol);
-        const f32 dx = next.x - other.m[0][3], dz = next.z - other.m[2][3];
-        if (dx * dx + dz * dz < radius * radius) {
-            vehicle_speed_ = 0;
-            return;
-        }
-    }
-
-    const f32 c = std::cos(vehicle_yaw_ * DEG), s = std::sin(vehicle_yaw_ * DEG);
-    Mtx34 moved{{{c * vehicle_scale_x_, 0, s * vehicle_scale_z_, next.x},
-                 {0, vehicle_scale_y_, 0, next.y},
-                 {-s * vehicle_scale_x_, 0, c * vehicle_scale_z_, next.z}}};
-    world_->set_instance_transform(vehicle_, moved);
+    vehicles_->leave();
+    player_->set_obstacles(vehicles_->obstacles());
 }
 
-// Sand marks are ordinary depth-tested GX triangles. Their dimensions come from the actor's
-// collision/body scale or the vehicle model's bounds; the collision mesh supplies every vertex's
-// actual sand height, so a stamp cannot float over a dune or appear on grass.
-void Island::update_sand_tracks(Vec3 before, f32 walked_before) {
-    if (!player_ || !collision_)
+// the parachute over the Mii while it glides (its model hidden otherwise)
+void Island::update_parachute() {
+    if (parachute_instance_ == NONE32)
         return;
-    const Vec3 now = controlled_position();
-    const u32 age = 4 * 60;
-    sand_tracks_.erase(std::remove_if(sand_tracks_.begin(), sand_tracks_.end(), [&](const SandTrack& m) {
-                           return frame_ - m.frame >= age;
-                       }), sand_tracks_.end());
-
-    auto on_sand = [&](Vec3 p) {
-        engine::collision::Hit hit;
-        return collision_->ground(p.x, p.z, p.y + player_->params().height, p.y - player_->params().height,
-                                  [](u16 a, Vec3 n) { return a == engine::collision::KCL_SAND && n.y > 0.05f; },
-                                  &hit);
-    };
-    if (vehicle_ == NO_VEHICLE) {
-        const f32 distance = player_->distance() - walked_before;
-        const bool walking = distance > 0.001f &&
-                             (player_->state() == PlayerState::WALK || player_->state() == PlayerState::RUN);
-        if (walking && track_player_ready_) {
-            const f32 step = std::max(0.45f, player_->params().height * 0.28f);
-            const f32 yaw = player_->yaw() * DEG;
-            const Vec3 side{std::cos(yaw), 0, -std::sin(yaw)};
-            const f32 first = step - std::fmod(track_player_distance_, step);
-            for (f32 d = first; d <= distance; d += step) {
-                const f32 t = std::min(1.0f, d / distance);
-                Vec3 p{before.x + (now.x - before.x) * t, before.y + (now.y - before.y) * t,
-                       before.z + (now.z - before.z) * t};
-                const bool left = ((u32)std::floor((track_player_distance_ + d) / step) & 1) == 0;
-                const f32 side_offset = player_->params().height * 0.055f * (left ? 1.0f : -1.0f);
-                p.x += side.x * side_offset, p.z += side.z * side_offset;
-                if (on_sand(p))
-                    sand_tracks_.push_back({p, player_->yaw(), player_->params().height * 0.047f,
-                                            player_->params().height * 0.12f, frame_, false});
-            }
-            track_player_distance_ += distance;
-        } else if (distance > 0.001f) {
-            // Don't leave a long connecting stamp after a jump, teleport, or a surface transition.
-            track_player_distance_ = 0;
-        }
-        track_player_position_ = now;
-        track_player_ready_ = true;
-    } else if (!vehicle_is_boat_) {
-        const f32 dx = now.x - before.x, dz = now.z - before.z;
-        const f32 distance = std::sqrt(dx * dx + dz * dz);
-        if (distance > 0.001f && vehicle_ < package_->instances().count) {
-            const fmt::Instance& instance = package_->instances()[vehicle_];
-            const fmt::Model& model = package_->models()[instance.model];
-            const f32 model_width = (model.bbox[3] - model.bbox[0]) * vehicle_scale_x_;
-            const f32 interval = std::max(1.0f, std::min(3.5f, vehicle_half_length_ * 0.35f));
-            const f32 first = interval - std::fmod(track_vehicle_distance_, interval);
-            const f32 yaw = vehicle_yaw_ * DEG;
-            const Vec3 side{std::cos(yaw), 0, -std::sin(yaw)};
-            for (f32 d = first; d <= distance; d += interval) {
-                const f32 t = std::min(1.0f, d / distance);
-                Vec3 p{before.x + dx * t, before.y + (now.y - before.y) * t,
-                       before.z + dz * t};
-                if (on_sand(p))
-                    sand_tracks_.push_back({p, vehicle_yaw_, std::max(0.16f, model_width * 0.045f),
-                                            interval * 1.25f, frame_, true});
-            }
-            track_vehicle_distance_ += distance;
-        }
+    const bool open = vehicles_->driven() == Vehicles::NONE && player_->gliding();
+    if (open != parachute_visible_) {
+        world_->set_group_visible(PARACHUTE_MODEL, open);
+        parachute_visible_ = open;
     }
-}
-
-void Island::draw_sand_tracks() {
-    if (sand_tracks_.empty() || !camera_ || !collision_)
+    if (!open)
         return;
-
-    // Load the same camera view as the island, in Mii units; vertices below are package-space
-    // positions scaled by k, so their depth agrees with the native island and the Mii.
-    const engine::g3d::Camera cam = engine::g3d::scaled(camera_->camera(), k_);
-    const Mtx34 view = engine::g3d::look_at(cam);
-    GFRAME(0x40);
-    const u32 matrix = (u32)&GS(u32, 0x8);
-    guest::write_g(matrix, &view, sizeof(view));
-    g::GXLoadPosMtxImm(matrix, GX_PNMTX0);
-    g::GXSetCurrentMtx(GX_PNMTX0);
-    g::GXSetNumChans(1);
-    g::GXSetChanCtrl(GX_COLOR0A0, 0, GX_SRC_REG, GX_SRC_VTX, 0, GX_DF_NONE, GX_AF_NONE);
-    g::GXSetNumTevStages(1);
-    g::GXSetNumIndStages(0);
-    g::GXSetTevDirect(0);
-    g::GXSetTevOrder(0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
-    g::GXSetTevColorIn(0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC);
-    g::GXSetTevAlphaIn(0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
-    g::GXSetTevColorOp(0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, 1, GX_TEVPREV);
-    g::GXSetTevAlphaOp(0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, 1, GX_TEVPREV);
-    g::GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    g::GXSetZCompLoc(1);
-    g::GXSetZMode(1, GX_LEQUAL, 0);
-    g::GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
-    g::GXSetCullMode(GX_CULL_NONE);
-    g::GXSetColorUpdate(1);
-    g::GXClearVtxDesc();
-    g::GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
-    g::GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
-    g::GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
-    g::GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-
-    auto vertex = [&](Vec3 p, u8 r, u8 green, u8 b, u8 a) {
-        auto putf = [](f32 v) {
-            u32 bits;
-            std::memcpy(&bits, &v, sizeof(bits));
-            guest::gather_put<4>(bits);
-        };
-        putf(p.x * k_), putf(p.y * k_), putf(p.z * k_);
-        guest::gather_put<1>(r), guest::gather_put<1>(green), guest::gather_put<1>(b), guest::gather_put<1>(a);
-    };
-    auto triangle = [&](Vec3 a, Vec3 b, Vec3 c, u8 r, u8 green, u8 blue, u8 alpha) {
-        g::GXBegin(0x90, GX_VTXFMT0, 3);  // GX_TRIANGLES
-        vertex(a, r, green, blue, alpha);
-        vertex(b, r, green, blue, alpha);
-        vertex(c, r, green, blue, alpha);
-    };
-
-    for (const SandTrack& mark : sand_tracks_) {
-        const f32 age = (f32)(frame_ - mark.frame) / (4.0f * 60.0f);
-        const u8 alpha = (u8)(std::max(0.0f, 1.0f - age) * (mark.tire ? 125.0f : 105.0f));
-        if (!alpha)
-            continue;
-        const f32 a = mark.yaw * DEG, c = std::cos(a), s = std::sin(a);
-        auto point = [&](f32 x, f32 z, Vec3* out) {
-            const f32 wx = mark.position.x + c * x + s * z;
-            const f32 wz = mark.position.z - s * x + c * z;
-            engine::collision::Hit hit;
-            if (!collision_->ground(wx, wz, mark.position.y + 5.0f, mark.position.y - 5.0f,
-                                    [](u16 at, Vec3 n) { return at == engine::collision::KCL_SAND && n.y > 0.05f; },
-                                    &hit))
-                return false;
-            *out = {wx, hit.point.y + 0.025f, wz};
-            return true;
-        };
-        const f32 half_w = mark.width * 0.5f, half_l = mark.length * 0.5f;
-        if (!mark.tire) {
-            // A tapered heel and rounded toe, stamped as a small fan.
-            const f32 shape[6][2] = {{-half_w * .72f, -half_l}, {half_w * .72f, -half_l},
-                                     {half_w, half_l * .45f}, {half_w * .55f, half_l},
-                                     {-half_w * .55f, half_l}, {-half_w, half_l * .45f}};
-            Vec3 v[6];
-            bool valid = true;
-            for (int i = 0; i < 6; ++i) valid = point(shape[i][0], shape[i][1], &v[i]) && valid;
-            if (valid)
-                for (int i = 1; i < 5; ++i) triangle(v[0], v[i], v[i + 1], 110, 91, 62, alpha);
-        } else {
-            // Each tire stamp contains both narrow contact patches and two shallow tread cuts per
-            // side. Wheel track comes from the source model's width, and the interval from its length.
-            const f32 axle = std::max(mark.width * 2.5f, mark.length * 0.31f);
-            for (f32 side : {-1.0f, 1.0f}) {
-                const f32 x = side * axle * 0.5f;
-                Vec3 q[4];
-                if (!point(x - half_w, -half_l, &q[0]) || !point(x + half_w, -half_l, &q[1]) ||
-                    !point(x + half_w, half_l, &q[2]) || !point(x - half_w, half_l, &q[3]))
-                    continue;
-                triangle(q[0], q[1], q[2], 92, 81, 64, alpha);
-                triangle(q[0], q[2], q[3], 92, 81, 64, alpha);
-                for (f32 z : {-half_l * 0.36f, half_l * 0.36f}) {
-                    Vec3 t[4];
-                    if (!point(x - half_w, z - 0.035f, &t[0]) || !point(x + half_w, z - 0.035f, &t[1]) ||
-                        !point(x + half_w, z + 0.035f, &t[2]) || !point(x - half_w, z + 0.035f, &t[3]))
-                        continue;
-                    triangle(t[0], t[1], t[2], 72, 64, 52, alpha / 2);
-                    triangle(t[0], t[2], t[3], 72, 64, 52, alpha / 2);
-                }
-            }
-        }
-    }
-    g::GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, 0, GX_LO_CLEAR);
-    g::GXSetZMode(1, GX_LEQUAL, 1);
+    const f32 a = player_->yaw() * DEG, c = std::cos(a), s = std::sin(a);
+    const Vec3 p = player_->position();
+    const Mtx34 m{{{c, 0, s, p.x}, {0, 1, 0, p.y + player_->params().height}, {-s, 0, c, p.z}}};
+    world_->set_instance_transform(parachute_instance_, m);
 }
 
 void Island::warp(u32 marker) {
     if (!world_ || marker >= package_->markers().count)
         return;
+    take_job();
+    park_vehicle();
+    sand_->end_trail();
     place_at(package_->markers()[marker]);
 }
 
 void Island::update(const Controls& controls, bool frozen) {
     if (!world_)
         return;
+    // (the last frame's job, if its draws never came: the World is the game's thread's from here to
+    // the next job's start; its stats are read for the log line here too)
+    take_job();
     const u32 frames = clock_.frames();
     frame_ += frames;
     const f32 dt = TICK * (f32)frames;
     PlayerInput move;
     FollowCameraInput look;
-    bool vehicle_toggled = false;
+    bool toggled = false;
     if (!frozen) {
-        if (controls.vehicle) {
-            if (vehicle_ == NO_VEHICLE)
-                vehicle_toggled = enter_vehicle();
-            else {
-                leave_vehicle();
-                vehicle_toggled = vehicle_ == NO_VEHICLE;
-            }
-        }
-        if (vehicle_ == NO_VEHICLE && !vehicle_toggled) {
+        if (controls.vehicle)
+            toggled = vehicles_->driven() == Vehicles::NONE ? enter_vehicle() : leave_vehicle();
+        if (vehicles_->driven() == Vehicles::NONE && !toggled) {
             camera_->stick_to_world(controls.move_x, controls.move_y, &move.move_x, &move.move_z);
             move.jump = controls.jump;
             move.jump_held = controls.jump_held;
@@ -872,52 +521,27 @@ void Island::update(const Controls& controls, bool frozen) {
         look.behind = controls.behind;
     }
     const f32 walked = player_->distance();
-    const Vec3 track_before = controlled_position();
-    update_vehicle_obstacles();
-    if (vehicle_ == NO_VEHICLE) {
-        if (!vehicle_toggled)
-            player_->update(move, dt);
-    } else if (!frozen) {
-        // The previous frame's helper may still be reading the World; wait before changing an
-        // instance transform, then the next helper job sees a consistent snapshot.
-        take_job();
-        if (!vehicle_toggled)
-            drive_vehicle(controls, dt);
-    }
-    if (!frozen && !vehicle_toggled)
-        update_sand_tracks(track_before, walked);
-    else {
-        track_player_ready_ = false;
-        track_player_distance_ = track_vehicle_distance_ = 0;
+    const Vec3 before = controlled_position();
+    if (vehicles_->driven() == Vehicles::NONE) {
+        player_->update(move, dt);
+        const bool on_foot = !player_->airborne() && !player_->swimming() && !toggled;
+        sand_->walk(before, player_->position(), player_->distance() - walked, player_->yaw(), player_->params().height,
+                    on_foot, frame_);
+    } else {
+        if (!frozen && !toggled)
+            vehicles_->drive(controls.move_y, controls.move_x, dt, (f32)frame_ * TICK);
+        if (!vehicles_->boat()) {
+            const f32 track = vehicles_->track_width(vehicles_->driven());
+            sand_->drive(before, vehicles_->position(), vehicles_->yaw(), track, 0.12f * track, frame_);
+        }
     }
     const Vec3 at = controlled_position();
     const f32 yaw = controlled_yaw();
-    const f32 camera_speed = vehicle_ == NO_VEHICLE
-                                 ? player_->speed() / player_->params().run_speed
-                                 : std::fabs(vehicle_speed_) / (vehicle_is_boat_ ? 85.0f : CAR_MAX_SPEED);
+    const f32 camera_speed = vehicles_->driven() == Vehicles::NONE ? player_->speed() / player_->params().run_speed
+                                                                   : vehicles_->speed_fraction();
     camera_->update(look, at, yaw, camera_speed, dt);
     const engine::g3d::Camera& cam = camera_->camera();
-    // (the last frame's job, if its draws never came; its stats for the log line: read only here,
-    // between the job's take and the next one's start)
-    take_job();
-    if (parachute_instance_ != NO_PARACHUTE) {
-        const bool falling = player_->state() == PlayerState::FALL;
-        if (falling != parachute_visible_) {
-            world_->set_group_visible(PARACHUTE_MODEL, falling);
-            parachute_visible_ = falling;
-        }
-        if (falling) {
-            Mtx34 m = world_->instance_transform(parachute_instance_);
-            const f32 a = player_->yaw() * DEG;
-            const f32 c = std::cos(a), s = std::sin(a);
-            m.m[0][0] = c, m.m[0][1] = 0, m.m[0][2] = s;
-            m.m[1][0] = 0, m.m[1][1] = 1, m.m[1][2] = 0;
-            m.m[2][0] = -s, m.m[2][1] = 0, m.m[2][2] = c;
-            const Vec3 p = player_->position();
-            m.m[0][3] = p.x, m.m[1][3] = p.y + player_->params().height, m.m[2][3] = p.z;
-            world_->set_instance_transform(parachute_instance_, m);
-        }
-    }
+    update_parachute();
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -944,7 +568,7 @@ void Island::update(const Controls& controls, bool frozen) {
         world_us_ += guest::host_time_us() - t0;
     }
     mii_->update(engine::g3d::scaled(cam, k_), at * k_, yaw,
-                 vehicle_ == NO_VEHICLE ? player_->state() : PlayerState::WAIT,
+                 vehicles_->driven() == Vehicles::NONE ? player_->state() : PlayerState::WAIT,
                  (player_->distance() - walked) * k_,
                  RUN_SPEED_MULTIPLIER * std::max(1.0f, player_->speed() / player_->params().run_speed));
 }
@@ -1006,8 +630,9 @@ void Island::log_frame() {
     world_us_ = waited_us_ = 0;
     log_us_ = now, log_frames_ = 0;
     const engine::g3d::WorldStats& s = world_->stats();
-    const Vec3 p = player_->position();
-    static const char* const STATES[] = {"wait", "walk", "run", "fall", "jump"};
+    const Vec3 p = controlled_position();
+    static const char* const STATES[] = {"wait", "walk", "run", "fall", "jump", "swim"};
+    static_assert(sizeof(STATES) / sizeof(STATES[0]) == (size_t)PlayerState::SWIM + 1, "a name a state");
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
                "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, pos (%.1f, "
                "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
@@ -1027,9 +652,9 @@ void Island::draw_opaque() {
         set_clear(clear_);
     mii_->view();  // (the camera's viewport, scissor and projection: what the native draws take)
     emit(engine::g3d::Pass::OPAQUE);
-    draw_sand_tracks();
-    if (vehicle_ == NO_VEHICLE)
+    if (vehicles_->driven() == Vehicles::NONE)
         mii_->draw_opaque();
+    sand_->draw(camera_->camera(), k_, frame_);
 }
 
 void Island::draw_translucent() {
@@ -1038,7 +663,7 @@ void Island::draw_translucent() {
     // (the projection again: the Mii's opaque pass may have loaded another)
     mii_->view();
     emit(engine::g3d::Pass::TRANSLUCENT);
-    if (vehicle_ == NO_VEHICLE)
+    if (vehicles_->driven() == Vehicles::NONE)
         mii_->draw_translucent();
 }
 

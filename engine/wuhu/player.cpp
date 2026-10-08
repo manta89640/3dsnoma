@@ -35,14 +35,29 @@
 //      climb out of (research reach.md §6: ten such traps on the island, the deepest 700 units); a
 //      refused step is tried along x and along z alone, so the Mii slides along a shore or a ledge;
 //   3. the spheres at the new height must be free, or the step is refused (a low ceiling).
-// Jumping starts on a new A press while grounded, to about 0.8 of the Mii's height. Holding A gives
-// a rounder, higher rise; releasing it makes a shorter hop, and descent is quicker than ascent. A
-// ceiling cuts the rise short; holding A does not start another jump in the air. Falling and
-// sliding: gravity (9.8 m/s^2: Wii no Ma's units are about centimetres) until walkable
+// Jumping starts on a new A press while grounded, at the speed that would rise jump_height under
+// plain gravity: held, the rise has 0.72 of gravity (about 1.4 jump_height), released, twice (half
+// of it), and the way down 1.45 times. A jump keeps its momentum over ground it couldn't land on; a
+// ceiling cuts the rise short, ground rising above the feet (a slope run up) ends it; holding A does
+// not start another jump in the air. A sprint (fast_run) off a ledge is a leap: it may drop any
+// height, and once a Mii height below where it left the ground it glides (gliding(): the island
+// opens the parachute), falling no faster than GLIDE_FALL Mii heights a second.
+// Falling and sliding: gravity (9.8 m/s^2: Wii no Ma's units are about centimetres) until walkable
 // ground is reached; on steep ground the Mii slides down the slope at run speed, keeping to it (a face
 // upright enough to be a wall it drops away from instead, as off a ledge); in the air it keeps
 // going forward, but only over somewhere it can land. A fall that hasn't ended in 10 s (a hole in the
-// collision, a pit of steep slopes) puts the Mii back where it last stood.
+// collision, a pit of steep slopes; a glide: 90 s) puts the Mii back where it last stood.
+//
+// Water. The sea's collision is one plane at y = 0 that goes on under the whole island, so water is
+// only water where it is the surface: deep water (deep_water()) is a water surface with no ground
+// over it within the window looked at and none within wading depth under it. Walking on into water
+// deeper than wading depth (down a beach) starts a swim, and so does a fall or a jump that reaches
+// deep water; so does a step off an edge into it, if the edge is no higher over the water than a
+// swimmer can climb out over (SWIM_CLIMB: no pool to be trapped in), else it is refused as before.
+// Swimming, the feet hang SWIM_SINK of the Mii's height under the surface (no lower than the bed),
+// the stick steers at a little over half the run speed, the body's spheres keep it out of walls as
+// walking does, and ground within wading depth under the surface (or up to SWIM_CLIMB over it) ahead is
+// a shore: the Mii wades or climbs out onto it; steep ground ahead is refused.
 //
 // Everything is in island units; a tick is 1/60 s (update() divides longer times evenly), so a run
 // is the same for the same input on any machine.
@@ -59,8 +74,16 @@ namespace {
 
 constexpr f32 DEG = 3.14159265f / 180.0f;
 constexpr int MAX_AIR_TICKS = 600;  // 10 s
+constexpr int MAX_GLIDE_TICKS = 5400;  // 90 s
 constexpr f32 FAST_RUN_MULTIPLIER = 1.65f;
-constexpr f32 RUN_LEAP_SPEED = 1.25f;
+constexpr f32 RUN_LEAP_SPEED = 1.25f;  // faster than this times the run speed, a drop is a leap
+constexpr f32 SWIM_SINK = 0.62f;       // the swimming Mii's feet under the surface, times its height
+constexpr f32 SWIM_SPEED = 0.55f;      // times the run speed
+constexpr f32 SWIM_CLIMB = 0.45f;      // the highest edge over the water a swimmer climbs out onto
+                                       // (and a walker steps off into it), times the Mii's height
+constexpr f32 GLIDE_FALL = 1.5f;       // the glide's sink rate, Mii heights a second
+// the jump's gravity: rising with A held, rising without, coming down
+constexpr f32 JUMP_HELD = 0.72f, JUMP_CUT = 2.0f, JUMP_DOWN = 1.45f;
 
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -162,16 +185,48 @@ bool Player::water_surface(f32 x, f32 z, f32 from_y, f32 to_y, f32* y) const {
     return true;
 }
 
+// Deep water at (x, z): a water surface between water_top and water_bottom with no ground between
+// floor_top and wading depth under it (ground over the water: it is the sea's plane under the land;
+// ground just under it: shallows to wade in).
+bool Player::deep_water(f32 x, f32 z, f32 water_top, f32 water_bottom, f32 floor_top, f32* surface) const {
+    f32 s;
+    if (!water_surface(x, z, water_top, water_bottom, &s))
+        return false;
+    if (ground_at(x, z, std::max(floor_top, s), s - p_.wade_depth).found)
+        return false;
+    *surface = s;
+    return true;
+}
+
+// the swimming Mii's feet in water whose surface is at `surface`: SWIM_SINK of its height under it,
+// or on the bed where that is higher
+f32 Player::swim_feet(f32 x, f32 z, f32 surface) const {
+    const f32 y = surface - SWIM_SINK * p_.height;
+    Ground bed = ground_at(x, z, surface - p_.wade_depth, y);
+    return bed.found ? bed.y : y;
+}
+
+void Player::start_swim(Vec3 at, f32 surface) {
+    pos_ = {at.x, swim_feet(at.x, at.z, surface), at.z};
+    swimming_ = true;
+    airborne_ = sliding_ = jumping_ = run_leap_ = false;
+    vy_ = 0;
+    depth_ = surface - pos_.y;
+}
+
+// in an obstacle's box (on x/z, rounded by the radius; and between its bottom and top)
 bool Player::blocked(Vec3 feet) const {
     const f32 r = p_.radius;
     for (const Obstacle& o : obstacles_) {
-        const f32 a = wrap_deg(o.yaw) * DEG;
-        const f32 c = std::cos(a), s = std::sin(a);
         const f32 dx = feet.x - o.centre.x, dz = feet.z - o.centre.z;
-        const f32 x = c * dx - s * dz, z = s * dx + c * dz;
+        const f32 reach = o.half_width + o.half_length + r;
+        if (dx * dx + dz * dz >= reach * reach || feet.y + p_.height <= o.bottom || feet.y >= o.top)
+            continue;
+        // (onto the box's own x and z axes: (cos, -sin) and (sin, cos) of its yaw)
+        const f32 x = o.cos_yaw * dx - o.sin_yaw * dz, z = o.sin_yaw * dx + o.cos_yaw * dz;
         const f32 qx = std::max(std::fabs(x) - o.half_width, 0.0f);
         const f32 qz = std::max(std::fabs(z) - o.half_length, 0.0f);
-        if (qx * qx + qz * qz < r * r && feet.y + p_.height > o.bottom && feet.y < o.top)
+        if (qx * qx + qz * qz < r * r)
             return true;
     }
     return false;
@@ -213,13 +268,12 @@ Vec3 Player::slide_off_walls(Vec3 feet, bool* free) const {
     return p;
 }
 
-bool Player::place(Vec3 feet, f32 yaw_deg) {
+bool Player::place(Vec3 feet, f32 yaw_deg, f32 lowest) {
     yaw_ = wrap_deg(yaw_deg);
     speed_ = vy_ = phase_ = 0;
-    airborne_ = sliding_ = jumping_ = swimming_ = false;
-    run_leap_ = false;
+    airborne_ = sliding_ = jumping_ = swimming_ = run_leap_ = false;
     air_ticks_ = 0;
-    Ground g = ground_at(feet.x, feet.z, feet.y + p_.step_up, -1e9f);
+    Ground g = ground_at(feet.x, feet.z, feet.y + p_.step_up, lowest);
     if (!g.found) {
         pos_ = feet, ground_attr_ = 0, depth_ = 0, ground_n_ = {0, 1, 0};
         return false;
@@ -230,17 +284,28 @@ bool Player::place(Vec3 feet, f32 yaw_deg) {
     return true;
 }
 
+bool Player::can_stand(Vec3 feet, f32 lowest, Vec3* at) const {
+    Ground g = ground_at(feet.x, feet.z, feet.y + p_.step_up, lowest);
+    if (!g.found || g.n.y < p_.walkable_ny || g.attr == KCL_LAVA)
+        return false;
+    const Vec3 p{feet.x, g.y, feet.z};
+    if (water_above(p.x, p.z, g.y, g.y + p_.height) > p_.wade_depth || blocked(p) || overlap(p) > 0.05f * p_.radius)
+        return false;
+    *at = p;
+    return true;
+}
+
 bool Player::place_swimming(Vec3 feet, f32 yaw_deg) {
     f32 surface;
-    if (!water_surface(feet.x, feet.z, feet.y + p_.height, feet.y - 2.0f * p_.height, &surface))
+    if (!deep_water(feet.x, feet.z, feet.y + p_.height, feet.y - 2.0f * p_.height, feet.y + p_.height, &surface))
+        return false;
+    const Vec3 at{feet.x, swim_feet(feet.x, feet.z, surface), feet.z};
+    if (blocked(at) || overlap(at) > 0.05f * p_.radius)
         return false;
     yaw_ = wrap_deg(yaw_deg);
-    pos_ = {feet.x, surface - 0.62f * p_.height, feet.z};
-    speed_ = vy_ = phase_ = 0;
-    airborne_ = sliding_ = jumping_ = false;
-    run_leap_ = false;
-    swimming_ = true;
-    depth_ = 0.38f * p_.height;
+    speed_ = phase_ = 0;
+    air_ticks_ = 0;
+    start_swim(at, surface);
     return true;
 }
 
@@ -279,7 +344,7 @@ void Player::tick(const PlayerInput& in, f32 f) {
         airborne_ = jumping_ = true;
         run_leap_ = false;
         sliding_ = false;
-        vy_ = std::sqrt(2.0f * p_.gravity * p_.jump_height);
+        vy_ = std::sqrt(2.0f * p_.gravity * p_.jump_height);  // (jump_height under plain gravity)
         air_ticks_ = 0;
         fall_lowest_ = pos_.y - p_.max_drop;
     }
@@ -338,22 +403,6 @@ void Player::walk(f32 f) {
 bool Player::try_step(Vec3 d) {
     const f32 tol = 0.05f * p_.radius;
     Vec3 p = pos_ + d;
-    f32 surface;
-    if (water_surface(p.x, p.z, pos_.y + p_.height, pos_.y - p_.height * 2.0f, &surface)) {
-        const f32 deep = p_.wade_depth + 0.2f * p_.height;
-        Ground shore = ground_at(p.x, p.z, surface, surface - deep);
-        if (!shore.found || surface - shore.y > p_.wade_depth) {
-            p.y = surface - 0.62f * p_.height;
-            if (blocked(p))
-                return false;
-            pos_ = p;
-            swimming_ = true;
-            airborne_ = sliding_ = jumping_ = false;
-            speed_ = 0;
-            depth_ = p_.height - (surface - p.y);
-            return true;
-        }
-    }
     // the walls, at the height the ground there would put the body
     Ground g = ground_at(p.x, p.z, pos_.y + p_.step_up, pos_.y - p_.snap_down);
     p.y = g.found && g.n.y >= p_.walkable_ny ? g.y : pos_.y;
@@ -370,7 +419,11 @@ bool Player::try_step(Vec3 d) {
         p.y = steep && g.n.y >= p_.wall_ny ? g.y : pos_.y;
         const bool run_leap = !steep && speed_ > p_.run_speed * RUN_LEAP_SPEED;
         const f32 lowest = run_leap ? -1e30f : pos_.y - p_.max_drop;
-        if ((!run_leap && !landing_ok(p.x, p.z, pos_.y, lowest)) ||
+        // (off a low edge into deep water: as low as a swimmer climbs out from)
+        f32 s;
+        const bool into_water =
+            !steep && deep_water(p.x, p.z, pos_.y, pos_.y - SWIM_CLIMB * p_.height, pos_.y + p_.step_up, &s);
+        if ((!run_leap && !into_water && !landing_ok(p.x, p.z, pos_.y, lowest)) ||
             ((p.y != slid_at || !free) && overlap(p) > tol))
             return false;
         last_ground_ = pos_;
@@ -384,8 +437,15 @@ bool Player::try_step(Vec3 d) {
     if (g.attr == KCL_LAVA)
         return false;
     f32 depth = water_above(p.x, p.z, g.y, std::max(g.y + p_.height, pos_.y + p_.step_up));
-    if (depth > p_.wade_depth && depth > depth_ + 1e-3f)
-        return false;
+    if (depth > p_.wade_depth && depth > depth_ + 1e-3f) {
+        // out of one's depth: swim (where the body fits at the surface)
+        const f32 surface = g.y + depth;
+        const Vec3 at{p.x, swim_feet(p.x, p.z, surface), p.z};
+        if (blocked(at) || overlap(at) > tol)
+            return false;
+        start_swim(at, surface);
+        return true;
+    }
     p.y = g.y;
     if (blocked(p))
         return false;
@@ -396,55 +456,82 @@ bool Player::try_step(Vec3 d) {
 }
 
 void Player::swim(const PlayerInput& in, f32 f) {
+    // the surface where the Mii is (gone, as where a pool's water has a hole: it falls from here)
     f32 surface;
-    if (!water_surface(pos_.x, pos_.z, pos_.y + p_.height, pos_.y - p_.height * 2.0f, &surface)) {
-        Ground g = ground_at(pos_.x, pos_.z, pos_.y + p_.step_up, pos_.y - p_.height);
-        if (g.found && g.n.y >= p_.walkable_ny) {
-            swimming_ = false;
-            pos_.y = g.y;
-            depth_ = water_above(pos_.x, pos_.z, g.y, g.y + p_.height);
-            ground_attr_ = g.attr;
-            return;
-        }
+    const f32 sink = SWIM_SINK * p_.height;
+    if (!water_surface(pos_.x, pos_.z, pos_.y + sink + p_.step_up, pos_.y - p_.step_up, &surface)) {
+        swimming_ = false;
+        depth_ = 0;
+        last_ground_ = pos_;
+        start_fall(false, -1e30f);
         return;
     }
     f32 tilt = std::sqrt(in.move_x * in.move_x + in.move_z * in.move_z);
     f32 target = 0;
     if (tilt > p_.dead_zone) {
         f32 diff = wrap_deg(std::atan2(in.move_x, in.move_z) / DEG - yaw_);
-        target = p_.run_speed * 0.55f * std::min(tilt, 1.0f);
+        target = p_.run_speed * SWIM_SPEED * std::min(tilt, 1.0f) * clampf(std::cos(diff * DEG), 0.2f, 1.0f);
         f32 rate = p_.turn_rate_still * 1.5f;
         yaw_ = wrap_deg(yaw_ + clampf(diff, -rate * f, rate * f));
     }
     speed_ += (target - speed_) * (1.0f - std::pow(1.0f - p_.speed_blend, f));
-    const Vec3 forward{std::sin(yaw_ * DEG), 0, std::cos(yaw_ * DEG)};
-    const Vec3 next = pos_ + forward * (speed_ * f);
-    const Vec3 before = pos_;
-    f32 next_surface;
-    if (water_surface(next.x, next.z, surface + p_.height, surface - 2.0f * p_.height, &next_surface) &&
-        !blocked(Vec3{next.x, next_surface - 0.62f * p_.height, next.z})) {
-        pos_.x = next.x;
-        pos_.z = next.z;
-        surface = next_surface;
-    } else {
-        Ground shore = ground_at(next.x, next.z, surface + p_.step_up, surface - p_.height);
-        if (shore.found && shore.n.y >= p_.walkable_ny &&
-            water_above(next.x, next.z, shore.y, surface) <= p_.wade_depth && !blocked(Vec3{next.x, shore.y, next.z})) {
-            pos_ = {next.x, shore.y, next.z};
-            ground_attr_ = shore.attr;
-            ground_n_ = shore.n;
-            depth_ = water_above(next.x, next.z, shore.y, shore.y + p_.height);
-            swimming_ = false;
-            speed_ = 0;
-            return;
+    const f32 dist = speed_ * f;
+    f32 moved = 0;
+    if (dist > 0) {
+        const Vec3 fwd{std::sin(yaw_ * DEG), 0, std::cos(yaw_ * DEG)};
+        int steps = std::max(1, (int)std::ceil(dist / (0.5f * p_.radius)));
+        const Vec3 d = fwd * (dist / (f32)steps);
+        const f32 reach = dist + 3 * p_.radius;
+        world_.gather(Vec3{pos_.x - reach, pos_.y - p_.step_up, pos_.z - reach},
+                      Vec3{pos_.x + reach, surface + p_.step_up + p_.chest + p_.radius, pos_.z + reach},
+                      [this](u16 a, Vec3 n) { return solid(a, n); }, &near_);
+        for (int i = 0; i < steps && swimming_; i++) {
+            Vec3 before = pos_;
+            if (!swim_step(d, &surface) && !swim_step(Vec3{d.x, 0, 0}, &surface) &&
+                !swim_step(Vec3{0, 0, d.z}, &surface))
+                break;
+            moved += std::sqrt((pos_.x - before.x) * (pos_.x - before.x) + (pos_.z - before.z) * (pos_.z - before.z));
         }
-        speed_ = 0;
+        if (moved < 0.98f * dist)
+            speed_ = moved / f;
     }
-    pos_.y = surface - 0.62f * p_.height;
-    depth_ = 0.38f * p_.height;
-    distance_ += std::sqrt((pos_.x - before.x) * (pos_.x - before.x) + (pos_.z - before.z) * (pos_.z - before.z));
-    phase_ += speed_ * f / std::max(p_.run_stride, 1e-3f);
+    if (swimming_)
+        depth_ = surface - pos_.y;
+    distance_ += moved;
+    phase_ += moved / std::max(p_.run_stride, 1e-3f);
     phase_ -= std::floor(phase_);
+}
+
+// a swimming step of d (on x/z) from the surface at `surface`: on along the water, or out onto a shore
+bool Player::swim_step(Vec3 d, f32* surface) {
+    const f32 tol = 0.05f * p_.radius;
+    const f32 s0 = *surface;
+    Vec3 p = pos_ + d;
+    // ground up to SWIM_CLIMB over the surface or within wading depth under it: a shore to wade or
+    // climb out onto (not too steep, not lava)
+    Ground g = ground_at(p.x, p.z, s0 + SWIM_CLIMB * p_.height, s0 - p_.wade_depth);
+    if (g.found) {
+        if (g.n.y < p_.walkable_ny || g.attr == KCL_LAVA)
+            return false;
+        p.y = g.y;
+        if (blocked(p) || overlap(p) > tol)
+            return false;
+        pos_ = p, ground_attr_ = g.attr, ground_n_ = g.n;
+        depth_ = water_above(p.x, p.z, g.y, g.y + p_.height);
+        swimming_ = false;
+        last_ground_ = pos_;
+        return true;
+    }
+    // on in the water: its surface there (none: the edge of a pool with no floor, which holds it)
+    f32 s;
+    if (!water_surface(p.x, p.z, s0 + p_.step_up, s0 - p_.step_up, &s))
+        return false;
+    p.y = swim_feet(p.x, p.z, s);
+    if (blocked(p) || overlap(p) > tol)
+        return false;
+    pos_ = p;
+    *surface = s;
+    return true;
 }
 
 void Player::start_fall(bool slide, f32 lowest) {
@@ -476,10 +563,10 @@ void Player::fall(f32 f, bool jump_held) {
     // faster than the ascent. The resulting arc feels responsive without changing the takeoff speed.
     f32 gravity = p_.gravity;
     if (jumping_ && vy_ > 0)
-        gravity *= jump_held ? 0.72f : 2.0f;
+        gravity *= jump_held ? JUMP_HELD : JUMP_CUT;
     else if (jumping_)
-        gravity *= 1.45f;
-    vy_ = std::max(vy_ - gravity * secs, -p_.max_fall_speed);
+        gravity *= JUMP_DOWN;
+    vy_ = std::max(vy_ - gravity * secs, gliding() ? -GLIDE_FALL * p_.height : -p_.max_fall_speed);
     Vec3 p = pos_;
     // forward, or down the slope, over somewhere to land
     Vec3 dir = sliding_ ? Vec3{slide_x_, 0, slide_z_} : Vec3{std::sin(yaw_ * DEG), 0, std::cos(yaw_ * DEG)};
@@ -495,20 +582,19 @@ void Player::fall(f32 f, bool jump_held) {
             speed_ = 0;
     }
     f32 y = pos_.y + vy_ * secs;
-    if (vy_ <= 0 && y < pos_.y) {
+    if (vy_ <= 0) {
+        // into deep water: the feet down to where a swimmer's hang (the ground over it, if any, is
+        // met first: deep_water() wants none between the feet and the surface)
+        const f32 sink = SWIM_SINK * p_.height;
         f32 surface;
-        if (water_surface(p.x, p.z, pos_.y, y - p_.height, &surface)) {
-            pos_ = {p.x, surface - 0.62f * p_.height, p.z};
-            swimming_ = true;
-            airborne_ = sliding_ = jumping_ = run_leap_ = false;
+        if (deep_water(p.x, p.z, pos_.y + sink, y + sink, pos_.y + p_.step_up, &surface)) {
+            start_swim(Vec3{p.x, 0, p.z}, surface);
             speed_ *= 0.45f;
-            vy_ = 0;
-            depth_ = 0.38f * p_.height;
             return;
         }
     }
     if (vy_ > 0) {
-        // A low ceiling stops the jump before the head goes through it.
+        // a low ceiling stops the jump before the head goes through it
         Hit ceiling;
         const f32 head = p_.height;
         auto ceiling_surface = [](u16 a, Vec3) { return !kcl_is_water(a); };
@@ -517,12 +603,17 @@ void Player::fall(f32 f, bool jump_held) {
             vy_ = 0;
         }
     }
-    Ground g = vy_ <= 0 ? ground_at(p.x, p.z, pos_.y + p_.step_up, y) : Ground{};
+    // the ground the feet reach; rising, only ground at or over the new feet (a slope run up into)
+    Ground g = ground_at(p.x, p.z, std::max(pos_.y, y) + p_.step_up, y);
     if (g.found && g.n.y >= p_.walkable_ny) {
         p.y = g.y;
         airborne_ = sliding_ = jumping_ = run_leap_ = false, vy_ = 0;
         ground_attr_ = g.attr, ground_n_ = g.n;
         depth_ = water_above(p.x, p.z, g.y, g.y + p_.height);
+        if (depth_ > p_.wade_depth) {  // (on a bed under deep water: swim)
+            start_swim(p, g.y + depth_);
+            return;
+        }
     } else if (g.found) {
         // on a steep slope: down it
         p.y = g.y;
@@ -532,7 +623,7 @@ void Player::fall(f32 f, bool jump_held) {
     }
     // (a fall only starts over somewhere to land: one that goes on is a hole in the collision or a
     // pit of steep slopes, so back to where the Mii last stood rather than falling for ever)
-    if (airborne_ && ++air_ticks_ > MAX_AIR_TICKS) {
+    if (airborne_ && ++air_ticks_ > (gliding() ? MAX_GLIDE_TICKS : MAX_AIR_TICKS)) {
         p = last_ground_;
         airborne_ = sliding_ = jumping_ = run_leap_ = false, vy_ = 0, speed_ = 0;
         ground_n_ = {0, 1, 0};

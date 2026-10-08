@@ -1234,6 +1234,7 @@ static void selftest_crc() {
 void selftest_g3d();  // selftest_g3d.cpp
 void selftest_g3drender();  // selftest_g3drender.cpp (the software backend; a package's views if there is one)
 void selftest_walk();   // selftest_walk.cpp (needs the island's collision files: not in "all")
+void selftest_vehicles();  // selftest_vehicles.cpp (needs the staged island package: not in "all")
 void selftest_input();  // selftest_walk.cpp
 
 bool run_selftest(const std::string& name) {
@@ -1274,6 +1275,8 @@ bool run_selftest(const std::string& name) {
         selftest_g3drender();
     else if (name == "walk")
         selftest_walk();
+    else if (name == "vehicles")
+        selftest_vehicles();
     else if (name == "input")
         selftest_input();
     else if (name == "all") {
