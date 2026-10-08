@@ -7,6 +7,7 @@
 //   0x40 a s    CALL_DL       execute the display list at physical a, s bytes
 //   0x44, 0x48  (metrics), INVALIDATE_VTX_CACHE
 //   0x50 id32   (ours)        a native draw: GxRenderer::native(id) (engine/g3d/native_draw.h)
+//   0x51 s8 x16 y16 w16 h16 (ours) what follows goes onto 3DS screen s: GxRenderer::screen (gx.h)
 //   0x61 v32    LOAD_BP_REG   register in the top byte, 24-bit value
 //   0x80-0xBF   draw          primitive in bits 3-7, vertex format in bits 0-2; u16 count; vertices
 #include <cstdio>
@@ -306,6 +307,13 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
                 s_renderer->native(be32(q + 1));
             }
             len = 5;
+            break;
+        case 0x51:  // the 3DS screen what follows goes onto (ours)
+            if (left < 10)
+                return done;
+            s_renderer->screen(q[1], (u32)q[2] << 8 | q[3], (u32)q[4] << 8 | q[5], (u32)q[6] << 8 | q[7],
+                               (u32)q[8] << 8 | q[9]);
+            len = 10;
             break;
         case 0x61: {
             if (left < 5)

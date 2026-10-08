@@ -113,6 +113,7 @@ set(ENGINE_SOURCES
   engine/ui/confirm.cpp
   engine/ui/list_window.cpp
   engine/ui/menu.cpp
+  engine/ui/screen.cpp
   engine/ut/font.cpp
   engine/wuhu/bar_button.cpp
   engine/wuhu/content_placeholder.cpp

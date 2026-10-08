@@ -24,6 +24,9 @@ u16 s_prev_buttons, s_pressed;
 // game's cursor gets A where it was, as touching then pressing A did. Not in stick mode (a scene
 // that walks something about: there A is the scene's, a jump on Wuhu Island).
 bool s_was_touching, s_tap;
+// the bottom screen's region (input_set_touch_region), and the pointer it last gave
+bool s_region;
+f32 s_region_box[4], s_region_x, s_region_y;
 }
 
 // NOMA_OLD3DS=1: an Old 3DS's controls on any machine (a New 3DS, an emulator, the host's scripts):
@@ -45,9 +48,24 @@ void wiimote_set_input(const WiimoteInput& in) {
     }
     s_pressed |= s_in.buttons & ~s_prev_buttons;
     s_prev_buttons = s_in.buttons;
-    if (s_was_touching && !s_in.touching && !s_stick_mode)
+    if (s_region) {
+        if (s_in.touching) {
+            const f32 lx = s_region_box[0] + (f32)s_in.touch_x / 320.0f * s_region_box[2];
+            const f32 ly = s_region_box[1] - (f32)s_in.touch_y / 240.0f * s_region_box[3];
+            s_region_x = lx / 304.0f, s_region_y = -ly / 228.0f;
+        }
+        s_in.x = s_region_x, s_in.y = s_region_y;
+    }
+    if (s_was_touching && !s_in.touching && (!s_stick_mode || s_region))
         s_tap = true;
     s_was_touching = s_in.touching;
+}
+
+void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height) {
+    s_region = on;
+    s_region_box[0] = left, s_region_box[1] = top, s_region_box[2] = width, s_region_box[3] = height;
+    s_region_x = (left + width / 2) / 304.0f, s_region_y = -(top - height / 2) / 228.0f;
+    s_tap = false;
 }
 
 // the game's read takes the latched presses and the tap (KPADReadEx)

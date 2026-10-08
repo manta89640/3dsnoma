@@ -48,14 +48,14 @@ const char* const TITLE_LEX = "layout/Common/Top_Message.lex";
 // next at +83 from the disc, the half-capsules 101 wide, the stop square 84, STOP_GAP between the
 // next button and the stop square; all scaled by CONTROLS_SCALE), so that the four span the right
 // half's x 8..292, centred on the stage.
-const f32 CONTROLS_Y = -162;
+const f32 CONTROLS_Y = -186;
 const f32 CONTROLS_SCALE = 0.8f;
-const f32 PLAY_X = 113;
+const f32 PLAY_X = -67;
 const f32 STOP_GAP = 6;  // by eye: the row has no place for a stop button (it takes the guide's locator)
 const f32 STOP_X = PLAY_X + (83 + 101 / 2.0f + STOP_GAP + 84 / 2.0f) * CONTROLS_SCALE;
 // the title: over the stage (x 0..300), at the screens' heading height (its text box is at y 169,
 // the rule at 160)
-const f32 TITLE_X = 150, TITLE_W = 290;
+const f32 TITLE_X = 0, TITLE_W = 400;
 const f32 TITLE_FONT_W = 22.4f, TITLE_FONT_H = 26.6f;  // Top_Message's own
 const u32 TITLE_CHARS = 40;
 
@@ -123,8 +123,8 @@ Controls::Controls(u32 cursor, u32 group) : impl_(new Impl) {
         set_active(b, false);
     }
 
-    // the title, hanging from the row's Loc_Top
-    m.title = layout_new_in(TITLE_LEX, m.row, "Loc_Top");
+    // the title, a layout of its own: it goes on the top screen, the row on the bottom one
+    m.title = layout_new(TITLE_LEX);
     move(find_pane(m.title, "Loc_Top"), TITLE_X, 0);
     m.title_text = find_pane(m.title, "Text_Title");
     resize(m.title_text, TITLE_W, 38);
@@ -180,7 +180,7 @@ void Controls::Impl::set_title(const Music& music, const Track* playing) {
     title_track = stopped ? nullptr : playing;
 }
 
-void Controls::update(const Music& music, const Track* playing) {
+void Controls::update(const Music& music) {
     Impl& m = *impl_;
     m.frames++;
     if (!m.opened && screen_may_open(m.frames)) {
@@ -196,11 +196,17 @@ void Controls::update(const Music& music, const Track* playing) {
     bool playing_now = state == PlayState::PLAYING || state == PlayState::SWITCHING;
     if (m.action == NONE && !group_busy(m.play) && (guest::load8(m.play + PB_SHOWS_PAUSE) != 0) != playing_now)
         m.show_playing(playing_now);
-    m.set_title(music, playing);
     layout_update(m.row);
 }
 
 void Controls::draw() { layout_draw(impl_->row); }
+
+void Controls::update_title(const Music& music, const Track* playing) {
+    impl_->set_title(music, playing);
+    layout_update(impl_->title);
+}
+
+void Controls::draw_title() { layout_draw(impl_->title); }
 
 bool Controls::on_pushed(u32 button) {
     Impl& m = *impl_;

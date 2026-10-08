@@ -17,6 +17,7 @@ public:
     // a native draw (engine/g3d/native_draw.h): the GX draws before it go to the GPU first; the
     // native g3d's PICA backend (g3d_pica.cpp) then draws between pica_native_begin and _end
     void native(u32 id) override;
+    void screen(u32 screen, u32 x, u32 y, u32 w, u32 h) override;
 };
 
 // a wait for the GPU that hasn't ended in 3 s, logged (the I/O thread, every 100 ms)

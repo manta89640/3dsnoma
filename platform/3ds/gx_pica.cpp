@@ -75,6 +75,11 @@ const u32 IBUF_INDICES = 128 << 10;  // 256 KB
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+// the bottom screen's frame buffer is the log console's: RGB565
+#define BOTTOM_TRANSFER_FLAGS                                                                     \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |             \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
+     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 using PVertex = GxTnlVertex;  // the vertex shader's inputs (tnl.h)
 static_assert(sizeof(PVertex) == 64, "PVertex layout");
@@ -121,6 +126,14 @@ struct TexEntry {
 struct State {
     bool ready = false;
     C3D_RenderTarget* top = nullptr;
+    // The bottom screen (GxRenderer::screen): its own target, drawn on in the frames a scene puts
+    // something there (the rest of the time the log console has it); what is being drawn on now
+    // (SCREEN_TOP, SCREEN_BOTTOM), and for the bottom screen the frame's rectangle (EFB pixels)
+    // that fills it.
+    C3D_RenderTarget* bottom = nullptr;
+    u32 screen = 0;
+    bool bottom_drawn = false;
+    f32 region[4] = {0, 0, 640, 456};
     DVLB_s* dvlb = nullptr;
     shaderProgram_s prog;
     int u_nlights = -1;         // the shader's integer uniform
@@ -1358,20 +1371,25 @@ void pixel_state() {
 // ---------------------------------------------------------------- geometry
 // GX clip space -> PICA clip space: viewport into the 640x456 frame, scaled to 400x240, rotated
 // for the 240x400 render target (citro3d's Mtx_OrthoTilt convention), GX depth range. The shader
-// gets it folded into the projection (gx_tnl_plan).
+// gets it folded into the projection (gx_tnl_plan). On the bottom screen (P.screen) the frame's
+// rectangle P.region fills its 320x240 (its 240x320 target) instead.
 void set_xform() {
     Timed timed(Timers::XFORM);
     float vsx = xf_f32(XF_VIEWPORT + 0), vsy = xf_f32(XF_VIEWPORT + 1), vsz = xf_f32(XF_VIEWPORT + 2);
     float vox = xf_f32(XF_VIEWPORT + 3), voy = xf_f32(XF_VIEWPORT + 4), voz = xf_f32(XF_VIEWPORT + 5);
-    float kx = 400.0f / FRAME_W, ky = 240.0f / FRAME_H;
+    const bool bottom = P.screen == SCREEN_BOTTOM;
+    const float SW = bottom ? 320.0f : 400.0f;  // (the screen's width; both are 240 tall)
+    float kx = 400.0f / FRAME_W, ky = 240.0f / FRAME_H, ox = 0, oy = 0;
+    if (bottom)
+        kx = 320.0f / P.region[2], ky = 240.0f / P.region[3], ox = P.region[0], oy = P.region[1];
     f32 m[4][4];
     memset(m, 0, sizeof(m));
-    // x' = 1 - Y/120, Y = (y/w * vsy + voy - 342) * ky
+    // x' = 1 - Y/120, Y = (y/w * vsy + voy - 342 - oy) * ky
     m[0][1] = -vsy * ky / 120.0f;
-    m[0][3] = 1.0f - (voy - 342.0f) * ky / 120.0f;
-    // y' = 1 - X/200, X = (x/w * vsx + vox - 342) * kx
-    m[1][0] = -vsx * kx / 200.0f;
-    m[1][3] = 1.0f - (vox - 342.0f) * kx / 200.0f;
+    m[0][3] = 1.0f - (voy - 342.0f - oy) * ky / 120.0f;
+    // y' = 1 - X/(SW/2), X = (x/w * vsx + vox - 342 - ox) * kx
+    m[1][0] = -vsx * kx / (SW / 2);
+    m[1][3] = 1.0f - (vox - 342.0f - ox) * kx / (SW / 2);
     // Keep the GX depth, but complement clip z before the PICA divides z by w. The new z/w is
     // GX depth - 1, close to zero at the far plane; adding one in the depth map recovers the GX
     // depth without dividing two nearly equal 24-bit values. The native g3d renderer uses the
@@ -1386,13 +1404,13 @@ void set_xform() {
 
     // scissor, in the rotated frame buffer
     const u32* bp = g_gx.bp;
-    float x0 = (float)bits(bp[BP_SCISSOR_TL], 12, 11) - 342.0f, y0 = (float)bits(bp[BP_SCISSOR_TL], 0, 11) - 342.0f;
-    float x1 = (float)bits(bp[BP_SCISSOR_BR], 12, 11) - 342.0f + 1, y1 = (float)bits(bp[BP_SCISSOR_BR], 0, 11) - 342.0f + 1;
+    float x0 = (float)bits(bp[BP_SCISSOR_TL], 12, 11) - 342.0f - ox, y0 = (float)bits(bp[BP_SCISSOR_TL], 0, 11) - 342.0f - oy;
+    float x1 = (float)bits(bp[BP_SCISSOR_BR], 12, 11) - 342.0f - ox + 1, y1 = (float)bits(bp[BP_SCISSOR_BR], 0, 11) - 342.0f - oy + 1;
     auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; };
-    float X0 = clampf(x0 * kx, 0, 400), X1 = clampf(x1 * kx, 0, 400);
+    float X0 = clampf(x0 * kx, 0, SW), X1 = clampf(x1 * kx, 0, SW);
     float Y0 = clampf(y0 * ky, 0, 240), Y1 = clampf(y1 * ky, 0, 240);
-    st_scissor(GPU_SCISSOR_NORMAL, (u32)(240 - Y1), (u32)(400 - X1), (u32)std::ceil(240 - Y0),
-                   (u32)std::ceil(400 - X0));
+    st_scissor(GPU_SCISSOR_NORMAL, (u32)(240 - Y1), (u32)(SW - X1), (u32)std::ceil(240 - Y0),
+                   (u32)std::ceil(SW - X0));
 }
 
 // The piece of a draw's vertices that can be drawn when only `n` of those left were built (the
@@ -1428,6 +1446,8 @@ void begin_frame() {
     if (!P.resume)
         C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
     P.resume = false;
+    P.screen = SCREEN_TOP;
+    P.bottom_drawn = false;
     C3D_FrameDrawOn(P.top);
     frame_list_starts();
     C3D_DepthMap(true, 1.0f, 1.0f);
@@ -1532,6 +1552,11 @@ bool PicaRenderer::init() {
     if (!P.top)
         return false;
     C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    P.bottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    if (P.bottom)
+        C3D_RenderTargetSetOutput(P.bottom, GFX_BOTTOM, GFX_LEFT, BOTTOM_TRANSFER_FLAGS);
+    else
+        log("pica: no render target for the bottom screen (VRAM)");
     P.dvlb = DVLB_ParseFile((u32*)gx_shbin, (u32)gx_shbin_size);
     shaderProgramInit(&P.prog);
     shaderProgramSetVsh(&P.prog, &P.dvlb->DVLE[0]);
@@ -2243,6 +2268,8 @@ void PicaRenderer::efb_copy(u32 value) {
     EfbCopy c = gx_efb_copy_params(value);
     if (c.to_xfb)  // the frame is on screen already; the next one starts with a clear
         return;
+    if (P.screen != SCREEN_TOP && P.in_frame)  // (the frame's copies are of the top screen's picture)
+        screen(SCREEN_TOP, 0, 0, 0, 0);
     load_efb_offset();
     if (c.depth) {
         if (P.warned++ < 4)
@@ -2270,6 +2297,33 @@ void PicaRenderer::native(u32 id) {
     engine::g3d::native_draw_execute(id);
 }
 
+// What follows goes onto the other screen: what was batched for this one goes first, the bottom
+// screen is cleared white at its frame's first draw (the scene draws its background over it), and
+// the clip mapping and scissor are made again for the target (set_xform).
+void PicaRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
+    if (!P.ready)
+        return;
+    begin_frame();
+    flush_batch();
+    const bool bottom = screen == SCREEN_BOTTOM && P.bottom;
+    if (bottom) {
+        if (!P.bottom_drawn) {
+            C3D_RenderTargetClear(P.bottom, C3D_CLEAR_ALL, 0xFFFFFFFFu, g_gx.bp[BP_CLEAR_Z] & 0xFFFFFF);
+            P.bottom_drawn = true;
+        }
+        P.region[0] = (f32)x, P.region[1] = (f32)y;
+        P.region[2] = (f32)std::max((u32)1, w), P.region[3] = (f32)std::max((u32)1, h);
+    }
+    if (bottom == (P.screen == SCREEN_BOTTOM) && !bottom)
+        return;
+    P.screen = bottom ? SCREEN_BOTTOM : SCREEN_TOP;
+    C3D_FrameDrawOn(bottom ? P.bottom : P.top);
+    C3Di_UpdateContext();
+    set_xform();
+    C3Di_UpdateContext();
+    P.all_dirty = true;
+}
+
 void pica_native_begin(f32 clip[4][4]) {
     begin_frame();
     flush_batch();
@@ -2287,9 +2341,9 @@ void pica_native_target(C3D_FrameBuf* fb) {
         C3Di_UpdateContext();
         return;
     }
-    // the frame's target, its whole viewport, then the GX state's scissor (set_xform; a direct write
-    // after citro3d's, or citro3d's own)
-    C3D_FrameDrawOn(P.top);
+    // the frame's target (the screen being drawn on), its whole viewport, then the GX state's scissor
+    // (set_xform; a direct write after citro3d's, or citro3d's own)
+    C3D_FrameDrawOn(P.screen == SCREEN_BOTTOM && P.bottom ? P.bottom : P.top);
     C3Di_UpdateContext();
     set_xform();
     C3Di_UpdateContext();

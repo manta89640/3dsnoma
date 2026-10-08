@@ -129,9 +129,9 @@ const f32 TURN_PER_UNIT = 0.075f;
 // the camera: a long lens, a little above, as the channel's (a little higher over two rows, so that
 // the back row shows behind the front one)
 const f32 FOVY = 13, ELEVATION = 9, ELEVATION_ROWS = 12;
-// where the tableau goes (layout units: 608 x 456 around the middle, y up): the right half,
-// between the title band and the controls
-const f32 FRAME_X0 = 6, FRAME_X1 = 296, FRAME_Y0 = -104, FRAME_Y1 = 144;
+// where the tableau goes (layout units: 608 x 456 around the middle, y up): the whole top screen,
+// a margin round it (the controls are on the bottom screen: panel.h)
+const f32 FRAME_X0 = -272, FRAME_X1 = 272, FRAME_Y0 = -196, FRAME_Y1 = 196;
 
 struct Mii {
     u32 actor = 0, behavior = 0;

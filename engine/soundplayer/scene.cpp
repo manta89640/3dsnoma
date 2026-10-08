@@ -2,13 +2,17 @@
 //
 // Made like the channel's own TV scene (scene::TvScene): the cursor, the 3D stage with the Miis,
 // the layouts, the bottom bar's Home tab; updated 3D first, then the layouts, then the cursor
-// (which hit-tests the buttons); drawn 3D first, then the layouts, the cursor last. It is reached
-// from the room's bar (runtime/patches/menus.cpp) through the room's circle wipe, and goes back
-// with a white fade, after which the room is made again and its music comes back by itself.
+// (which hit-tests the buttons). On the 3DS's two screens (engine/ui/screen.h): the top one has the
+// stage, where the household's Miis dance, and the title of what plays over it; the bottom one the
+// channel's list window of tracks, the video player's buttons and the Home tab, which the touch
+// screen works directly (a tap presses what it is on; a drag isn't scrolling yet: the list's tabs
+// are). The cursor isn't drawn: there is nothing to point at on the top screen. It is reached from
+// the room's bar (runtime/patches/menus.cpp) through the room's circle wipe, and goes back with a
+// white fade, after which the room is made again and its music comes back by itself.
 //
-// Controls besides the pointer: the D-pad's up and down move the list's highlight, A plays the
-// highlighted track (when the pointer is away from the screen), left and right play the previous
-// and next track, + pauses and resumes, − stops, B goes back to the room.
+// Buttons: the D-pad's up and down move the list's highlight, A plays the highlighted track (when
+// nothing was touched for a while), left and right play the previous and next track, START
+// pauses and resumes, SELECT stops, B goes back to the room.
 #include "engine/soundplayer/sound_player.h"
 
 #include "engine/soundplayer/catalog.h"
@@ -17,8 +21,10 @@
 #include "engine/soundplayer/stage.h"
 #include "engine/soundplayer/track_list.h"
 #include "engine/system/host_scene.h"
+#include "engine/input/remote.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
+#include "engine/ui/screen.h"
 
 namespace engine::soundplayer {
 
@@ -28,6 +34,11 @@ namespace lyt = engine::ui::lyt;
 namespace {
 
 using engine::system::HostScene;
+
+// the bottom screen's part of the layouts' space: the bottom left of the 608x456 layouts (where the
+// Home tab is), 533x400 units (4:3), at 0.6 pixels a unit; the list window and the buttons are
+// placed in it (track_list.cpp, controls.cpp)
+const engine::ui::screen::Region BOTTOM_REGION{-304, 172, 1600.0f / 3, 400};
 
 class SoundPlayerScene : public HostScene {
 public:
@@ -72,12 +83,16 @@ SoundPlayerScene::SoundPlayerScene() {
     game::bottom_ctor(bottom_, cursor_);
     game::bottom_set_mode(bottom_, game::BOTTOM_HOME, false);
     engine::system::hook_button(bottom_ + game::BOTTOM_HOME_BTN_02);
+    engine::ui::screen::claim(BOTTOM_REGION);
+    guest::input_set_stick_mode(true);  // (the circle pad doesn't move a pointer about)
     // the room left a white screen behind (its circle wipe): fade in from it
     game::wipe_in(game::WIPE_FADE_WHITE);
     guest::log("soundplayer: open, %u tracks, playing %d", (u32)tracks.size(), current_index());
 }
 
 SoundPlayerScene::~SoundPlayerScene() {
+    guest::input_set_stick_mode(false);
+    engine::ui::screen::release();
     game::bottom_dtor_delete(bottom_);
     delete controls_;
     delete list_;
@@ -133,12 +148,19 @@ void SoundPlayerScene::update() {
         static const char* const NAMES[] = {"stopped", "playing", "paused", "switching"};
         guest::log("soundplayer: %s, sound %d", NAMES[(int)logged_state_], (int)logged_sound_);
     }
-    stage_->update(*music_);
-    list_->update(*music_);
+    namespace screen = engine::ui::screen;
     int i = current_index();
-    controls_->update(*music_, i >= 0 ? &catalog()[i] : nullptr);
+    // the top screen's: the stage, the title
+    screen::squeeze(true);
+    stage_->update(*music_);
+    controls_->update_title(*music_, i >= 0 ? &catalog()[i] : nullptr);
+    // the bottom screen's, and the cursor that hit-tests them
+    screen::squeeze(false);
+    list_->update(*music_);
+    controls_->update(*music_);
     game::bottom_update(bottom_);
     game::cursor_update(cursor_);
+    screen::squeeze(true);
     if (leaving_)
         return;
 
@@ -169,11 +191,16 @@ void SoundPlayerScene::update() {
 }
 
 void SoundPlayerScene::draw() {
+    namespace screen = engine::ui::screen;
     stage_->draw();
+    controls_->draw_title();
+    screen::to_bottom(BOTTOM_REGION);
+    screen::squeeze(false);
     list_->draw();
     controls_->draw();
     game::bottom_draw(bottom_);
-    game::cursor_draw(cursor_);
+    screen::squeeze(true);
+    screen::to_top();
 }
 
 void SoundPlayerScene::on_pushed(u32 button) {

@@ -106,7 +106,14 @@ struct GxRenderer {
     // still true afterwards. Without a renderer the packet is never executed (native_draw takes it
     // back later).
     virtual void native(u32 id) {}
+    // our own command 0x51 (not GX's): what is drawn from here on goes onto `screen` (SCREEN_TOP,
+    // SCREEN_BOTTOM: the 3DS's two), until the next such command or the frame's end. For the bottom
+    // screen, the frame's rectangle x, y, w, h (EFB pixels) is what fills it, scaled to its 320x240
+    // (engine/ui/screen.h). Each frame starts on the top screen.
+    virtual void screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {}
 };
+enum : u32 { SCREEN_TOP = 0, SCREEN_BOTTOM = 1 };
+constexpr u8 SCREEN_OPCODE = 0x51;
 void gx_set_renderer(GxRenderer* r);
 // Before the platform runs an applet that takes over the GPU and the screens (the 3DS keyboard):
 // the GPU's thread finishes what it was given and the renderer closes the frame it is drawing

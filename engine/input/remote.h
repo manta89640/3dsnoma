@@ -54,6 +54,13 @@ bool input_old3ds();
 // not in stick mode), which the game's cursor gets as A: a tap presses what it is on.
 u16 wiimote_take_pressed();
 bool wiimote_take_tap();
+
+// While a native scene has the bottom screen (engine/ui/screen.h), the touch screen points into a
+// region of the layouts' space (its left and top edges, width and height, in the channel's layout
+// units, y up): the game's pointer goes where the touch is in it, as the game's cursor reads the
+// pointer (x / 304, -y / 228 of the layout units), and only there (the circle pad doesn't move it);
+// a tap is a press there in stick mode too.
+void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height);
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

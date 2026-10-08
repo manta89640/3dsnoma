@@ -83,7 +83,12 @@ inline void stage_calc(u32 s) {
 inline u32 camera(u32 root, u32 i) { return g::nw4r_g3d_ScnRoot_GetCamera(root, i); }      // ScnRoot::GetCamera
 inline u32 current_camera(u32 root) { return g::nw4r_g3d_ScnRoot_GetCurrentCamera(root); }         // ScnRoot::GetCurrentCamera
 // CameraData: +0x00 the view matrix (3x4), +0xB0 f32 aspect (the stage sets the TV's: 16:9 or 4:3)
-inline f32 camera_aspect(u32 cam) { return load_f32(cam + 0xB0); }
+// (a 16:9 one is the top screen's 5:3: runtime/patches/graphics.cpp makes it so before its projection
+// is used, and native code reading it first takes it so too)
+inline f32 camera_aspect(u32 cam) {
+    const f32 a = load_f32(cam + 0xB0);
+    return a == 16.0f / 9.0f ? 5.0f / 3.0f : a;
+}
 inline void camera_set_position(u32 cam_word, u32 vec3) { g::nw4r_g3d_Camera_SetPosition(cam_word, vec3); }
 // Camera::SetPosture(PostureInfo {u32 type (0: look at), vec3 up @4, vec3 target @0x10, ...})
 inline void camera_set_posture(u32 cam_word, u32 posture) { g::nw4r_g3d_Camera_SetPosture(cam_word, posture); }

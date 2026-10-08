@@ -112,6 +112,9 @@ const std::string& data_dir();
 bool platform_native_memory(u32* heap_free, u32* linear_free);
 // 3DS: NOMA_SHOT_EVERY's picture of the bottom screen, beside the top's (shots/NNNNN_bottom.bmp)
 void platform_save_bottom_shot(u32 n);
+// The bottom screen for a native scene (engine/ui/screen.h): claimed, the log console stops drawing
+// there (the GPU draws the scene's frame onto it); released, the console has it again, cleared.
+void platform_bottom_claim(bool on);
 // a wake-up between host threads: one waiting thread wakes per signal (or at the timeout)
 struct HostSignal;
 HostSignal* platform_signal_new();

@@ -351,10 +351,15 @@ static engine::g3d::SoftBackend s_native_backend;
 // frames/NNNNN_3ds.png, 400x480: the top screen above, the frame as gx_pica.cpp maps it (the whole
 // 640x456 onto 400x240, each pixel the mean of the frame's pixels under it: the 3DS draws at
 // 400x240 itself, so its edges and text come out sharper or more broken up than here), and the
-// bottom screen below it, 320x240 between 40-pixel margins. The bottom screen holds no picture of
-// its own yet (on the 3DS: the log console): it shows the input, the touch as a filled square and
-// the pointer the touch screen makes of it as a cross, and the top screen the pointer where
-// platform/3ds/main.cpp's mapping puts it (a cross), so a script's touches can be seen to land.
+// bottom screen below it, 320x240 between 40-pixel margins: what the frame drew there (the GX
+// stream's screen command, runtime/hw/gx/gx.h), else grey (on the 3DS: the log console). Over them the input: the touch as
+// a filled square and the pointer the touch screen makes of it as a cross, and on the top screen
+// the pointer where platform/3ds/main.cpp's mapping puts it (a cross), so a script's touches can be
+// seen to land.
+// a native scene has the bottom screen (engine/ui/screen.h): on the 3DS the log console stops
+// drawing there; here nothing changes
+void platform_bottom_claim(bool) {}
+
 static void dump_3ds_screens(const char* path, const u32* rgba, u32 w, u32 h) {
     const u32 W = 400, H = 480, TOP = 240, BX = 40, BY = 240, BW = 320, BH = 240;
     std::vector<u32> out(W * H, 0xFF181818u);  // (0xAABBGGRR as write_png takes it: dark grey)
@@ -373,9 +378,11 @@ static void dump_3ds_screens(const char* path, const u32* rgba, u32 w, u32 h) {
             out[y * W + x] = p | 0xFF000000u;
         }
     }
+    std::vector<u32> bottom(BW * BH);
+    const bool drawn = gx_host_bottom_screen(bottom.data());
     for (u32 y = 0; y < BH; y++)
         for (u32 x = 0; x < BW; x++)
-            out[(BY + y) * W + BX + x] = 0xFF303030u;
+            out[(BY + y) * W + BX + x] = drawn ? bottom[y * BW + x] : 0xFF303030u;
     auto dot = [&](int cx, int cy, int r, u32 c, bool filled) {
         for (int dy = -r; dy <= r; dy++)
             for (int dx = -r; dx <= r; dx++) {

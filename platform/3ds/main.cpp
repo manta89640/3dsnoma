@@ -95,6 +95,8 @@ static volatile bool s_quitting;  // platform_quit: the I/O thread, if it didn't
 static PrintConsole s_status_con, s_log_con;
 static const int STATUS_ROWS = 2;
 static bool s_status_on;
+// a native UI has the bottom screen (platform_bottom_claim): the console draws nothing there
+static std::atomic<bool> s_bottom_claimed;
 static void status_update(u64 now);
 
 static void log_flush_due(u64 now) {  // (with s_log_lock)
@@ -132,7 +134,8 @@ void log(const char* fmt, ...) {
         log_flush_due(now);
     }
     svcOutputDebugString(buf, (s32)strlen(buf));  // emulators show it in their log
-    printf("%.79s\n", buf);
+    if (!s_bottom_claimed.load(std::memory_order_relaxed))
+        printf("%.79s\n", buf);
     LightLock_Unlock(&s_log_lock);
 }
 
@@ -952,6 +955,10 @@ static void status_update(u64 now) {
     if (!s_status_on || (s_t0 && now - s_t0 < SYSCLOCK_ARM11))
         return;
     const u32 frames = vi_game_frames(), idle = idle_time_us();
+    if (s_bottom_claimed.load(std::memory_order_relaxed)) {  // (the log still gets its lines)
+        status_log(now, frames, idle, ax_load());
+        return;
+    }
     char row1[64] = "-- fps", row2[64];
     if (s_t0) {
         const u32 n = frames - s_frames0;
@@ -1032,6 +1039,23 @@ void platform_save_bottom_shot(u32 n) {
         fwrite(line.data(), 1, row, f);
     }
     fclose(f);
+}
+
+// The bottom screen for a native scene (engine/ui/screen.h). Claimed, the console stops drawing
+// there: the GPU's frames go onto it (gx_pica.cpp's bottom render target, into the console's own
+// RGB565 frame buffer). Released, the screen is cleared for the console, which carries on below.
+void platform_bottom_claim(bool on) {
+    LightLock_Lock(&s_log_lock);
+    s_bottom_claimed.store(on, std::memory_order_relaxed);
+    if (!on) {
+        PrintConsole* prev = consoleSelect(&s_status_con);
+        consoleClear();
+        consoleSelect(&s_log_con);
+        consoleClear();
+        if (prev != &s_status_con)
+            consoleSelect(prev);
+    }
+    LightLock_Unlock(&s_log_lock);
 }
 
 // Closing from the HOME Menu (its close, or the power button's power-off): the game gets the

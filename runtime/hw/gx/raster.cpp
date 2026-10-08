@@ -1104,6 +1104,60 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
 
 void SoftRenderer::native(u32 id) { engine::g3d::native_draw_execute(id); }
 
+// The bottom screen: its EFB is swapped in while it is drawn on (s_color and s_depth are what every
+// draw writes), out again for the top screen.
+namespace {
+std::vector<u32> s_bottom_color(EFB_W * EFB_H, 0xFFFFFFFFu), s_bottom_depth(EFB_W * EFB_H, 0xFFFFFF);
+bool s_on_bottom, s_bottom_drawn, s_bottom_shown;
+u32 s_bottom_rect[4];  // x, y, w, h in the bottom EFB
+}  // namespace
+
+void SoftRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
+    const bool bottom = screen == SCREEN_BOTTOM;
+    if (bottom && !s_bottom_drawn) {  // (the frame's first draw there: a white screen, depth far)
+        std::fill(s_bottom_color.begin(), s_bottom_color.end(), 0xFFFFFFFFu);
+        std::fill(s_bottom_depth.begin(), s_bottom_depth.end(), 0xFFFFFFu);
+        s_bottom_drawn = true;
+    }
+    if (bottom) {
+        s_bottom_rect[0] = x, s_bottom_rect[1] = y, s_bottom_rect[2] = std::max((u32)1, w), s_bottom_rect[3] = std::max((u32)1, h);
+    }
+    if (bottom != s_on_bottom) {
+        std::swap(s_color, s_bottom_color);
+        std::swap(s_depth, s_bottom_depth);
+        s_on_bottom = bottom;
+    }
+}
+
+void SoftRenderer::draw_done() {
+    screen(SCREEN_TOP, 0, 0, 0, 0);
+    s_bottom_shown = s_bottom_drawn;
+    s_bottom_drawn = false;
+}
+
+bool gx_host_bottom_screen(u32* out) {
+    if (!s_bottom_shown)
+        return false;
+    const std::vector<u32>& c = s_on_bottom ? s_color : s_bottom_color;
+    const u32 rx = s_bottom_rect[0], ry = s_bottom_rect[1], rw = s_bottom_rect[2], rh = s_bottom_rect[3];
+    for (u32 y = 0; y < 240; y++) {
+        const u32 y0 = ry + y * rh / 240, y1 = std::max(y0 + 1, ry + (y + 1) * rh / 240);
+        for (u32 x = 0; x < 320; x++) {
+            const u32 x0 = rx + x * rw / 320, x1 = std::max(x0 + 1, rx + (x + 1) * rw / 320);
+            u32 sum[4] = {0, 0, 0, 0}, n = 0;
+            for (u32 sy = y0; sy < y1 && sy < (u32)EFB_H; sy++)
+                for (u32 sx = x0; sx < x1 && sx < (u32)EFB_W; sx++, n++)
+                    for (int k = 0; k < 4; k++)
+                        sum[k] += c[sy * EFB_W + sx] >> (8 * k) & 0xFF;
+            u32 p = 0;
+            for (int k = 0; k < 3; k++)
+                p |= (n ? sum[k] / n : 0) << (8 * k);
+            out[y * 320 + x] = p | 0xFF000000u;
+        }
+    }
+    return true;
+}
+
 HostEfb gx_host_efb() {
     const u32* bp = g_gx.bp;
     HostEfb e;

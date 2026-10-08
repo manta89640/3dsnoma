@@ -54,16 +54,18 @@ const char* const UP_LEX = "layout/Profile/Profile_Up_Btn.lex";
 const char* const DOWN_LEX = "layout/Profile/Profile_Down_Btn.lex";
 
 // Geometry, in layout units (608 x 456, the origin at the centre, y up), as it shows on the screen.
-// The window is in the screen's left half, clear of the Home tab at the bottom left; the rows'
-// places are counted from the window's centre. The window takes the channel's location adjust
-// (lyt.h: drawn 3/4 as wide on a 16:9 screen, as the channel's own lists are, their text with
-// them), so the widths inside it are made 1/0.75 as wide (`wide`) to show at these sizes.
-const f32 WINDOW_X = -154, WINDOW_Y = 42;
-const f32 WINDOW_W = 284, WINDOW_H = 292;
-const int VISIBLE = 5;                // rows shown at once (few and big: legible on the 3DS's screen)
+// The window is on the bottom screen (scene.cpp's region: x -304..229, y -228..172), above the video
+// player's buttons and clear of the Home tab at the bottom left, its tabs inside the region; the
+// rows' places are counted from the window's centre. The window takes the channel's location
+// adjust (lyt.h; on a 16:9 screen drawn narrower, as the channel's own lists are, their text with
+// them), so the widths inside it are made wider by its inverse (`wide`) to show at these sizes; on
+// the bottom screen, whose pixels are square, the adjust is off (engine/ui/screen.h) and `wide` 1.
+const f32 WINDOW_X = -37, WINDOW_Y = 12;
+const int VISIBLE = 4;                // rows shown at once (few and big: legible on the 3DS's screen)
 const int SLOTS = VISIBLE + 2;        // row buttons: the ones shown, one coming in, a spare
-const f32 PITCH = 54;                 // the row pitch: the window's height over 5 rows and a margin
-const f32 FIRST_Y = 2 * PITCH;        // the top row's centre (the middle row's at the window's)
+const f32 PITCH = 54;                 // the row pitch (the message list's rows at its 5 a window)
+const f32 FIRST_Y = (VISIBLE - 1) * PITCH / 2;  // the top row's centre (the rows centred in the window)
+const f32 WINDOW_W = 284, WINDOW_H = VISIBLE * PITCH + 22;  // (5 rows: 292, as the message list's)
 const f32 ROW_W = 252;                // 16 inside the window's sides, as the message list's
 // the row's height: the message list's proportion of it to its pitch (Message_List_Text's
 // Bound_Btn, 41.43 high at a pitch of 44)
