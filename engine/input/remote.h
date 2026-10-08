@@ -61,6 +61,12 @@ bool wiimote_take_tap();
 // pointer (x / 304, -y / 228 of the layout units), and only there (the circle pad doesn't move it);
 // a tap is a press there in stick mode too.
 void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height);
+// The stick (in stick mode) as the D-pad as well, while a scene's menus are up: tilted more than half
+// way, it holds the D-pad's direction for the game (its menus and lists move their highlight).
+void input_set_stick_as_dpad(bool on);
+// whether the A of the game's last read came from a tap (wiimote_take_tap), not the A button: a
+// scene that takes A for something else than pressing (a jump) leaves it out
+bool wiimote_last_read_tapped();
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

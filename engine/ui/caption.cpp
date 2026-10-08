@@ -97,4 +97,9 @@ void Caption::draw() {
         lyt::layout_draw(subtitle_.layout);
 }
 
+void Caption::place(f32 x, f32 y) {
+    for (Line* line : {&title_, &subtitle_})
+        lyt::move(lyt::root_pane(line->layout), x, y);
+}
+
 }  // namespace engine::ui

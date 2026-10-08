@@ -24,6 +24,7 @@ u16 s_prev_buttons, s_pressed;
 // game's cursor gets A where it was, as touching then pressing A did. Not in stick mode (a scene
 // that walks something about: there A is the scene's, a jump on Wuhu Island).
 bool s_was_touching, s_tap;
+bool s_stick_dpad;  // input_set_stick_as_dpad
 // the bottom screen's region (input_set_touch_region), and the pointer it last gave
 bool s_region;
 f32 s_region_box[4], s_region_x, s_region_y;
@@ -46,6 +47,11 @@ void wiimote_set_input(const WiimoteInput& in) {
         s_in.pad &= ~(PAD_ZL | PAD_ZR);
         s_in.cam_x = s_in.cam_y = 0;
     }
+    if (s_stick_dpad && s_stick_mode) {
+        const f32 h = 0.5f;
+        s_in.buttons |= (s_in.stick_y > h ? WM_UP : 0) | (s_in.stick_y < -h ? WM_DOWN : 0) |
+                        (s_in.stick_x < -h ? WM_LEFT : 0) | (s_in.stick_x > h ? WM_RIGHT : 0);
+    }
     s_pressed |= s_in.buttons & ~s_prev_buttons;
     s_prev_buttons = s_in.buttons;
     if (s_region) {
@@ -60,6 +66,8 @@ void wiimote_set_input(const WiimoteInput& in) {
         s_tap = true;
     s_was_touching = s_in.touching;
 }
+
+void input_set_stick_as_dpad(bool on) { s_stick_dpad = on; }
 
 void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height) {
     s_region = on;
@@ -116,6 +124,7 @@ float s_x, s_y;      // the pointer at the last read
 const u32 TAP_READY = 11;
 u32 s_pointing_reads;  // reads in a row with the pointer on the screen
 bool s_tap_waiting;    // a tap, its A not given yet
+bool s_tap_given;      // the last read's A was a tap's
 
 void store_f32(u32 a, float v) {
     u32 bits;
@@ -151,9 +160,11 @@ u32 KPADReadEx(u32 chan, u32 samples, u32 length, u32 result) {
             s_tap_waiting = false;  // (the pointer gone, or A held anyway: no press later on)
         // what is held now, with what was pressed and let go since the last read (not held then)
         u32 held = in.buttons | (guest::wiimote_take_pressed() & ~s_hold);
+        s_tap_given = false;
         if (s_tap_waiting && s_pointing_reads >= TAP_READY) {
             held |= guest::WM_A;
             s_tap_waiting = false;
+            s_tap_given = !(in.buttons & guest::WM_A);
         }
         u32 st = samples;
         for (u32 k = 0; k < KS_SIZE; k += 4)
@@ -197,3 +208,7 @@ u32 WPADSendStreamData(u32, u32, u32) { return (u32)WPAD_ERR_BUSY; }
 void nw4r_snd_detail_RemoteSpeakerManager_Setup(u32 mgr, u32) { guest::store8(mgr, 1); }
 
 }  // namespace g
+
+namespace guest {
+bool wiimote_last_read_tapped() { return g::s_tap_given; }
+}  // namespace guest

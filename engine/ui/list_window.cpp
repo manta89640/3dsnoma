@@ -30,11 +30,11 @@ const char* const DOWN_LEX = "layout/Profile/Profile_Down_Btn.lex";
 // legible on the 3DS's screen). The window takes the channel's location adjust (lyt.h: drawn 3/4
 // as wide on a 16:9 screen, as the channel's own lists are, their text with them), so the widths
 // inside it are made 1/0.75 as wide (`wide`) to show at these sizes.
-const int VISIBLE = 5;           // rows shown at once
+const int VISIBLE = 4;           // rows shown at once (the bottom screen has room for four and the tabs)
 const int SLOTS = VISIBLE + 2;   // row buttons: the ones shown, one coming in, a spare
 const f32 PITCH = 54;            // the row pitch
-const f32 WINDOW_H = 292;        // five rows and a margin
-const f32 FIRST_Y = 2 * PITCH;   // the top row's centre (the middle row's at the window's)
+const f32 WINDOW_H = VISIBLE * PITCH + 22;  // the rows and a margin (five: 292, the message list's)
+const f32 FIRST_Y = (VISIBLE - 1) * PITCH / 2;  // the top row's centre (the rows centred in the window)
 const f32 ROW_MARGIN = 16;       // the rows' ends inside the window's sides, as the message list's
 // the row's height: the message list's proportion of it to its pitch (Message_List_Text's
 // Bound_Btn, 41.43 high at a pitch of 44)

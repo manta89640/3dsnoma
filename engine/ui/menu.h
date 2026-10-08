@@ -35,6 +35,9 @@ public:
     ~Menu();
     Menu(const Menu&) = delete;
     Menu& operator=(const Menu&) = delete;
+    // the whole of it (window, buttons, veil) moved across by x layout units (a screen region not
+    // centred on the layouts' middle: engine/ui/screen.h)
+    void place(f32 x);
 
     // a choice offered or greyed (while the menu is hidden)
     void set_enabled(int choice, bool on);

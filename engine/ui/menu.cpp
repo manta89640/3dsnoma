@@ -305,4 +305,6 @@ int Menu::take_choice() {
     return c;
 }
 
+void Menu::place(f32 x) { move(root_pane(scene_), x, 0); }
+
 }  // namespace engine::ui

@@ -31,6 +31,9 @@ public:
     // once a frame
     void update();
     void draw();
+    // the whole caption moved by x, y layout units from the screens' heading (a screen region whose
+    // top or middle isn't the layouts': engine/ui/screen.h)
+    void place(f32 x, f32 y);
 
 private:
     struct Line {

@@ -28,6 +28,7 @@
 #include "engine/input/remote.h"
 #include "engine/ui/g3d.h"
 #include "engine/ui/game.h"
+#include "engine/ui/screen.h"
 #include "engine/ui/lyt.h"
 #include "engine/wuhu/bar_button.h"
 #include "engine/wuhu/music.h"
@@ -64,7 +65,15 @@ const u32 CAPTION_CHARS = 32;
 
 // the list of places: in the middle, its top tab clear of the prompt's rule (Top_Message's, at
 // y 160) and its bottom tab of the back tab at the bottom left (layout units as they show)
-const f32 PLACES_X = 0, PLACES_Y = -30, PLACES_W = 400;
+// The bottom screen's part of the layouts' space (engine/ui/screen.h), as the Sound Player's: the
+// bottom left of the 608x456 layouts (the Home tab's corner), 533x400 units at 0.6 pixels a unit;
+// the menu, the places and the question are centred in it (BOTTOM_MIDDLE_X)
+const engine::ui::screen::Region BOTTOM_REGION{-304, 172, 1600.0f / 3, 400};
+const f32 BOTTOM_MIDDLE_X = -304 + 800.0f / 3;
+// the places' window (4 rows) low enough for its prompt over it and its tabs, clear of the back tab
+const f32 PLACES_X = BOTTOM_MIDDLE_X, PLACES_Y = -42, PLACES_W = 400;
+// the prompt over it, from the screens' heading (y 169) down into the region (whose top is 172)
+const f32 PROMPT_DROP = -26;
 
 // the rings show once the load has taken this long, and stay at least this long once shown (half
 // a second: their first ripple grown, rather than a flash)
@@ -94,9 +103,11 @@ f32 clamp1(f32 v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
 
 // The player's controls this frame: the remote's buttons, as the game's input manager read them;
 // the move stick (the circle pad); the camera: the New 3DS's C-stick, or L and R to turn it round
-// the Mii (R to the right), ZR sprints, the D-pad's up and down look up and down and its left and
-// right bring it in and out, Y (the remote's 2) brings it round behind the Mii, A jumps. (NOMA_INPUT
-// on the host: S(x;y), C(x;y), [L], [R], [ZR], the D-pad's U, D, L, R, 2 and A.)
+// the Mii (R to the right); B held sprints (ZR too on a New 3DS: an Old 3DS has only B), the D-pad's
+// up and down look up and down and its left and right bring it in and out, Y (the remote's 2)
+// brings it round behind the Mii, A jumps (the A button's: a tap on the bottom screen's Home tab is
+// a press there, no jump). (NOMA_INPUT on the host: S(x;y), C(x;y), [L], [R], [ZR], B, the D-pad's
+// U, D, L, R, 2 and A.)
 Controls read_controls() {
     Controls c;
     c.held = game::buttons_held();
@@ -108,10 +119,11 @@ Controls read_controls() {
     c.camera_x = clamp1(in.cam_x + r - l);
     c.camera_y = clamp1(in.cam_y + on(game::PAD_UP) - on(game::PAD_DOWN));
     c.zoom = on(game::PAD_RIGHT) - on(game::PAD_LEFT);
-    c.fast_run = (in.pad & guest::PAD_ZR) != 0;
+    c.fast_run = (in.pad & guest::PAD_ZR) != 0 || (c.held & game::PAD_B) != 0;
     c.behind = (c.pressed & game::PAD_TWO) != 0;
-    c.jump = (c.pressed & game::PAD_A) != 0;
-    c.jump_held = (c.held & game::PAD_A) != 0;
+    const bool tapped = guest::wiimote_last_read_tapped();
+    c.jump = (c.pressed & game::PAD_A) != 0 && !tapped;
+    c.jump_held = (c.held & game::PAD_A) != 0 && !tapped;
     c.vehicle = (c.pressed & game::PAD_ONE) != 0;
     return c;
 }
@@ -143,11 +155,18 @@ IslandScene::IslandScene() {
     menu_ = new Menu(cursor_, group_, CHOICES, CONTINUE);
     places_list_ = new ListWindow(cursor_, group_, PLACES_X, PLACES_Y, PLACES_W);
     confirm_ = new Confirm(cursor_, group_, QUESTION);
+    // on the bottom screen, as the Sound Player's (engine/ui/screen.h): its region's middle is 37
+    // units left of the layouts', so the windows move with it
+    menu_->place(BOTTOM_MIDDLE_X);
+    confirm_->place(BOTTOM_MIDDLE_X);
+    prompt_->place(BOTTOM_MIDDLE_X, PROMPT_DROP);
     bottom_ = g::operator_new(game::BOTTOM_SIZE);
     game::bottom_ctor(bottom_, cursor_);  // hidden until the island shows
     engine::system::hook_button(bottom_ + game::BOTTOM_HOME_BTN_02);
     engine::system::hook_button(bottom_ + game::BOTTOM_RETURN_BTN_03);
     u32 heap_shell = heap_free();
+
+    engine::ui::screen::claim(BOTTOM_REGION);
 
     content_ = make_content();
     load_start_us_ = guest::host_time_us();
@@ -157,6 +176,8 @@ IslandScene::IslandScene() {
 }
 
 IslandScene::~IslandScene() {
+    guest::input_set_stick_as_dpad(false);
+    engine::ui::screen::release();
     delete content_;
     game::bottom_dtor_delete(bottom_);
     delete confirm_;
@@ -175,6 +196,8 @@ IslandScene::~IslandScene() {
 
 void IslandScene::set_state(State s) {
     guest::log("wuhu: %s (after %d frames %s)", STATE_NAMES[(int)s], state_frames_, STATE_NAMES[(int)state_]);
+    // the circle pad moves the menus' highlights while one is up (it walks the Mii otherwise)
+    guest::input_set_stick_as_dpad(s == State::MENU || s == State::PLACES || s == State::CONFIRM);
     state_ = s;
     state_frames_ = 0;
 }
@@ -231,13 +254,9 @@ void IslandScene::update() {
         break;
     case State::PLAYING:
         content_->update(controls, false);
-        // B presses the Home tab (its push, then on_pushed opens the menu), START opens it at once
-        if (controls.pressed & game::PAD_B) {
-            if (!game::bottom_press_back(bottom_, cursor_))
-                open_menu();
-        } else if (controls.pressed & game::PAD_PLUS) {
+        // START opens the menu (as the Home tab does, touched: on_pushed); B is the sprint now
+        if (controls.pressed & game::PAD_PLUS)
             open_menu();
-        }
         break;
     case State::MENU:
         content_->update(controls, true);
@@ -311,20 +330,34 @@ void IslandScene::update() {
         break;
     }
     caption_->update();
+    // the bottom screen's layouts, and the cursor that hit-tests them (engine/ui/screen.h)
+    engine::ui::screen::squeeze(false);
     prompt_->update();
     menu_->update();
     places_list_->update();
     confirm_->update();
     game::bottom_update(bottom_);
     game::cursor_update(cursor_);
+    engine::ui::screen::squeeze(true);
 }
 
 void IslandScene::draw() {
+    namespace screen = engine::ui::screen;
+    // the top screen: the island and its caption, black while loading or fading in (the rings)
     if (state_ != State::LOADING) {
         content_->draw_opaque();
         content_->draw_translucent();
     }
     caption_->draw();
+    const bool black = state_ == State::LOADING || black_frames_ > 0;
+    if (black) {
+        lyt::layout_draw(black_);
+        if (state_ == State::LOADING && rings_frames_ >= 0)
+            lyt::layout_draw(rings_);
+    }
+    // the bottom screen: the Home tab, the menu, the places, the question (black with the top)
+    screen::to_bottom(BOTTOM_REGION);
+    screen::squeeze(false);
     // the tab under the menu's veil, but the back tab, the list's way back, over it
     const bool tab_over_veil = state_ == State::PLACES;
     if (!tab_over_veil)
@@ -335,15 +368,12 @@ void IslandScene::draw() {
     prompt_->draw();
     if (tab_over_veil)
         game::bottom_draw(bottom_);
-    if (state_ == State::LOADING || black_frames_ > 0) {
+    if (black)
         lyt::layout_draw(black_);
-        if (state_ == State::LOADING && rings_frames_ >= 0)
-            lyt::layout_draw(rings_);
-        if (state_ != State::LOADING)
-            black_frames_--;
-        return;  // no pointer on the black
-    }
-    game::cursor_draw(cursor_);
+    screen::squeeze(true);
+    screen::to_top();
+    if (black && state_ != State::LOADING)
+        black_frames_--;
 }
 
 void IslandScene::on_push_start(u32 button) { places_list_->on_push_start(button); }

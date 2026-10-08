@@ -32,6 +32,9 @@ public:
     ~Confirm();
     Confirm(const Confirm&) = delete;
     Confirm& operator=(const Confirm&) = delete;
+    // the whole of it (window, buttons, veil) moved across by x layout units (a screen region not
+    // centred on the layouts' middle: engine/ui/screen.h)
+    void place(f32 x);
 
     // the window opens (nothing if it is shown already); over_window: in the place of another
     // window, whose veil it takes over (see above)

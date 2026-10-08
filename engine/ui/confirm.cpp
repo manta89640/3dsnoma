@@ -140,4 +140,6 @@ Confirm::Choice Confirm::take_choice() {
     return c;
 }
 
+void Confirm::place(f32 x) { lyt::move(lyt::root_pane(scene_), x, 0); }
+
 }  // namespace engine::ui

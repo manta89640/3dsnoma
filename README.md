@@ -206,16 +206,18 @@ The Wii's HOME Button Menu is not part of the port (the 3DS's own HOME button su
 `engine/system/home_button.cpp` keeps it from loading or opening. Closing the app from the HOME
 Menu presses the Wii's power button for the game, which ends as it does on the Wii (a save in
 progress finishes first); the app ends on its own if the game hasn't within 10 seconds.
-On Wuhu Island the circle pad walks the Mii (tilted more than about half way, it runs); ZR (New
-3DS) sprints, and a sprint off a ledge glides down under the Skydiving parachute; A jumps (a tap a
-short hop, held a higher one). Walked on into deep water (or off a low edge into it) the Mii swims,
-and wades or climbs out where the shore allows. Near a parked car or a boat at anchor (a boat from
-the water too), X (the Wii Remote's 1) gets in and out again; in it the circle pad's up and down
-speed up and back, its left and right steer. The C-stick (New 3DS) or L and R turn the camera round
-the Mii, the D-pad tilts the camera or brings it in and out, and Y brings it round behind the Mii;
-START, B or the Home tab (touch) open the exploration menu (部屋にもどる / ワープ / 探検をつづける:
-the D-pad and A, or touch; START closes it), whose ワープ lists the places to go, and B backs
-out of each.
+On Wuhu Island the top screen shows the island and the bottom one its Home tab, the exploration
+menu, the places to warp to and the question about going back, which the touch screen works
+directly. The circle pad walks the Mii (tilted more than about half way, it runs); B held sprints
+(ZR too on a New 3DS), and a sprint off a ledge glides down under the Skydiving parachute; A jumps
+(a tap a short hop, held a higher one). Walked on into deep water (or off a low edge into it) the
+Mii swims, and wades or climbs out where the shore allows. Near a parked car or a boat at anchor (a
+boat from the water too), X (the Wii Remote's 1) gets in and out again; in it the circle pad's up
+and down speed up and back, its left and right steer. The C-stick (New 3DS) or L and R turn the
+camera round the Mii, the D-pad tilts the camera or brings it in and out, and Y brings it round
+behind the Mii. START or the Home tab open the exploration menu (部屋にもどる / ワープ / 探検をつづける:
+the D-pad or the circle pad and A, or touch; START closes it), whose ワープ lists the places to go,
+and B backs out of each.
 
 ## The Sound Player
 
@@ -230,10 +232,11 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
   those put into words. They play through the channel's own BGM player (`sound::BGMManager`),
   which crossfades between pieces and keeps the room's theme paused until the room asks for it
   again.
-- Left: the list, in the channel's list window with the message board's rows (the room's cyan
-  for focus), scrolling a row at a time (the tabs on its edges, held, or the D-pad). The track
-  playing has a cyan bar with ♪ (grey with ∥ when paused). Right: the title, and the video
-  player's own controls (previous, play/pause, next, stop).
+- On the bottom screen: the list, in the channel's list window with the message board's rows (the
+  room's cyan for focus), four rows at a time (the tabs on its edges, held, or the D-pad), the
+  video player's own controls (previous, play/pause, next, stop) and the Home tab, worked by touch
+  (a tap presses what it is on). The track playing has a cyan bar with ♪ (grey with ∥ when
+  paused). On the top screen: the title over the stage.
 - The household's Miis dance at a table in the TV programme's white studio, an amp beside them,
   every family member (one to eight) placed so that none hides another. The dances are the
   channel's own (the TV caster's, the DSi relay's, the messages' cheers), their frames set from
@@ -241,9 +244,8 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
   every 8 bars (of 3 beats in the island's waltz, of 4 in the channel's pieces); paused or
   stopped, the Miis wait calmly. The amp is drawn by the port (no such model exists in the
   channel), its speaker and light pulsing on the beat.
-- Buttons: the pointer and A as everywhere; the D-pad's up and down move the list's highlight
-  and A plays it (with the pointer away), left and right play the previous and next track,
-  + pauses and resumes, − stops, B goes back.
+- Buttons: the D-pad's up and down move the list's highlight and A plays it, left and right play
+  the previous and next track, START pauses and resumes, SELECT stops, B goes back.
 
 It is a scene of its own (`engine/soundplayer`), made in native code but run by the channel's
 scene manager like the theater or the options: `engine/system/host_scene.cpp` gives the
