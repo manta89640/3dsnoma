@@ -39,9 +39,16 @@ struct WiimoteInput {
     float stick_x = 0.0f, stick_y = 0.0f;
     float cam_x = 0.0f, cam_y = 0.0f;
     u16 pad = 0;               // the PAD_ bits held
+    // The bottom screen's touch as it is (the pointer above is where it points on the top screen):
+    // held, and where, in the bottom screen's pixels (0..319 across, 0..239 down). For the native
+    // input layer to come (touch as a press, not a pointer); the game reads none of it.
+    bool touching = false;
+    u16 touch_x = 0, touch_y = 0;
 };
-// remote 1 from now on (the game sees it at its next read)
+// remote 1 from now on (the game sees it at its next read); with NOMA_OLD3DS=1 less what an Old
+// 3DS doesn't have (ZL, ZR, the C-stick)
 void wiimote_set_input(const WiimoteInput& in);
+bool input_old3ds();
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

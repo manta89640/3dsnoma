@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "engine/g3d/native_draw.h"
+#include "engine/input/remote.h"
 #include "engine/gx/tev_combiner.h"
 #include "runtime/hw/gx/raster.h"
 #include "runtime/hw/gx/regs.h"
@@ -1052,14 +1053,15 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
     }
 }
 
-// NOMA_ETC1: CMPR textures as ETC1 (default: on the Old 3DS only)
+// NOMA_ETC1: CMPR textures as ETC1 (default: on the Old 3DS only, and a New 3DS run as one,
+// NOMA_OLD3DS)
 bool etc1_on() {
     static int s_on = -1;
     if (s_on < 0) {
         const char* v = getenv("NOMA_ETC1");
         bool n3ds = false;
         APT_CheckNew3DS(&n3ds);
-        s_on = v ? atoi(v) != 0 : !n3ds;
+        s_on = v ? atoi(v) != 0 : !n3ds || input_old3ds();
         log("pica: CMPR textures as %s", s_on ? "ETC1" : "RGBA5551");
     }
     return s_on > 0;
@@ -1965,7 +1967,7 @@ immediate:
 }
 
 // NOMA_SHOT_EVERY=N (env.txt): every Nth frame, the top screen goes to sdmc:/3ds/noma/shots/
-// as a BMP (the render target untiled by the GPU, then turned upright: it is 240x400, rotated)
+// as a BMP (and the bottom screen beside it, platform_save_bottom_shot) (the render target untiled by the GPU, then turned upright: it is 240x400, rotated)
 static void save_shot(C3D_RenderTarget* t, u32 n) {
     const u32 W = 240, H = 400;
     u32* buf = (u32*)linearAlloc(W * H * 4);
@@ -2006,6 +2008,7 @@ static void save_shot(C3D_RenderTarget* t, u32 n) {
         fclose(f);
     }
     linearFree(buf);
+    platform_save_bottom_shot(n);  // (the bottom screen beside it: NNNNN_bottom.bmp)
 }
 
 // ---------------------------------------------------------------- EFB copies to textures

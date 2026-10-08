@@ -501,6 +501,7 @@ void host_sleep_us(u64 us) { svcSleepThread((s64)us * 1000); }
 // whatever the layout.
 struct Cores {
     bool n3ds = false;
+    bool old3ds_sim = false;  // a New 3DS run as an Old one (NOMA_OLD3DS)
     bool emulator = false;
     bool multi = false;  // the audio thread and the helper beside the GPU's thread
     int mhz = 0;         // the clock (Luma3DS says; 0: unknown)
@@ -510,6 +511,12 @@ static Cores s_cores;
 
 static void cores_init() {
     APT_CheckNew3DS(&s_cores.n3ds);
+    // NOMA_OLD3DS=1: the Old 3DS's layout (the GPU's thread on the system core, nothing on core 2)
+    // and, on a New 3DS, its clock (268 MHz, no L2 cache: main() leaves the speed-up off), as near as
+    // a New 3DS comes to an Old one; the input loses ZL, ZR and the C-stick (remote.cpp)
+    s_cores.old3ds_sim = s_cores.n3ds && input_old3ds();
+    if (s_cores.old3ds_sim)
+        s_cores.n3ds = false;
     // the emulator's id in Citra (1) and Azahar (2); Luma3DS answers 0, a stock kernel an error
     s64 id = 0, mhz = 0;
     svcGetSystemInfo(&id, 0x20000, 0);
@@ -523,7 +530,8 @@ static void cores_init() {
     char clock[24] = "";
     if (s_cores.mhz)
         snprintf(clock, sizeof(clock), " at %d MHz", s_cores.mhz);
-    log("cores: %s 3DS%s%s, %s: %s", s_cores.n3ds ? "New" : "Old", clock,
+    log("cores: %s 3DS%s%s%s, %s: %s", s_cores.n3ds ? "New" : "Old", clock,
+        s_cores.old3ds_sim ? " (a New 3DS as an Old one: NOMA_OLD3DS, 268 MHz, no L2)" : "",
         s_cores.emulator ? " (an emulator)" : "", envIsHomebrew() ? ".3dsx" : "installed",
         s_cores.multi ? "the GPU's thread, the mixing and the jobs beside the game"
                       : "the GPU's thread beside the game; mixing and jobs on its core");
@@ -846,9 +854,11 @@ static void poll_input() {
     if (held & KEY_ZL) pad |= PAD_ZL;
     if (held & KEY_ZR) pad |= PAD_ZR;
     s_in.pad = pad;
-    if (held & KEY_TOUCH) {
+    s_in.touching = (held & KEY_TOUCH) != 0;
+    if (s_in.touching) {
         touchPosition t;
         hidTouchRead(&t);
+        s_in.touch_x = t.px, s_in.touch_y = t.py;
         s_in.x = (float)t.px / 160.0f - 1.0f;
         s_in.y = (float)t.py / 120.0f - 1.0f;
     }
@@ -911,6 +921,35 @@ static void status_row(int y, const char* text) {
 // Once a second: the game's frames a second (new pictures shown), then milliseconds a frame: the
 // CPU's (the game's thread: the game and its sound) less its waits, the waits (every guest thread
 // waiting: for the next retrace, the GPU, a read), the GPU's last frame; the heap in use.
+// noma.log gets the same numbers every NOMA_STATUS_LOG seconds (10 by default; 0: never), over that
+// time, so a run on the console leaves them behind ("status:" lines): a hardware run's frames a
+// second and where their time went, with no one reading the screen.
+static void status_log(u64 now, u32 frames, u32 idle, const AxLoad& ax) {
+    static const u32 s_every = [] {
+        const char* e = getenv("NOMA_STATUS_LOG");
+        return e ? (u32)atoi(e) : 10u;
+    }();
+    static u64 s_t0, s_mix0, s_wait0;
+    static u32 s_frames0, s_idle0;
+    if (!s_every)
+        return;
+    if (s_t0 && now - s_t0 < (u64)s_every * SYSCLOCK_ARM11)
+        return;
+    if (s_t0) {
+        const u32 n = frames - s_frames0;
+        const double secs = (double)(now - s_t0) / SYSCLOCK_ARM11, ms = secs * 1000.0;
+        const double waited = n ? (double)(u32)(idle - s_idle0) / 1000.0 / n : 0;
+        const double mix = n ? (double)(ax.mix_us - s_mix0) / 1000.0 / n : 0;
+        const double wait = n ? (double)(ax.wait_us - s_wait0) / 1000.0 / n : 0;
+        const int core = ax.threaded ? s_audio_core.load(std::memory_order_relaxed) : 0;
+        log("status: %.1f fps over %.0f s; ms a frame: CPU %.1f, waits %.1f, GPU %.1f (last frame); AX %.2f on c%d "
+            "(game waited %.2f); heap %lu/%lu MB",
+            n / secs, secs, n ? ms / n - waited : 0.0, waited, s_gpu ? (double)C3D_GetDrawingTime() : 0.0, mix, core,
+            wait, (unsigned long)(mallinfo().uordblks >> 20), (unsigned long)(__ctru_heap_size >> 20));
+    }
+    s_t0 = now, s_frames0 = frames, s_idle0 = idle, s_mix0 = ax.mix_us, s_wait0 = ax.wait_us;
+}
+
 static void status_update(u64 now) {
     static u64 s_t0, s_mix0, s_wait0;
     static u32 s_frames0, s_idle0;
@@ -933,6 +972,7 @@ static void status_update(u64 now) {
     // (under malloc's lock; not the linear heap's free space: libctru walks its free list unlocked,
     // and the GPU's thread allocates textures from it meanwhile).
     const AxLoad ax = ax_load();
+    status_log(now, frames, idle, ax);
     char axs[24];
     if (s_t0 && frames != s_frames0) {
         const u32 n = frames - s_frames0;
@@ -959,6 +999,43 @@ static void status_update(u64 now) {
     u16 w = 0, h = 0;
     u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
     GSPGPU_FlushDataCache(fb, (u32)w * h * 2);  // (the console draws with the CPU: RGB565)
+}
+
+// NOMA_SHOT_EVERY (gx_pica.cpp's save_shot, after the top screen's NNNNN.bmp): the bottom screen as
+// NNNNN_bottom.bmp, 320x240 (the console's frame buffer: RGB565, 240x320, column-major, rows bottom
+// up). A picture of it as it is: the console writes it from other threads meanwhile.
+void platform_save_bottom_shot(u32 n) {
+    u16 fw = 0, fh = 0;
+    const u16* fb = (const u16*)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fw, &fh);
+    if (!fb || fw != 240 || fh != 320)
+        return;
+    char path[64];
+    snprintf(path, sizeof(path), "sdmc:/3ds/noma/shots/%05u_bottom.bmp", (unsigned)n);
+    FILE* f = fopen(path, "wb");
+    if (!f)
+        return;
+    const u32 SW = 320, SH = 240, row = SW * 3, size = 54 + row * SH;
+    u8 hdr[54] = {'B', 'M'};
+    auto put32 = [&](int at, u32 v) { memcpy(hdr + at, &v, 4); };
+    put32(2, size);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, SW);
+    put32(22, SH);  // bottom-up rows
+    hdr[26] = 1;
+    hdr[28] = 24;
+    put32(34, row * SH);
+    fwrite(hdr, 1, 54, f);
+    std::vector<u8> line(row);
+    for (u32 y = SH; y-- > 0;) {  // BMP rows from the bottom; screen row y is column index 239 - y
+        for (u32 x = 0; x < SW; x++) {
+            const u16 p = fb[x * 240 + (239 - y)];
+            const u8 r = (u8)((p >> 11) << 3), g = (u8)(((p >> 5) & 0x3F) << 2), b = (u8)((p & 0x1F) << 3);
+            line[x * 3 + 0] = b | b >> 5, line[x * 3 + 1] = g | g >> 6, line[x * 3 + 2] = r | r >> 5;
+        }
+        fwrite(line.data(), 1, row, f);
+    }
+    fclose(f);
 }
 
 // Closing from the HOME Menu (its close, or the power button's power-off): the game gets the
@@ -1042,7 +1119,9 @@ __attribute__((constructor(101))) static void read_env_txt() {
 int main(int argc, char** argv) {
     guest::catch_arm_exceptions();
     std::set_new_handler(guest::on_out_of_memory);
-    osSetSpeedupEnable(true);
+    // (NOMA_OLD3DS=1 keeps a New 3DS at the Old 3DS's 268 MHz without the L2 cache; env.txt's
+    // switches are set by now: constructor priority 101)
+    osSetSpeedupEnable(!guest::input_old3ds());
     gfxInitDefault();
     gfxSetDoubleBuffering(GFX_TOP, true);
     // the bottom screen: the status area over the log (40 x 30 characters)

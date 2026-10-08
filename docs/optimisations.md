@@ -9,7 +9,7 @@ Rules:
 - **Game logic stays bit-exact.** A native replacement of decompiled code must give the same
   results, checked by a differential test (`NOMA_SELFTEST=...` in `platform/host/selftest.cpp`).
 - **Rendering only has to look right.** The PICA computes in 24-bit floats anyway.
-- **Measure.** Azahar's profile (`NOMA_PROFILE=N` in a `build-3ds-prof` build, see the README) shows
+- **Measure.** Azahar's profile (`NOMA_PROFILE=N` in a profiling build, `-DNOMA_PROFILE_CALLS=ON`, see the README) shows
   where the time goes on the 3DS. Azahar doesn't model ARM11 timing (azahar PR #2262), so confirm
   gains on hardware, and on the Old 3DS, which has no L2 cache.
 - For kernels, count ARM11 instructions: compile with the 3DS flags and run under Unicorn
@@ -80,7 +80,7 @@ Rules:
 
 | What | Where | Expected | Notes |
 |---|---|---|---|
-| The New 3DS's cores used by default on real hardware (`NOMA_CORES`): the AX mixing on its own thread on the system core (core 1, a 30% share of it: the CIA's exheader, MaxCpu 0x9E, allows the "multi" mode at up to 30%, which alternates the core between the system's modules and the app every 2 ms or less; a `.3dsx` runs under another title's exheader, so there the thread goes on core 2, above the GPU's thread); Wuhu Island's World (animations, culling, both passes' draw lists) as a job on the helper thread on core 2 above the GPU's thread, from the end of the island's update until its draw takes the packets. In an emulator (Azahar and Citra answer `svcGetSystemInfo` 0x20000) and on the Old 3DS, both stay on the game's thread, as before. The mixing thread is given up for inline mixing when, over 2,000 frames, the game waited for it longer than the mixing took. Every helper thread and worker parks at quit | `platform/3ds/main.cpp`, `runtime/hw/dsp_hle.cpp`, `engine/wuhu/island.cpp` | Off core 0, est. (New 3DS, 804 MHz, armbench-style cycle counts, L1 hits only, not measured on hardware): the mixing with 「広い世界へ」's 34-37 voices ~140K cycles an AX frame (the room's 24 voices: 99K), 5.6 AX frames a video frame: ~1 ms of a 16.7 ms frame; the island's World 0.5-1.0M cycles a frame (the measurement round's `world_views_cycles.tsv`): 0.6-1.3 ms. Together up to ~2 ms of core 0 a frame (~12% at 60 fps), where core 0 is the limit | Azahar runs the cores one after another: there each frame's handoff was a wait (boot screens at 1–2.5 fps with the mixing on core 1, inline 50–59; the room ~10% slower), hence inline there. To check on hardware: the status line's `AX` (ms a frame, its core, `w` the game's waits) and the island's log line (`world ... on the helper (waited ...)`); A/B with `NOMA_CORES=single`, the mixing on core 2 with `NOMA_AX_THREAD=2`, and the island's World on the game's thread with `NOMA_JOB_INLINE=1` (the job runs above the GPU's thread on its core: where that thread, not core 0, holds the island's frame back, the job's ~1 ms a frame goes onto it) |
+| The New 3DS's cores used by default on real hardware (`NOMA_CORES`): the AX mixing on its own thread on the system core (core 1, a 30% share of it: the CIA's exheader, MaxCpu 0x9E, allows the "multi" mode at up to 30%, which alternates the core between the system's modules and the app every 2 ms or less; a `.3dsx` runs under another title's exheader, so there the thread goes on core 2, above the GPU's thread); Wuhu Island's World (animations, culling, both passes' draw lists) as a job on the helper thread on core 2 above the GPU's thread, from the end of the island's update until its draw takes the packets. In an emulator (Azahar and Citra answer `svcGetSystemInfo` 0x20000) and on the Old 3DS, both stay on the game's thread, as before. The mixing thread is given up for inline mixing when, over 2,000 frames, the game waited for it longer than the mixing took, and tried again 10,000 frames (30 s) later (2e75910). On the user's New 3DS (noma.log of 2026-10-05, before the retry) it was given up 28 s in: the game had waited 806 ms for it over 2,000 frames, which took 572 ms to mix; the retry is not measured on hardware yet. Every helper thread and worker parks at quit | `platform/3ds/main.cpp`, `runtime/hw/dsp_hle.cpp`, `engine/wuhu/island.cpp` | Off core 0, est. (New 3DS, 804 MHz, armbench-style cycle counts, L1 hits only, not measured on hardware): the mixing with 「広い世界へ」's 34-37 voices ~140K cycles an AX frame (the room's 24 voices: 99K), 5.6 AX frames a video frame: ~1 ms of a 16.7 ms frame; the island's World 0.5-1.0M cycles a frame (the measurement round's `world_views_cycles.tsv`): 0.6-1.3 ms. Together up to ~2 ms of core 0 a frame (~12% at 60 fps), where core 0 is the limit | Azahar runs the cores one after another: there each frame's handoff was a wait (boot screens at 1–2.5 fps with the mixing on core 1, inline 50–59; the room ~10% slower), hence inline there. To check on hardware: the status line's `AX` (ms a frame, its core, `w` the game's waits) and the island's log line (`world ... on the helper (waited ...)`); A/B with `NOMA_CORES=single`, the mixing on core 2 with `NOMA_AX_THREAD=2`, and the island's World on the game's thread with `NOMA_JOB_INLINE=1` (the job runs above the GPU's thread on its core: where that thread, not core 0, holds the island's frame back, the job's ~1 ms a frame goes onto it) |
 
 ## Candidates
 
@@ -89,8 +89,10 @@ Rules:
 The budget: Azahar charges one tick per ARM11 instruction at 268 MHz, also in New 3DS mode (its
 per-instruction timing, azahar PR #2262, isn't the default), so 60 fps there is at most ~4.47M
 instructions a frame on core 0. The room runs at ~42 fps: ~6.4M ticks a frame, ~6% idle. A real New
-3DS (804 MHz, L2 cache) runs more instructions per second than that, so hardware may already be
-nearer 60. The New 3DS is the 60 fps target; the Old 3DS has a third of the clock and no L2.
+3DS (804 MHz, L2 cache) runs more instructions per second than that, but not many more on this code:
+the user's New 3DS ran the room at 43-45 fps with the mixing inline (noma.log of 2026-10-05, a
+build before the native model draws), about Azahar's rate, so about 3 cycles an instruction. The
+New 3DS is the 60 fps target; the Old 3DS has a third of the clock and no L2.
 
 Where core 0's frame goes (Azahar profile build, room, inclusive, before the lyt quads went native;
 the call tree from the decompiled code):
@@ -128,7 +130,6 @@ Not done: Layout::Animate skipping hidden panes (a pane made visible after Anima
 | g3d's per-root work once per frame (`fn_804500E0`: cameras, fogs, lights), then CalcWorld/CalcView native, then material setup with skipped state | `engine/g3d` | est. 8–15% | 1–2 weeks | Yes for calc; effect-exact for the draw |
 | The sound thread off core 0 (New 3DS core 2, or the system core) without a wait per AX frame | 85's | up to ~18% (only with no wait per AX frame: an AX thread on core 1 that the main core waited for made the room ~10% slower in Azahar, which runs cores one after another) | Days | Yes |
 | Guest memory accesses cheaper: the MMIO check out of the fast path (unmapped pages fault and a data-abort handler does the device access), write-gather stores through a pointer drained at the polls (at most a function's straight-line writes between two polls) | `runtime/guest.h`, decompile.py | est. 5–10% everywhere | Days | Yes |
-| The stack scan a word at a time without `memcmp` (or unrolled LDM) | `engine/system/thread.cpp` | ~1.4% | Hours | Yes |
 | Layout::Animate skipping hidden subtrees (Nintendo's own option bit 1; the pane itself still animates, so visibility tracks still apply) | game patch | ~1% | Hours | Changes when hidden panes take their frame |
 
 
@@ -167,14 +168,14 @@ What the program does only because it runs on a Wii, and what replaces it.
 | The first-run setup's video quality step (high or normal quality for streaming), and the line announcing it | Done: the setup goes from the family's Miis to its end; the message loses that line (`wii_parts.cpp`). |
 | The same setting in the room's options (OptionScene::StateVideo, the top menu's video page) | Done: its button is hidden, the family and the terms of use take the middle places (`runtime/patches/menus.cpp`). |
 | Texts about the Wii's own parts: the "Wiiメニューへ" buttons and questions, the Mii Channel (no Mii yet, its warnings), pointing the Wii Remote (room help), the Wii Points button (theater help) | Done: edited in place when the texts load (`wii_MessageData_Load`, by message index): "おわる", "Wiiの間をおわります", "Miiをえらぶ", touch the lower screen, the warnings shortened. |
-| Leaving for another Wii program (Wii Menu, Data Management, Wii Shop, Mii Channel, Internet Channel, region settings: `app_Exit_Dispatch` codes) | Done for the Mii Channel: the 3DS's Mii Selector, then the app starts again with the Mii. The others end the app (after a 120-frame fade: 8 s at 15 fps, to shorten). The options' region/address entry and the theater's Wii Points button are hidden (`menus.cpp`). |
+| Leaving for another Wii program (Wii Menu, Data Management, Wii Shop, Mii Channel, Internet Channel, region settings: `app_Exit_Dispatch` codes) | Done for the Mii Channel: the 3DS's Mii Selector, then the app starts again with the Mii. The others end the app (after the channel's fade, timed by the clock since 8e19385, no longer by frames). The options' region/address entry and the theater's Wii Points button are hidden (`menus.cpp`). |
 | Frames rounded up to whole TV retraces (`VIWaitForRetrace` once a frame) | Done: no wait when a retrace has passed since the last one; 60 fps stays the cap. About half a retrace a frame at the room's frame rate. |
 | The Wii Remote speaker's alarm (nw4r::snd, every 6.67 ms, for good) | Done: never set (`engine/input/remote.cpp`). |
 | Mii database: holding SELECT at start (Mii Selector) replaced every Mii with the one picked | Done: the Mii is added (or replaces itself), the others stay (`rfl_add_mii`, self-tested). |
-| Background Wii services: the Wii Shop (EC) manager thread polling every 16 ms (fn_800160B8, made in fn_80015CFC), the weather thread (fn_801A6B00), the WiiConnect24 manager thread (fn_80038B9C, files reopened every ~300 s), the address book (PD), the TV programme cache (2.5 MiB), 78 MB of arena cleared at boot | To do: offline, don't start them (each guest thread is also 256 KB of host heap on the 3DS). |
+| Background Wii services: the Wii Shop (EC) manager thread polling every 16 ms (fn_800160B8, made in fn_80015CFC), the weather thread (fn_801A6B00), the WiiConnect24 manager thread (fn_80038B9C, files reopened every ~300 s), the address book (PD), the TV programme cache (2.5 MiB), 78 MB of arena cleared at boot | Partly done (`runtime/patches/offline.cpp`): offline, the EC and WiiConnect24 threads suspend themselves while idle instead of polling, the weather read and the inbox's re-reads end at once. The threads are still made (each also 256 KB of host heap on the 3DS). |
 | Shopping and content playback build Flash (5.6 MiB MEM1 + 24 MiB MEM2), MobiClip (4.2 MiB) and the keyboard before showing the offline error; Flash's sound thread then stays | Done: Flash and MobiClip are left out (stubs; `runtime/patches/players.cpp`). The shop was Flash content (its own code is only the entrance), so the room bar's ショッピング button is hidden (`menus.cpp`); content playback is only reached from server content. The "can't connect" error lost its "check the Wii's internet settings" line. |
 | The software keyboard and its ATOK dictionaries (4.49 MiB MEM1, 3.85 MB read) built on entering 番組を見る without typing | Done: the 3DS's own keyboard (nothing of the SDK's is built). |
-| Closing from the 3DS HOME Menu exits at once, past the channel's own shutdown (a save could be cut off) | To do: complete the pending power event (STM) instead. |
+| Closing from the 3DS HOME Menu exits at once, past the channel's own shutdown (a save could be cut off) | Done: it presses the Wii's power button through the STM event hook, and the game ends as on the Wii; the app quits on its own if the game hasn't within 10 s (`platform/3ds/main.cpp` closing()). |
 | A 3DS-native control scheme: the game's controller manager (0x802A2DA0: KPAD set-up; 0x802A2ED0: the per-frame read) and the screens' pointer handling replaced by the 3DS's own (touch to select, the D-pad and buttons for lists), with no Wii Remote in between | Planned: the next step after the native KPAD. `WiimoteInput` (`engine/input/remote.h`) is the one place the platform layers feed. |
 | GameCube controller (PAD over SI) | To check: the game only calls PADInit; the SI emulation answers "no controllers". |
 | USB keyboard (KBD, HID, KPR) | To check: one device-change request stays pending; likely nothing per frame. |
@@ -188,7 +189,7 @@ What the program does only because it runs on a Wii, and what replaces it.
 |---|---|---|---|---|
 | Compile `noma_decomp` at `-O2` (or `-Os` for cold objects). `-O1` has no instruction scheduling, which hurts on the in-order ARM11, and no small-function inlining. `-DNOMA_DECOMP_OPT=-O2` builds it so. Measured: every host self-test passes and the host runs normally; 3DS code 15.05 → 14.44 MB; in Azahar (which charges per instruction, so scheduling can't show) the room runs at 16.9 fps against 17.2 at `-O1`, the same tree. | `CMakeLists.txt` | Only on hardware, from scheduling | Done but for a hardware A/B | None found |
 | Cheaper polls: the function-entry and loop polls (`NOMA_LOOP`) read a flag a timer sets, instead of decrementing a global | runtime | Small, everywhere | 1 day | Low |
-| Profile-guided code layout: order `.text.<fn>` sections from the sampling profiler (22.6 MB of code against a 16 KB instruction cache), then GCC PGO with `.gcda` files written to the SD card | linker script | est. 5–15% | 2–4 days | None |
+| Profile-guided code layout: order `.text.<fn>` sections from the sampling profiler (12.66 MB of code against a 16 KB instruction cache), then GCC PGO with `.gcda` files written to the SD card | linker script | est. 5–15% | 2–4 days | None |
 | `f32` instead of `f64` for values that are single precision on the Wii (`fadds`/`fmuls` results): identical bits, fewer conversions | m2c type inference | Broad, modest | 2–4 days | Only where provably single precision |
 
 ### Graphics
@@ -197,12 +198,13 @@ Where the room's frame goes (Azahar, profile build, after this round, before the
 rate (the game's main thread ~54% of its samples, the render passes under it ~34% of all of them;
 the sound thread ~38%); the GPU thread is ~40% idle; the PICA itself does little (~7,100 vertices
 and ~160 draw calls a frame, about 30 shader instructions per layout vertex, 400×240 pixels), so
-no GPU-side work pays before the CPU sides do. On the Old 3DS the GPU thread shares the system core
-(at most 80% of it).
+no GPU-side work pays before the CPU sides do. On the Old 3DS the GPU thread shares the system core:
+it asks for 80% of it, but the CIA's exheader (MaxCpu 0x9E) allows the "multi" mode at up to 30%,
+which is what APT granted on the New 3DS (44af487), so most likely 30% there.
 
 | What | Where | Expected | Effort | Risk |
 |---|---|---|---|---|
-| nw4r::lyt's pane draw (fn_80460EF0) natively, then g3d's material setup (fn_80443630, ResMatChan); the quads are done (above) | `engine/lyt`, `engine/g3d` | est. 1–2% of core 0 (the GX SDK natives measured far below their profile share: see Ruled out) | Days | Must match the streams |
+| nw4r::lyt's pane draw (Layout::Draw fn_8045A730, Pane::Draw fn_80459090, the DrawSelf functions), then g3d's material setup (fn_80443630, ResMatChan); the quads and Material::SetupGX (fn_80460EF0) are done (above) | `engine/lyt`, `engine/g3d` | est. 1–2% of core 0 (the GX SDK natives measured far below their profile share: see Ruled out) | Days | Must match the streams |
 | Textures: CMPR → ETC1 at staging time, looked up by content hash (the encoding is what keeps ETC1 off on the New 3DS: ~310 ms more at room entry); hot UI textures in VRAM. (I4/I8 as L4/L8 and ETC1 at upload: done, above.) | `tools/stage_data.py`, `gx_pica.cpp` | ETC1 everywhere without its upload time | Days | Low (as lossy as now) |
 | Aspect: the game draws for 16:9 (SYSCONF IPL.AR) and the 3DS screen is 5:3, so the picture is ~6.5% narrow with the TV overscan margin showing: 4:3 mode or a crop of ~21 px per side in the transform, scissor and read-back | `platform/3ds/gx_pica.cpp` | Fills the screen | 1 day | Touch mapping must match |
 | A native nw4r::lyt renderer for the layouts; on the Old 3DS, a frameskip that still decodes GX state | `engine/lyt` | Large | Weeks | Must match lyt materials |
@@ -221,14 +223,14 @@ main (c9dfb61): the room-making frame 1.27 s, the room shown at 19.35 s; in the 
 | What | Where | Expected | Effort | Exact? |
 |---|---|---|---|---|
 | LZ: literal runs and short matches (≤ 8 bytes, distance ≥ 8) as two unconditional word copies, which write up to 7 bytes past the token: the next tokens overwrite them, but at a return (input used up, an error) the memory past the output must be what it was, so the bytes they clobber have to be kept and put back | `engine/cx/uncompress.cpp` | Measured upper bound (armbench, without the putting back): 10.8 → 8.4 instructions a byte on the room's models (−22%), ~30 ms per room in Azahar, ~2% of the room-making frame; the bookkeeping takes part of it | 1 day | Yes, if the clobbered bytes are restored at every return |
-| The channel's heap search (fn_801893A0: which heap of the tree holds an address, a virtual call per heap) | `engine/system` | ~1% of the room-making frame. (fn_8018978C's 2% in the spike profiles is the native NaN fill: natives have no profile scope, so their time is their caller's self time; fn_8018978C itself is a frame heap's bump allocation.) Not worth a native for now | Days | Must call the same virtuals |
+| The channel's heap search (fn_801893A0: which heap of the tree holds an address, a virtual call per heap) | `engine/system` | ~1% of the room-making frame. (fn_8018978C's 2% in the spike profiles is the native NaN fill: natives have no profile scope, so their time is their caller's self time; fn_8018978C itself is a frame heap's bump allocation.) Done in the 60 fps round after all: `lib_allocator_HeapBase_FindContainHeap` is native (`engine/system/allocator.cpp`) | Days | Must call the same virtuals |
 | `svcOutputDebugString` per log line behind a switch: ~2 ms a line in Azahar (cheap on hardware), ~400 lines in a start, which distorts every Azahar timing of loading | `platform/3ds/main.cpp` | Azahar only | Minutes | — (the user's call: the Azahar log window shows it) |
 
 ### Memory and the Old 3DS
 
 | What | Expected | Effort | Risk |
 |---|---|---|---|
-| Old 3DS memory diet: guest memory is 72 MB (MEM1 24 MB, MEM2 48 MB). Next: build cold code with `-Os` and `-fipa-icf`. The SDK's keyboard and ATOK are stubs now (above); Then the Bluetooth stack, WPAD and the HOME Button Menu (above); what nothing reaches elsewhere (app, NW4R, MSL, CNT: about 600 functions, 110 KB of PowerPC) could follow. Measured in the room (Azahar): normal heap 68.7 MB used (48 MB of it MEM2), linear 37.8 MB, code 12.7 MB: ~120 MB against the Old 3DS's 96 MB at most. | Needed to run on the Old 3DS at all | Days | Out of memory in untested scenes |
+| Old 3DS memory diet: guest memory is 72 MB (MEM1 24 MB, MEM2 48 MB). Next: build cold code with `-Os` and `-fipa-icf`. The SDK's keyboard and ATOK are stubs now (above); Then the Bluetooth stack, WPAD and the HOME Button Menu (above); what nothing reaches elsewhere (app, NW4R, MSL, CNT: about 600 functions, 110 KB of PowerPC) could follow. Measured in the room (Azahar, 2026-10-03, when MEM1 was still in the linear heap): normal heap 68.7 MB used (48 MB of it MEM2), linear 37.8 MB, code 12.7 MB: ~120 MB against the Old 3DS's 96 MB at most. On the user's New 3DS (noma.log, 2026-10-05; MEM1 in .bss since 76f0e6e): normal heap 69.9 MB used in the room (85.4 MB on Wuhu Island) of 96, linear ~10.5 MB used, the process image ~37.6 MB with its 24 MB of MEM1: ~116 MB in the room. The CIA asks for 64 MB on the Old 3DS (`platform/3ds/cia/noma.rsf` SystemMode). | Needed to run on the Old 3DS at all | Days | Out of memory in untested scenes |
 
 ### Determinism
 
@@ -249,14 +251,15 @@ main (c9dfb61): the room-making frame 1.27 s, the room shown at 19.35 s; in the 
   copied pixels out of guest memory, which the channel's own code may read.
 
 - **The GX SDK's hot calls as natives** (`engine/gx/gx_sdk.cpp`: __GXSetDirtyState and its parts,
-  the TEV color/swap setters, GXLoadTexMtxImm, GXLoadTexObjPreLoaded; unwired). Measured with
+  the TEV color/swap setters, GXLoadTexMtxImm, GXLoadTexObjPreLoaded). Measured with
   `tools/armbench/armbench.py --gxsdk`, which runs them against the decompiled functions on random
   states (FIFO bytes, `__GXData` and the return value identical, 3,000 states each): only 10–24%
   fewer ARM11 instructions a call (GXSetTevSwapModeTable 179 → 148, GXLoadTexObjPreLoaded
   480 → 394, GXLoadTexMtxImm 373 → 339). The work is the bytes into the write-gather buffer and the
   `__GXData` updates, which the decompiled code already does inline; the profile build overstates
   such small functions (its shadow stack costs as much as their bodies). About 1% of core 0: not
-  worth a decompile run. Batching a call's commands in a local buffer was slower still (an extra
+  worth a decompile run on its own. (They were wired after all in the 60 fps round, 616c4f0 and
+  562e107: 22 calls patched, the decompiled ones kept as `*_orig` for armbench --gxsdk.) Batching a call's commands in a local buffer was slower still (an extra
   copy and newlib's generic `memcpy`).
 
 - **Faster CPU transform (`xform.cpp`: one reciprocal for s/t/q, ×1/255).** The transform runs in

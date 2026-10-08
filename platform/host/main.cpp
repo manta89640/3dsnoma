@@ -6,6 +6,7 @@
 #include <csignal>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -41,6 +42,11 @@ void hw_init();
 
 static FILE* s_log;
 static auto s_t0 = std::chrono::steady_clock::now();
+// NOMA_SELFTEST: the result lines that said a test failed or was skipped (each test ends on a line
+// "selftest NAME: ... ok", "... MISMATCH" or "... FAILED"; "skipped" when its data isn't there),
+// so the process can exit 1 when one failed
+static bool s_selftest;
+static int s_selftest_failed, s_selftest_skipped;
 
 void platform_log_idle() {}  // (every line is written at once)
 
@@ -54,6 +60,12 @@ void log(const char* fmt, ...) {
     static std::mutex s_lock;  // (the GPU's thread logs too)
     std::lock_guard<std::mutex> lock(s_lock);
     fprintf(stderr, "[%8.3f] %s\n", t, buf);
+    if (s_selftest && !strncmp(buf, "selftest ", 9)) {
+        if (strstr(buf, "MISMATCH") || strstr(buf, "FAILED"))
+            s_selftest_failed++;
+        else if (strstr(buf, "skipped"))
+            s_selftest_skipped++;
+    }
     if (s_log) {
         fprintf(s_log, "[%8.3f] %s\n", t, buf);
         fflush(s_log);
@@ -334,6 +346,57 @@ static HostRenderer s_renderer;
 // native draws (the native g3d's World) into the same EFB, at their place in the GX stream
 static engine::g3d::SoftBackend s_native_backend;
 
+// NOMA_DUMP_3DS=1 (with NOMA_DUMP_FRAMES): each saved frame also as the 3DS's two screens,
+// frames/NNNNN_3ds.png, 400x480: the top screen above, the frame as gx_pica.cpp maps it (the whole
+// 640x456 onto 400x240, each pixel the mean of the frame's pixels under it: the 3DS draws at
+// 400x240 itself, so its edges and text come out sharper or more broken up than here), and the
+// bottom screen below it, 320x240 between 40-pixel margins. The bottom screen holds no picture of
+// its own yet (on the 3DS: the log console): it shows the input, the touch as a filled square and
+// the pointer the touch screen makes of it as a cross, and the top screen the pointer where
+// platform/3ds/main.cpp's mapping puts it (a cross), so a script's touches can be seen to land.
+static void dump_3ds_screens(const char* path, const u32* rgba, u32 w, u32 h) {
+    const u32 W = 400, H = 480, TOP = 240, BX = 40, BY = 240, BW = 320, BH = 240;
+    std::vector<u32> out(W * H, 0xFF181818u);  // (0xAABBGGRR as write_png takes it: dark grey)
+    for (u32 y = 0; y < TOP; y++) {
+        const u32 y0 = y * h / TOP, y1 = std::max(y0 + 1, (y + 1) * h / TOP);
+        for (u32 x = 0; x < W; x++) {
+            const u32 x0 = x * w / W, x1 = std::max(x0 + 1, (x + 1) * w / W);
+            u32 sum[4] = {0, 0, 0, 0}, n = 0;
+            for (u32 sy = y0; sy < y1 && sy < h; sy++)
+                for (u32 sx = x0; sx < x1 && sx < w; sx++, n++)
+                    for (int k = 0; k < 4; k++)
+                        sum[k] += rgba[sy * w + sx] >> (8 * k) & 0xFF;
+            u32 p = 0;
+            for (int k = 0; k < 4; k++)
+                p |= (n ? sum[k] / n : 0) << (8 * k);
+            out[y * W + x] = p | 0xFF000000u;
+        }
+    }
+    for (u32 y = 0; y < BH; y++)
+        for (u32 x = 0; x < BW; x++)
+            out[(BY + y) * W + BX + x] = 0xFF303030u;
+    auto dot = [&](int cx, int cy, int r, u32 c, bool filled) {
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                if (!filled && dx && dy)
+                    continue;
+                const int x = cx + dx, y = cy + dy;
+                if (x >= 0 && y >= 0 && x < (int)W && y < (int)H)
+                    out[y * W + x] = c;
+            }
+    };
+    const WiimoteInput& in = wiimote_input();
+    if (in.touching)
+        dot(BX + in.touch_x, BY + in.touch_y, 3, 0xFF00C0FFu, true);  // (orange)
+    if (in.pointing) {
+        const int px = (int)((in.x + 1) * 160), py = (int)((in.y + 1) * 120);
+        dot(BX + px, BY + py, 6, 0xFFFFFF00u, false);                                      // (cyan)
+        dot((int)((in.x + 1) * 200), (int)((in.y + 1) * 120), 6, 0xFFFFFF00u, false);  // its place on the top
+    }
+    if (write_png(path, out.data(), W, H))
+        log("frame -> %s (the 3DS's screens)", path);
+}
+
 // NOMA_DUMP_FRAMES=N: every Nth displayed frame goes to frames/NNNNN.png; NOMA_DUMP_FROM=F: none
 // drawn before displayed frame F (a run that only needs a later screen gets there at the game's
 // own speed; textures the game drew into before then, Mii faces, stay blank)
@@ -360,6 +423,11 @@ void platform_present(u32 xfb) {
     snprintf(path, sizeof(path), "frames/%05u.png", n);
     if (write_png(path, rgba.data(), c.width, c.height))
         log("frame %u -> %s (xfb %08X, %ux%u)", n, path, xfb, c.width, c.height);
+    static const bool s_3ds = getenv("NOMA_DUMP_3DS") != nullptr;
+    if (s_3ds) {
+        snprintf(path, sizeof(path), "frames/%05u_3ds.png", n);
+        dump_3ds_screens(path, rgba.data(), c.width, c.height);
+    }
 }
 
 }  // namespace guest
@@ -418,8 +486,14 @@ int main(int argc, char** argv) {
         return 1;
     }
     guest::setup_low_memory(0x00010001, 0x4843494A);  // HCIJ
-    if (const char* t = getenv("NOMA_SELFTEST"))
-        return guest::run_selftest(t) ? 0 : 2;
+    if (const char* t = getenv("NOMA_SELFTEST")) {
+        // exit 0: every test passed (or was skipped for want of its data); 1: one failed; 2: no such test
+        guest::s_selftest = true;
+        if (!guest::run_selftest(t))
+            return 2;
+        guest::log("selftests: %d failed, %d skipped", guest::s_selftest_failed, guest::s_selftest_skipped);
+        return guest::s_selftest_failed ? 1 : 0;
+    }
     guest::ios_init(data + "/nand", data + "/content");
     guest::hw_init();
     if (!getenv("NOMA_NO_RENDER")) {

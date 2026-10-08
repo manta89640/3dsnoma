@@ -110,6 +110,8 @@ const std::string& data_dir();
 // the native heap's and the GPU-visible (linear) memory's free bytes, for logs; false where the
 // platform doesn't count them (the host)
 bool platform_native_memory(u32* heap_free, u32* linear_free);
+// 3DS: NOMA_SHOT_EVERY's picture of the bottom screen, beside the top's (shots/NNNNN_bottom.bmp)
+void platform_save_bottom_shot(u32 n);
 // a wake-up between host threads: one waiting thread wakes per signal (or at the timeout)
 struct HostSignal;
 HostSignal* platform_signal_new();

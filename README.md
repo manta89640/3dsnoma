@@ -19,10 +19,14 @@ decompiled sources, assembly, extracted files) stays out of git.
 
 ## Status
 
-- The whole program decompiles and compiles (30,562 functions, none failing; stubs: the MetroTRK
-  debugger, the RSO linker, and Flash and MobiClip's 4,909 functions). Library code is checked against reference vectors (`NOMA_SELFTEST=all`:
-  libm, printf, strtol/strtod, 64-bit arithmetic, AES, calendar, the Mii database CRC, the
-  paired-single matrix library).
+- The whole program decompiles and compiles (35,941 functions at the last decompile run: 27,492
+  decompiled, none failing, 285 native; 8,164 stubs: the MetroTRK debugger, the RSO linker, Flash
+  and MobiClip, the SDK's keyboard and ATOK, and what nothing reaches any more of the Wii Remote's
+  Bluetooth stack, WPAD, the HOME Button Menu and the USB keyboard). Library code is checked against
+  reference vectors and the natives against the code they replace (`NOMA_SELFTEST=all`: libm,
+  printf, strtol/strtod, 64-bit arithmetic, AES, calendar, the Mii database, the paired-single
+  matrix library, the AX voices, CX, the heap fill, CRC, the stack scan, EFB copies, textures, the
+  native g3d; see the table below).
 - Host and 3DS (tested in Azahar) both: boot through the SDK, show the
   loading animation, play the channel's sound (the AX voices mixed natively,
   `engine/audio/ax_render.cpp`; streamed through ndsp on the 3DS), take the Wii Remote pointer
@@ -36,41 +40,49 @@ decompiled sources, assembly, extracted files) stays out of git.
   channel's own "can't connect" message (Shopping, a video sample: error 50220). Online, WiiLink's server answers
   the WAD this was developed on with error 354607 (its patch predates the server's current
   User-Agent check).
-- The first start's setup runs from the welcome through the Mii, profile, family and video
-  settings into the room (LivingRoomScene), its tutorial and menus (host; the 3DS reaches the room
-  too, slowly). The console clock is the host's local time: the room shows today's date.
-- Miis: on the 3DS the system Mii Selector runs at the first start (or with SELECT held), and
-  the chosen Mii goes into the Wii Mii database the channel's face library reads.
+- The first start's setup runs from the welcome through the Mii, profile and family into the room
+  (LivingRoomScene), its tutorial and menus; the video settings step (streaming quality) is left
+  out (`runtime/patches/wii_parts.cpp`). The console clock is the host's local time: the room shows today's date.
+- Miis: on the 3DS the Miis of the system's Mii Maker database (`CFL_DB.dat`) are synced into
+  the Wii Mii database the channel's face library reads, at every start (`runtime/mii.cpp`; parts
+  the Wii doesn't have become the nearest Wii ones). Where that database can't be read, the
+  system Mii Selector runs when there is no Mii database yet, or with SELECT held, and the chosen
+  Mii goes in.
 - EFB copies to textures work on the 3DS GPU too (the render target is read back mid-frame);
   `NOMA_EFB_COPY_TEST=N` in env.txt checks the path on frame N.
-- 3DS textures take the smallest PICA format that holds them exactly (fonts as LA4: a quarter of
-  RGBA8), and under memory pressure the least recently used ones make room; guest memory fills most
-  of the linear heap. Every 600 frames the log reports textures, memory and vertices.
+- 3DS textures take the smallest PICA format that holds them exactly (the fonts' glyph sheets as
+  L4: an eighth of RGBA8), and under memory pressure the least recently used ones make room; MEM1
+  is part of the program's own memory, MEM2 is in the normal heap (the linear heap only if 64 MB of
+  it is free). Every 600 frames the log reports textures, memory and vertices.
 - The engine: native 3DS code is replacing the program's SDK and library functions, hot paths
   first (`engine/`): the OS's interrupt control, clock and mutexes, CodeWarrior's 64-bit helpers,
   CX decompression, the MTX/VEC/QUAT library and nw4r::math, MSL's sqrt/floor/ceil, nw4r::snd's
-  voices, channels and sequencer, nw4r::lyt's animation curves and pane matrices, nw4r::ut's glyph
-  lookup. The AX voices play on the 3DS's DSP (`engine/audio`; looped DSP-ADPCM is decoded to PCM16
-  once, as the 3DS's DSP can't start a loop inside an ADPCM frame), and the Wii's HOME Button Menu
-  is not part of the port (`engine/system`).
+  voices, channels and sequencer, nw4r::lyt's animation curves, pane matrices, quads, material
+  set-up and line measuring, nw4r::ut's glyph lookup, the GX library's hottest calls, nw4r::g3d's
+  model draws (`engine/g3d/live_draw.cpp`), the heap fill and search, the CRC and the stack scan
+  (the list: `tools/decomp/decompile.py` NATIVE_NAMES and PATCHED_NAMES; what they gained:
+  `docs/optimisations.md`). The AX voices are mixed by native code (`engine/audio/ax_render.cpp`)
+  and the 3DS's DSP plays the mix, and the Wii's HOME Button Menu is not part of the port
+  (`engine/system`).
 - Speed: the decompiled code is unoptimised and the 3DS is slow for it. The channel's sound
   thread (priority 4, woken every 3 ms AX frame) can't finish a frame in time there, so the
   audio DMA holds the next frame back while threads above the main thread's priority have used
   more than half the time since the last one: audio plays late instead of starving the game
-  (`NOMA_AUDIO_GUARD=0` turns this off); with the voices on the 3DS's DSP, frames the CPU took late
-  are made up for (up to 100 ms), as they set the music's tempo. On the 3DS the GPU has a thread
+  (`NOMA_AUDIO_GUARD=0` turns this off); AX frames the CPU took late are made up for (up to
+  100 ms), as they set the music's tempo. On the 3DS the GPU has a thread
   of its own on another core (`runtime/hw/gx/fifo.cpp`): it decodes the command stream and draws
   while the main thread runs the guest. On a real New 3DS the AX frames are also mixed on a core
-  of their own (the system core), and Wuhu Island's World makes its frame on the third core beside
+  of their own (the system core; given up for mixing on the game's thread when the game waits for
+  it longer than the mixing takes, and tried again 30 s later), and Wuhu Island's World makes its frame on the third core beside
   the GPU's thread (`platform/3ds/main.cpp` has the layout; `NOMA_CORES` below). The bottom screen's
   status area shows, once a second, the game's frames a second, then milliseconds a frame: the
   game's CPU time (its thread, less its waits), its waits, the GPU's drawing time; below it the AX
   mixing's milliseconds a frame and its core (`c0`: the game's own; on a thread, `w`: the game's
-  waits for it) and the heap in use of its size in MB. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
+  waits for it) and the heap in use of its size in MB; the log gets the same every 10 s
+  (`NOMA_STATUS_LOG`), as `status:` lines. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
   where the time goes every `NOMA_PROFILE=seconds`: per guest thread, and per function (self
   and total), with the runtime's own work as `(gx)`, `(ax)`, `(ios)`, `(devices)`, `(idle)`.
-- Not yet: the speed work itself
-  (next step), and the channel's dynamically linked Opera
+- Not yet: the channel's dynamically linked Opera
   browser module (`wwwlib-rvl.lz7`, an RSO module with ~4.8 MB of PowerPC code, linked through
   `rso/douga.sel`): the RSO linker is stubbed, so whatever the channel shows with the browser
   won't work until that module is decompiled too.
@@ -135,7 +147,7 @@ Useful environment variables:
 | --- | --- |
 | `NOMA_DUMP_FRAMES=N` | write every Nth displayed frame to `frames/NNNNN.png` |
 | `NOMA_DUMP_FROM=F` | draw nothing before displayed frame F (with `NOMA_DUMP_FRAMES`: a later screen reached at the game's own speed) |
-| `NOMA_INPUT="3:A,6:A+B:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does); buttons are `A B 1 2 + - H` and the D-pad's `U D L R`, and the 3DS's own `[L] [R] [ZL] [ZR]` (`5:[L]:2`); for native scenes (the island), `S(x;y)` tilts the stick (the circle pad in stick mode; -1..1, y up) and `C(x;y)` the camera stick (the C-stick), for the event's seconds when given (`4:S(0;1):2.5` walks forward 2.5 s), else until the next `S` (`C`); `S(0;0)` lets go |
+| `NOMA_INPUT="3:A,6:AB:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does); buttons, written together, are `A B 1 2 + - H` and the D-pad's `U D L R` (`+` is the PLUS button, not a separator: `A+B` holds A, PLUS and B), the 3DS's own `[L] [R] [ZL] [ZR]` (`5:[L]:2`), and the 3DS's names for the others as the platform maps them, `[X]` (1), `[Y]` (2), `[START]` (+), `[SELECT]` (−); `T(x;y)` touches the bottom screen at pixel x, y (0..319, 0..239) for the event's seconds (a tap: 0.15 s), moving the pointer as the touch screen does, and `T(x0;y0;x1;y1)` drags over them; for native scenes (the island), `S(x;y)` tilts the stick (the circle pad in stick mode; -1..1, y up) and `C(x;y)` the camera stick (the C-stick), for the event's seconds when given (`4:S(0;1):2.5` walks forward 2.5 s), else until the next `S` (`C`); `S(0;0)` lets go |
 | `NOMA_DEBUG_MSG=1` | log each text (BMG message) the game asks for, the first time, with its id and the game time: the screens a run went through, without frames |
 | `NOMA_OFFLINE=0` | go online (the default is offline: no network, online steps skipped) |
 | `NOMA_PROFILE=seconds` | profiling builds (`-DNOMA_PROFILE_CALLS=ON`): where the time goes; `NOMA_PROFILE_TOP=N` lines per list, `NOMA_PROFILE_UNDER=name` also ranks what runs below that function |
@@ -153,7 +165,7 @@ Useful environment variables:
 | `NOMA_TRACE_BT=name,addr` | trace builds: the host stack (the guest's call chain) whenever those functions are entered |
 | `NOMA_TRACE_OPEN=/dev/...` | print the last traced calls when the guest opens that IOS path (trace builds) |
 | `NOMA_DUMP_MEM=1`, `NOMA_DUMP_MEM_OPEN=/dev/...` | write MEM1/MEM2 to `mem1.bin`/`mem2.bin` on exit, or whenever the guest opens that path |
-| `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `efb`, `tex`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host) |
+| `NOMA_SELFTEST=all` (or `aes`, `printf`, `math`, `strtol`, `int64`, `time`, `rfl`, `mtx`, `ax`, `cx`, `fill`, `crc`, `stack`, `efb`, `tex`, `g3d`, `g3drender`, `input`) | run decompiled library code on reference vectors, and the natives against the code they replace, then exit (host): 0 when every test passed or was skipped for want of its data, 1 when one failed (its line says MISMATCH or FAILED), 2 for an unknown test; the last line counts them |
 | `NOMA_SELFTEST=walk` with `NOMA_KCL_DIR=.../StageArc.carc/Island` | Wuhu Island's collision, walking and camera on Wii Sports Resort's own collision files (from your extraction): scripted walks (a wall, the fountain, the volcano trail, a tree, the shore, the edge of a drop too deep to take, a ledge low enough to drop from, a slope too steep to stand on from above and from on it, the suspension bridge, a tapped and a held jump, a run out to sea and a swim back to the shore) and 25 minutes of random walking and swimming at two Mii sizes, every tick checked (on the ground, in no wall, no deep water unless swimming, a swimmer at a water surface with no land over it, the camera's view clear), and the queries timed; `NOMA_KCL_GROUND=dir` also checks the ground against research rasters, `NOMA_KCL_TRUNKS=file.csv` adds tree trunks, `NOMA_WALK_TRAIL=file.csv` the volcano trail's waypoints, `NOMA_WALK_K` / `NOMA_WALK_K2` set the Mii's scale (10 and 9), `NOMA_WALK_OUT=dir` writes the paths (`tools/wuhu/plot_walks.py` draws them) (host) |
 | `NOMA_SELFTEST=vehicles` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | Wuhu Island's cars and boats (`engine/wuhu/vehicles.h`) on the staged package and its collision: each taken and driven (ahead, ahead steering, back), every tick checked (a car on drivable ground, a boat on deep water with no land over it, no new overlap with another vehicle), and a way out beside each (host) |
 | `NOMA_SELFTEST=g3drender` with `NOMA_G3D_PACKAGE=.../wuhu/island.ng3d` | the host's software backend for native draws (`engine/g3d/soft_backend`): its depth against the GX path's on random triangles (f32 positions, then compact ones), then each `view_*` camera of the package drawn (both passes, under the GX state of a 640x456 frame) to `NOMA_G3D_OUT` (PNGs; default `g3drender`), timed, checked through the GX stream, compared with `tools/g3d/preview_views.py`'s renders of the same cameras when `NOMA_G3D_REF` names their directory (PSNR, pixels off, a difference picture), and the overlays drawn again under a range of depth biases (`NOMA_G3D_FOV`, `NOMA_G3D_FRAME`, `NOMA_G3D_VIEWS`; the shadow map `NOMA_G3D_SHADOW_MAP` texels a side about each view's target, 512 by default, 0 none; `NOMA_G3D_CAMERA=ex,ey,ez,tx,ty,tz` puts the views' camera elsewhere) (host) |
@@ -172,10 +184,14 @@ Useful environment variables:
 | `NOMA_CORES=single`, `=multi` | 3DS: where the work beside the game runs. Unset, on a real New 3DS the AX mixing has a thread on the system core (a `.3dsx`: on the third core) and Wuhu Island's World makes its frame on the third core (`NOMA_JOB_INLINE=1`: not that); in an emulator (Azahar, Citra: recognised) and on an Old 3DS both stay on the game's thread, as Azahar runs the cores one after another. `single`: on the game's thread anywhere; `multi`: on their threads on any New 3DS, an emulator's too (an Old 3DS has no third core for them), and on the host (to test those paths). The GPU's thread is the same in all |
 | `NOMA_AX_THREAD=0`, `=1`, `=2` | 3DS: the AX mixing on the game's thread, or on a thread of its own on core 1 (the system core) or 2, whatever `NOMA_CORES` says; with a thread the program doesn't give it up for mixing on the game's thread when the game waits for it longer than the mixing takes (unset, it does) (host: any value but 0 gives it a thread) |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
+| `NOMA_STATUS_LOG=s` | 3DS: the bottom screen's status numbers written to the log every `s` seconds (default 10; `0`: never), averaged over them: `status:` lines with frames a second, the CPU's and the waits' milliseconds a frame, the GPU's last frame, the AX mixing and its core, the heap |
+| `NOMA_OLD3DS=1` | an Old 3DS's controls anywhere (no ZL, ZR or C-stick, also for host scripts) and, on a New 3DS, its layout and clock: the GPU's thread on the system core, nothing on the third core, 268 MHz without the L2 cache, CMPR textures as ETC1 (as near as a New 3DS comes to an Old one; not its memory) |
+| `NOMA_DUMP_3DS=1` | host, with `NOMA_DUMP_FRAMES`: each saved frame also as the 3DS's two screens, `frames/NNNNN_3ds.png` (400x480): the frame on the top screen as the 3DS maps it, and the bottom screen with the touch (a filled square) and the pointer (crosses, on both screens) |
 
 On the 3DS, the same switches go in `sdmc:/3ds/noma/env.txt` as `KEY=VALUE` lines (including
 `NOMA_INPUT`, for unattended runs in an emulator); there `NOMA_SHOT_EVERY=N` also saves every
-Nth frame as a BMP in `sdmc:/3ds/noma/shots`.
+Nth frame as BMPs in `sdmc:/3ds/noma/shots`: the top screen as `NNNNN.bmp`, the bottom screen
+beside it as `NNNNN_bottom.bmp`.
 
 ## Controls on the 3DS
 
@@ -197,7 +213,9 @@ and wades or climbs out where the shore allows. Near a parked car or a boat at a
 the water too), X (the Wii Remote's 1) gets in and out again; in it the circle pad's up and down
 speed up and back, its left and right steer. The C-stick (New 3DS) or L and R turn the camera round
 the Mii, the D-pad tilts the camera or brings it in and out, and Y brings it round behind the Mii;
-touch, START and B work the Home tab and the window that asks about going back.
+START, B or the Home tab (touch) open the exploration menu (部屋にもどる / ワープ / 探検をつづける:
+the D-pad and A, or touch; START closes it), whose ワープ lists the places to go, and B backs
+out of each.
 
 ## The Sound Player
 

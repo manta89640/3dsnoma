@@ -3,7 +3,7 @@
 
     tools/decomp/decompile.py [--jobs N] [--only FILTER]
 
-Inputs (made by tools/setup_decomp.sh): config/HCIJ/symbols.txt, dtk's assembly in
+Inputs (README "Building", step 2): config/HCIJ/symbols.txt, dtk's assembly in
 build/HCIJ/asm, the inferred prototypes in build/sig/prototypes.txt.
 Outputs in build/decomp:
   src/<object>.cpp     decompiled functions, one file per dtk object

@@ -1,7 +1,8 @@
-# makerom settings for the installable (CIA) build: tools/make_cia.sh
+# makerom settings for the installable (CIA) build: platform/3ds/package.sh
 # Same settings as the Jak 1 port's CIA, which is known to start on the user's New 3DS.
 # An installed title gets its own memory mode: 178 MB on New 3DS (SystemModeExt), which the
-# port needs (the Wii's 24 MB MEM1 + part of MEM2 as guest memory, the recompiled code, the GPU).
+# port needs (the Wii's 24 MB MEM1 + 48 MB MEM2 as guest memory, ~12 MB of code, the GPU's buffers:
+# ~116 MB in the room). SystemMode (the Old 3DS's) is 64 MB, too little for that.
 
 BasicInfo:
   Title                   : "Wii no Ma 3DS"

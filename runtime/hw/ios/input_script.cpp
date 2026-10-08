@@ -1,7 +1,12 @@
-// NOMA_INPUT: scripted Wii Remote input, "TIME:BUTTONS[:SECONDS],..." -- e.g. "3:A,6.5:A+B:1"
-// presses A at 3 s and A+B for one second at 6.5 s (a press lasts 0.15 s by default).
-// Buttons: A B 1 2 + - H(ome) U D L R (U D L R: the D-pad), and the 3DS's own [L] [R] [ZL] [ZR]
-// (shoulder buttons, which only native scenes read: "5:[L]:2" holds L for 2 s);
+// NOMA_INPUT: scripted Wii Remote input, "TIME:BUTTONS[:SECONDS],..." -- e.g. "3:A,6.5:AB:1"
+// presses A at 3 s and A and B together for one second at 6.5 s (a press lasts 0.15 s by default).
+// Buttons, written together: A B 1 2 + - H(ome) U D L R (U D L R: the D-pad; "+" is the PLUS
+// button, not a separator: "A+B" holds A, PLUS and B), and the 3DS's own [L] [R] [ZL] [ZR]
+// (shoulder buttons, which only native scenes read: "5:[L]:2" holds L for 2 s); the 3DS's names
+// for the others, as the platform maps them: [X] (= 1), [Y] (= 2), [START] (= +), [SELECT] (= -).
+// "T(x;y)" touches the bottom screen at pixel x, y (0..319, 0..239) for the event's seconds (a tap:
+// 0.15 s), and the pointer goes where the touch points, as the 3DS's own touch moves it;
+// "T(x0;y0;x1;y1)" drags from x0, y0 to x1, y1 over the event's seconds;
 // "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
 // would: the platform's own input (the touch screen, the circle pad) moves it on; "P(off)" takes it
 // off the screen (a remote pointed away, or the 3DS's pointer left alone) until the next P(x;y);
@@ -41,6 +46,8 @@ struct ScriptEvent {
     float x, y;
     bool after_message;  // t counts from the first time the game asked for message `message`
     u32 message;
+    bool touch;          // a T event: from x, y to x1, y1 (bottom-screen pixels) over len
+    float x1, y1;
 };
 
 std::unordered_set<u32> s_awaited;            // the messages the script counts from
@@ -63,7 +70,7 @@ const std::vector<ScriptEvent>& script() {
             q = sc.size();
         std::string item = sc.substr(p, q - p);
         p = q + 1;
-        ScriptEvent ev{0, 0.15, 0, 0, false, false, false, STICK_NONE, false, 0, 0, false, 0};
+        ScriptEvent ev{0, 0.15, 0, 0, false, false, false, STICK_NONE, false, 0, 0, false, 0, false, 0, 0};
         size_t c1 = item.find(':');
         if (c1 == std::string::npos)
             continue;
@@ -88,6 +95,10 @@ const std::vector<ScriptEvent>& script() {
             ev.stick = what[0] == 'S' ? STICK_MOVE : STICK_CAMERA;
             ev.until_next = !timed;
             sscanf(what.c_str() + 1, "(%f;%f)", &ev.x, &ev.y);
+        } else if (what.size() > 1 && what[0] == 'T' && what[1] == '(') {
+            ev.touch = true;
+            if (sscanf(what.c_str(), "T(%f;%f;%f;%f)", &ev.x, &ev.y, &ev.x1, &ev.y1) != 4)
+                ev.x1 = ev.x, ev.y1 = ev.y;
         } else if (what == "OFF") {
             ev.power = true;
         } else if (what == "P(off)") {
@@ -107,6 +118,10 @@ const std::vector<ScriptEvent>& script() {
                     if (name == "R") ev.pad |= PAD_R;
                     if (name == "ZL") ev.pad |= PAD_ZL;
                     if (name == "ZR") ev.pad |= PAD_ZR;
+                    if (name == "X") ev.buttons |= WM_ONE;
+                    if (name == "Y") ev.buttons |= WM_TWO;
+                    if (name == "START") ev.buttons |= WM_PLUS;
+                    if (name == "SELECT") ev.buttons |= WM_MINUS;
                     i = close;
                     continue;
                 }
@@ -197,7 +212,18 @@ void input_script_apply(WiimoteInput& in) {
                 continue;
             at += m->second;
         }
-        if (ev.stick) {
+        if (ev.touch) {
+            if (t >= at && t < at + ev.len) {
+                const float f = ev.len > 0 ? (float)((t - at) / ev.len) : 0.0f;
+                float px = ev.x + (ev.x1 - ev.x) * f, py = ev.y + (ev.y1 - ev.y) * f;
+                px = px < 0 ? 0 : px > 319 ? 319 : px;
+                py = py < 0 ? 0 : py > 239 ? 239 : py;
+                in.touching = true;
+                in.touch_x = (u16)px, in.touch_y = (u16)py;
+                in.x = px / 160.0f - 1.0f, in.y = py / 120.0f - 1.0f;  // (as platform/3ds/main.cpp's touch)
+                s_off = false;
+            }
+        } else if (ev.stick) {
             if (t >= at && (!stick[ev.stick] || at >= stick_at[ev.stick]))
                 stick[ev.stick] = &ev, stick_at[ev.stick] = at;
         } else if (ev.power) {

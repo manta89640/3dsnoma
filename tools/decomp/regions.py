@@ -1,7 +1,7 @@
 """Which code is decompiled, which is replaced by native 3DS code, which is stubbed.
 
 Addresses are text ranges of main.dol (HCIJ v1025). The library anchors come from each
-library's version-string registration (see docs/library_map.md).
+library's version-string registration in the DOL.
 """
 
 # (start, end, name, treatment)   treatment: decomp | native | stub | dead

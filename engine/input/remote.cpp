@@ -8,6 +8,7 @@
 #include "engine/input/remote.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace guest {
@@ -17,7 +18,24 @@ WiimoteInput s_in;  // set by the platform layer
 bool s_stick_mode;  // set by a native scene
 }
 
-void wiimote_set_input(const WiimoteInput& in) { s_in = in; }
+// NOMA_OLD3DS=1: an Old 3DS's controls on any machine (a New 3DS, an emulator, the host's scripts):
+// no ZL, ZR or C-stick, which an Old 3DS doesn't have (libctru starts the New 3DS's irrst only on
+// one), so what needs them shows without them
+bool input_old3ds() {
+    static const bool s_old = [] {
+        const char* e = getenv("NOMA_OLD3DS");
+        return e && *e && strcmp(e, "0");
+    }();
+    return s_old;
+}
+
+void wiimote_set_input(const WiimoteInput& in) {
+    s_in = in;
+    if (input_old3ds()) {
+        s_in.pad &= ~(PAD_ZL | PAD_ZR);
+        s_in.cam_x = s_in.cam_y = 0;
+    }
+}
 const WiimoteInput& wiimote_input() { return s_in; }
 void input_set_stick_mode(bool on) { s_stick_mode = on; }
 bool input_stick_mode() { return s_stick_mode; }

@@ -641,20 +641,26 @@ void timing(const World& w, f32 k) {
 
 }  // namespace
 
-// NOMA_SELFTEST=input: NOMA_INPUT's stick, camera stick and 3DS-button tokens (and the old ones beside
-// them), read at game time 0 (before the game starts, so every event here starts at 0)
+// NOMA_SELFTEST=input: NOMA_INPUT's stick, camera stick, touch and 3DS-button tokens (and the old ones
+// beside them), read at game time 0 (before the game starts, so every event here starts at 0)
 void selftest_input() {
-    setenv("NOMA_INPUT", "0:A+[L][ZR]:1,0:S(0.5;-1):0,0:S(0.25;0.75),0:C(1;-0.5):2,5:B,0:P(0.2;-0.1),0:2", 1);
+    setenv("NOMA_INPUT",
+           "0:A+[L][ZR]:1,0:[X][SELECT],0:S(0.5;-1):0,0:S(0.25;0.75),0:C(1;-0.5):2,5:B,0:T(80;60;240;180):1,"
+           "0:P(0.2;-0.1),0:2,3:T(10;10)",
+           1);
     WiimoteInput in;
     in.buttons = in.pad = 0;
     in.stick_x = in.stick_y = in.cam_x = in.cam_y = 9;  // (left alone by the script: it must set them)
     input_script_apply(in);
-    // A, + and 2 held (B starts at 5 s), L and ZR, the second S (the first, at the same time, is over
-    // at once: 0 seconds), the camera stick held for 2 s, the pointer moved
-    bool ok = in.buttons == (WM_A | WM_PLUS | WM_TWO) && in.pad == (PAD_L | PAD_ZR) && in.stick_x == 0.25f &&
-              in.stick_y == 0.75f && in.cam_x == 1.0f && in.cam_y == -0.5f && in.x == 0.2f && in.y == -0.1f;
-    log("selftest input: buttons %04X pad %X stick (%g, %g) camera (%g, %g) pointer (%g, %g): %s", in.buttons, in.pad,
-        in.stick_x, in.stick_y, in.cam_x, in.cam_y, in.x, in.y, ok ? "ok" : "MISMATCH");
+    // A, + and 2 held, X (= 1) and SELECT (= -) (B starts at 5 s), L and ZR, the second S (the first,
+    // at the same time, is over at once: 0 seconds), the camera stick held for 2 s, the drag's touch at
+    // its start (the tap at 3 s not yet), the pointer moved by P (after the touch in the script)
+    bool ok = in.buttons == (WM_A | WM_PLUS | WM_TWO | WM_ONE | WM_MINUS) && in.pad == (PAD_L | PAD_ZR) &&
+              in.stick_x == 0.25f && in.stick_y == 0.75f && in.cam_x == 1.0f && in.cam_y == -0.5f &&
+              in.touching && in.touch_x == 80 && in.touch_y == 60 && in.x == 0.2f && in.y == -0.1f;
+    log("selftest input: buttons %04X pad %X stick (%g, %g) camera (%g, %g) touch %s(%u, %u) pointer (%g, %g): %s",
+        in.buttons, in.pad, in.stick_x, in.stick_y, in.cam_x, in.cam_y, in.touching ? "" : "off ", in.touch_x,
+        in.touch_y, in.x, in.y, ok ? "ok" : "MISMATCH");
 }
 
 void selftest_walk() {
