@@ -205,12 +205,13 @@ u32 controller_theater_LayoutController_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
 // never makes its buttons active again). The port's own buttons take their places, made as the
 // bar makes its others (layout_living_MoveBtn_AddTransitButton: the layout, the cursor, the bar's
 // focus group and locks, and SceneTransit::Request when pushed, which wipes the room out and asks
-// SceneTransit::Go for the scene): the Sound Player's (engine/soundplayer) with いろんな間's layout
-// in the shop's place (Loc_shopping_Btn), beside the theater's; 出発 (engine/wuhu) with the TV
-// programmes' layout (Move_Btn_Tv_Btn.lex, the bar's right end cap, its face running off the
-// screen's edge) in theirs (Loc_Tv_Btn). いろんな間's own place (Loc_ironna_Btn) stays empty. The
-// bar's opening animation raises the locators one after the other from the left, so the buttons
-// rise in their order on the screen.
+// SceneTransit::Go for the scene), both with いろんな間's layout: the Sound Player's
+// (engine/soundplayer) in the shop's place (Loc_shopping_Btn), beside the theater's, and 出発
+// (engine/wuhu) in いろんな間's (Loc_ironna_Btn). The TV programmes' button is the bar's right end
+// cap (Move_Btn_Tv_Btn.lex, its face running off the screen's edge): it stays shown, without its
+// icon and label, and inactive, so the bar still reaches the edge. The bar's opening animation
+// raises the locators one after the other from the left, so the buttons rise in their order on
+// the screen.
 // The way back (Common/Wii_Btn.lex) went to the Wii Menu, and ends the app here: its back arrow
 // stays, the "Wii" logo under it goes (Pic_Wii and its shadow Pic_Shadow; the button's animations
 // change their colours, not whether they're shown).
@@ -222,19 +223,23 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
         return;
     u32 buttons = guest::load32(r3 + 0xD04);
     auto button = [buttons](u32 i) { return guest::load32(buttons + 4 * i); };
-    for (u32 i : {SHOP, IRONNA, TV})
+    for (u32 i : {SHOP, IRONNA})
         hide(button(i));
+    layout_Button_SetActive(button(TV), 0);
+    for (const char* part : {"Pic_Icon", "Pic_Text"})
+        if (u32 pane = find_pane(button(TV), part))
+            nw4r_lyt_Pane_SetVisible(pane, 0);
     for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
         if (u32 pane = find_pane(button(BACK), logo))
             nw4r_lyt_Pane_SetVisible(pane, 0);
     // (r4 the bar's scene layout, r5 the cursor, r7 the bar's focus group; the strings are the
     // bar's own: +0x1D0 "layout/Move_Btn/Move_Btn_Ironna_Btn.lex", +0x1BC "Loc_shopping_Btn",
-    // +0x208 "layout/Move_Btn/Move_Btn_Tv_Btn.lex", +0x22C "Loc_Tv_Btn")
+    // +0x1F8 "Loc_ironna_Btn")
     const u32 strings = GA_layout_living_MoveBtn_sData;
     layout_living_MoveBtn_AddTransitButton(r3, strings + 0x1D0, r4, strings + 0x1BC, r5, r7, TO_SOUND_PLAYER);
     if (guest::load32(r3 + 0xD08) > BACK + 1)
         engine::soundplayer::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 1)));
-    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x208, r4, strings + 0x22C, r5, r7, engine::wuhu::TO_ISLAND);
+    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x1D0, r4, strings + 0x1F8, r5, r7, engine::wuhu::TO_ISLAND);
     if (guest::load32(r3 + 0xD08) > BACK + 2)
         engine::wuhu::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 2)));
 }
