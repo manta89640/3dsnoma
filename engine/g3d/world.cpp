@@ -183,6 +183,10 @@ struct World::Impl {
     std::vector<std::vector<u32>> tmtx_users;   // per TMTX record: (material << 8 | its index there)
 
     // ---- instances
+    struct NodeRot {
+        u16 node;
+        f32 r[3];  // degrees, added to its rest rotation
+    };
     struct Inst {
         Mtx34 mtx;          // model -> world
         Vec3 centre;        // bounding sphere of its model, world
@@ -197,6 +201,7 @@ struct World::Impl {
         f32 speed = 0;           // the most a node's place moved an update, between its last two poses
         Vec3 mesh_centre{0, 0, 0};  // its meshes' bounding sphere as last posed (world)
         f32 mesh_r = 0;
+        std::vector<NodeRot> rots;  // nodes of its own model turned at run time (set_instance_node_rotation)
     };
     std::vector<Inst> insts;
     // node tracks per animation, by (model, node): track indices; and per (animation, model) each
@@ -280,7 +285,8 @@ struct World::Impl {
 
     void init();
     const NodeMap* node_map(u16 anim, u16 model) const;
-    void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base);
+    void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base,
+              const std::vector<NodeRot>* rots = nullptr);
     void billboard(u16 model, u32 base);
     void pose_instance(u32 i, u16 model, f32 distance);
     int eye_cell() const;
@@ -472,7 +478,8 @@ const World::Impl::NodeMap* World::Impl::node_map(u16 anim, u16 model) const {
 
 // The world matrices of a model's nodes (into finals[base..]): at rest (the bind matrices) or posed
 // by an animation's node tracks at the current frame, under `mtx` (billboards: billboard()).
-void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base) {
+void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base,
+                       const std::vector<NodeRot>* rots) {
     const fmt::Model& m = pkg.models()[model];
     // (a model without nodes draws its batches with the matrix it is placed with)
     finals[base] = mtx;
@@ -488,19 +495,27 @@ void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u
         Mtx34 local_world;  // model space
         const NodeTracks* nt = map && k < map->of_node.size() && map->of_node[k] >= 0 ? &(*tracks)[(u32)map->of_node[k]]
                                                                                        : nullptr;
-        if (nt) {
+        const NodeRot* turn = nullptr;
+        if (rots)
+            for (const NodeRot& nr : *rots)
+                if (nr.node == k)
+                    turn = &nr;
+        if (nt || turn) {
             f32 s[3], r[3], t[3];
             memcpy(s, nd.scale, sizeof(s)), memcpy(r, nd.rotate, sizeof(r)), memcpy(t, nd.translate, sizeof(t));
-            for (u32 ti : nt->tracks) {
-                const fmt::Track& tr = pkg.tracks()[ti];
-                const f32 v = eval_track(tr, pkg.keys().data, f);
-                const u32 c = tr.target;
-                (c < 3 ? s : c < 6 ? r : t)[c % 3] = v;
-            }
+            if (nt)
+                for (u32 ti : nt->tracks) {
+                    const fmt::Track& tr = pkg.tracks()[ti];
+                    const f32 v = eval_track(tr, pkg.keys().data, f);
+                    const u32 c = tr.target;
+                    (c < 3 ? s : c < 6 ? r : t)[c % 3] = v;
+                }
+            if (turn)
+                r[0] += turn->r[0], r[1] += turn->r[1], r[2] += turn->r[2];
             const Mtx34 local = srt_matrix(s, r, t);
             local_world = nd.parent == NONE ? local : concat(finals[base + nd.parent], local);
             // (finals holds model space until the instance matrix goes on below)
-        } else if (tracks && nd.parent != NONE) {
+        } else if ((tracks || rots) && nd.parent != NONE) {
             // a node at rest under an animated parent: its rest pose relative to the parent
             const f32 s[3] = {nd.scale[0], nd.scale[1], nd.scale[2]};
             local_world = concat(finals[base + nd.parent], srt_matrix(s, nd.rotate, nd.translate));
@@ -577,7 +592,8 @@ void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
         if (track)
             for (u32 k = 0; k < nn; k++)
                 was[k] = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
-        pose(model, n.mtx, n.animated ? in.anim : NONE, in.anim_offset, n.slot);
+        pose(model, n.mtx, n.animated ? in.anim : NONE, in.anim_offset, n.slot,
+             model == in.model && !n.rots.empty() ? &n.rots : nullptr);
         if (track) {
             f32 most = 0;
             for (u32 k = 0; k < nn; k++)
@@ -1034,6 +1050,32 @@ bool World::set_instance_transform(u32 instance, const Mtx34& matrix) {
     n.speed = 0;
     impl_->dirty = true;
     return true;
+}
+
+int World::instance_node(u32 instance, const char* name) const {
+    if (instance >= impl_->insts.size())
+        return -1;
+    const fmt::Model& m = package_.models()[package_.instances()[instance].model];
+    for (u32 k = 0; k < m.n_nodes; k++)
+        if (!std::strcmp(package_.str(package_.nodes()[m.first_node + k].name), name))
+            return (int)k;
+    return -1;
+}
+
+void World::set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]) {
+    if (instance >= impl_->insts.size())
+        return;
+    Impl::Inst& n = impl_->insts[instance];
+    auto it = std::find_if(n.rots.begin(), n.rots.end(), [&](const Impl::NodeRot& r) { return r.node == node; });
+    if (it == n.rots.end()) {
+        n.rots.push_back({node, {0, 0, 0}});
+        it = n.rots.end() - 1;
+    } else if (!std::memcmp(it->r, degrees, sizeof(it->r))) {
+        return;
+    }
+    std::memcpy(it->r, degrees, sizeof(it->r));
+    n.posed_model = NONE;  // (posed again when next drawn)
+    impl_->dirty = true;
 }
 
 void World::set_lod_scale(f32 scale) {

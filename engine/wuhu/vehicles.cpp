@@ -24,6 +24,10 @@ constexpr f32 STICK_DEAD = 0.12f;
 constexpr f32 CAR_STEP = 0.3f;      // of its height: the most its corners climb or drop at once
 constexpr f32 CAR_SLOPE_NY = 0.76f;  // the steepest ground it drives on (40 degrees)
 constexpr f32 BOAT_DRAFT = 0.15f;    // of its height under the surface
+constexpr f32 WHEEL_RADIUS = 6.0f;   // WS2_common_car's (model units)
+constexpr f32 STEER_MAX = 28.0f;     // the front wheels' furthest turn (degrees), less with speed
+constexpr f32 STEER_EASE = 0.08f;    // seconds: how fast they follow the stick
+const char* const WHEELS[4] = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"};
 
 f32 col_length(const Mtx34& m, int c) {
     return std::sqrt(m.m[0][c] * m.m[0][c] + m.m[1][c] * m.m[1][c] + m.m[2][c] * m.m[2][c]);
@@ -73,6 +77,8 @@ Vehicles::Vehicles(engine::g3d::World& world, const engine::g3d::Package& packag
         std::copy(m.bbox, m.bbox + 6, v.bbox);
         const Mtx34 t = world_.instance_transform(i);
         v.scale = {col_length(t, 0), col_length(t, 1), col_length(t, 2)};
+        for (int w = 0; w < 4; w++)
+            v.wheels[w] = v.boat ? -1 : world_.instance_node(i, WHEELS[w]);
         list_.push_back(v);
     }
 }
@@ -129,6 +135,7 @@ void Vehicles::enter(u32 v) {
     driven_ = v < list_.size() ? v : NONE;
     speed_ = 0;
     slope_f_ = slope_s_ = 0;
+    steer_ = 0;
     if (driven_ == NONE)
         return;
     const Obstacle o = box(v);
@@ -329,6 +336,25 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
     }
     if (moved)
         world_.set_instance_transform(v.instance, m);
+    if (!v.boat) {
+        // (how far it went along its facing, back negative)
+        const f32 rolled = (origin.x - old.m[0][3]) * fwd.x + (origin.z - old.m[2][3]) * fwd.z;
+        turn_wheels(v, rolled, steer, dt);
+    }
+}
+
+// a car's wheels: rolled about their axle by the distance (forward: the top toward +z, +x turns),
+// the front pair steered after the stick (right: toward -x, -y turns), less at speed
+void Vehicles::turn_wheels(const Vehicle& v, f32 rolled, f32 steer, f32 dt) {
+    if (v.wheels[0] < 0)
+        return;
+    roll_ = std::fmod(roll_ + rolled / (WHEEL_RADIUS * v.scale.z) / DEG, 360.0f);
+    const f32 target = -steer * STEER_MAX * (1.0f - 0.4f * speed_fraction());
+    steer_ += (target - steer_) * (1.0f - std::exp(-dt / STEER_EASE));
+    for (int w = 0; w < 4; w++) {
+        const f32 r[3] = {roll_, w < 2 ? steer_ : 0.0f, 0.0f};
+        world_.set_instance_node_rotation(v.instance, (u16)v.wheels[w], r);
+    }
 }
 
 }  // namespace engine::wuhu

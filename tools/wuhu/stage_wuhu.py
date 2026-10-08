@@ -355,6 +355,27 @@ WINDMILL_DESYNC = 37.0         # frames between windmills' phases (they turn tog
 # Parked cars stay available around town; small moving props disappear at their visual thresholds.
 INSTANCE_CULL = {5: 2000.0, 7: 15000.0, 8: 15000.0, 15: 12000.0,
                  23: 2000.0, 26: 3000.0, 32: 8000.0, 33: 8000.0}
+# The car's four wheels (WS2_common_car is one node, one shape: each wheel is 24 of its 385
+# triangles, an outer and an inner face and a tread of 10 quads) cut out onto nodes of their own,
+# wheel_fl / fr / rl / rr (front +z, left +x), about their hubs, so that the island turns them (a
+# car driven: rolling by the distance, the front pair steered). A wheel: its triangles' corners all
+# within 6.05 of the hub in y and z and 9.7..14.7 out from the middle on its side.
+WHEEL_HUBS = OrderedDict([("wheel_fl", (12.214, 6.036, 14.791)), ("wheel_fr", (-12.214, 6.036, 14.791)),
+                          ("wheel_rl", (12.214, 6.036, -16.174)), ("wheel_rr", (-12.214, 6.036, -16.174))])
+WHEEL_RADIUS = 6.0
+
+
+def wheel_pick(hub):
+    def pick(T):
+        x, y, z = T[..., 0], T[..., 1], T[..., 2]
+        side = np.sign(hub[0])
+        inside = ((np.abs(y - hub[1]) <= 6.05) & (np.abs(z - hub[2]) <= 6.05) &
+                  (side * x >= 9.7) & (side * x <= 14.7))
+        return inside.all(axis=1)
+    return pick
+
+
+CAR_WHEELS = [(n, hub, wheel_pick(hub)) for n, hub in WHEEL_HUBS.items()]
 # the "static" props at level 0 only (small next to the boats and the gates)
 NEAR_STATIC = {21}
 
@@ -994,7 +1015,7 @@ class Stager:
                 path, mname = CLASSES[cls][2], CLASSES[cls][3][0]
                 r = w.brres(SA, path)
                 mi, nm = self.cv.model(r, r.models[mname], name="%s#%d" % (mname, cls) if extra_root else mname,
-                                       extra_root=extra_root)
+                                       extra_root=extra_root, split=CAR_WHEELS if mname == "WS2_common_car" else ())
                 models[(cls, extra_root)] = (r, r.models[mname], mi, nm)
             return models[(cls, extra_root)]
 

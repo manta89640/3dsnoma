@@ -385,7 +385,7 @@ class Converter:
 
     # ---------------------------------------------------------------- models
     def model(self, r, mdl, name=None, hidden=(), tex_override=None, extra_root=None, parts=(), detail=None,
-              select=None):
+              select=None, split=()):
         """A Model of `mdl`: its nodes (rest SRT, bind matrix, visibility, billboard) and a batch per
         draw (opaque list, then translucent), vertices in the space of the node they hang from.
         Draws whose visibility node is in `hidden` are left out (the node stays, invisible).
@@ -400,6 +400,11 @@ class Converter:
         map as "part/node"; a name the map already has is an error.
         detail(brres model, brres material) -> True marks a draw's batches BATCH_DETAIL; select(brres
         model, draw, triangles (n, 3, 3) in the model's space) -> which of a draw's triangles to keep.
+        split: [(name, pivot, pick)]: rigid pieces cut out of the model's own draws onto nodes of their
+        own (a car's wheels, to turn at run time): each a node under the model's root, at `pivot`
+        (model space, unrotated), taking the triangles pick((n, 3, 3) in the model's space) -> bool
+        says (the first that picks one has it), their positions about the pivot; at rest the piece is
+        where it was, lit as it was.
         Returns (model index, {node name: index within the model})."""
         pkg = self.pkg
         shift = 1 if extra_root else 0
@@ -443,6 +448,19 @@ class Converter:
             name_node(part.name, k)
             add_nodes(part.model, k + 1, k, M, part.name + "/", part.hidden)
             sources.append((part.brres, part.model, k + 1, k, M, part.hidden, part.tex_override))
+        # (under the model's own root, which an animation of the model moves: its rest SRT relative
+        # to that node's bind matrix)
+        split_nodes = []
+        Br = np.vstack([mdl.nodes[0].mtx, [0, 0, 0, 1]]) if mdl.nodes else np.eye(4)
+        for sname, pivot, _ in split:
+            k = len(pkg.nodes) - first_node
+            T = np.eye(4)
+            T[:3, 3] = np.asarray(pivot, np.float64)
+            s, rot, t = srt_of(np.linalg.inv(Br) @ T)
+            pkg.add("nodes", name=pkg.str(sname), parent=shift, flags=ng3d.NODE_VISIBLE, scale=[s] * 3, rotate=rot,
+                    translate=t, bind=[list(map(float, row)) for row in T[:3]])
+            name_node(sname, k)
+            split_nodes.append((k, T))
         n_nodes = len(pkg.nodes) - first_node
         draws = [(src, d) for lst in ("DrawOpa", "DrawXlu") for src in sources for d in src[1].draws(lst)]
         # each source's rest pose, materials and shapes, looked up by index
@@ -489,12 +507,34 @@ class Converter:
                     if not keep.any():
                         continue
                     c = {k: v[keep] for k, v in c.items()}
-                # (lit as the model stands at rest, unplaced: a moving model carries its light)
-                corners = self.prepare(corners_from(c, sm, shape), mi, Wn)
-                b = build_single_batch(self, corners, mi, own, (detail or (lambda *_: False))(sm, mats[d.mat]))
-                per_node.setdefault(own, []).append(b)
-                P = corners["pos"] @ Wn[:3, :3].T + Wn[:3, 3]
-                lo, hi = np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0))
+                groups = [(own, Wn, c)]
+                if split and sm is mdl:
+                    # the split pieces' triangles onto their nodes, about their pivots (model space:
+                    # the pieces' nodes don't turn at rest)
+                    Pm = (c["pos"] @ Wn[:3, :3].T + Wn[:3, 3]).reshape(-1, 3, 3)
+                    rest_of = np.ones(len(Pm), bool)
+                    for (k, T), (_, pivot, pick) in zip(split_nodes, split):
+                        m = np.asarray(pick(Pm), bool) & rest_of
+                        if not m.any():
+                            continue
+                        rest_of &= ~m
+                        cs = {key: v[np.repeat(m, 3)] for key, v in c.items()}
+                        cs["pos"] = (Pm[m].reshape(-1, 3) - T[:3, 3]).astype(np.float32)
+                        if "nrm" in cs:
+                            n = cs["nrm"] @ Wn[:3, :3].T
+                            cs["nrm"] = (n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)).astype(np.float32)
+                        groups.append((k, T, cs))
+                    keep = np.repeat(rest_of, 3)
+                    groups[0] = (own, Wn, {key: v[keep] for key, v in c.items()})
+                for gnode, gW, gc in groups:
+                    if not len(gc["pos"]):
+                        continue
+                    # (lit as the model stands at rest, unplaced: a moving model carries its light)
+                    corners = self.prepare(corners_from(gc, sm, shape), mi, gW)
+                    b = build_single_batch(self, corners, mi, gnode, (detail or (lambda *_: False))(sm, mats[d.mat]))
+                    per_node.setdefault(gnode, []).append(b)
+                    P = corners["pos"] @ gW[:3, :3].T + gW[:3, 3]
+                    lo, hi = np.minimum(lo, P.min(0)), np.maximum(hi, P.max(0))
         n_batches = len(pkg.batches) - first_batch
         # a node's batches, when they are one run in the model's draw order (else none: the
         # renderer goes by Batch.node)

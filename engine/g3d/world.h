@@ -116,6 +116,12 @@ public:
     bool instance_animated(u32 instance) const;
     Mtx34 instance_transform(u32 instance) const;
     bool set_instance_transform(u32 instance, const Mtx34& transform);
+    // a node of an instance's own model by name (-1: none), and that node turned at run time by
+    // `degrees` about x, y and z (nw4r's order, Rz Ry Rx: about x first), added to its rest rotation
+    // (a car's wheels: rolling about their axle, x, then steered about y). The model's LOD models
+    // are drawn at rest.
+    int instance_node(u32 instance, const char* name) const;
+    void set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]);
 
     // the speed-ups in use (WorldFeature bits)
     void set_features(u32 features);

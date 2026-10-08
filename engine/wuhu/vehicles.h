@@ -11,7 +11,9 @@
 // point was, no wall between
 // where its corners were and are at half its height; it sits on the ground under them, tilted to
 // them. A boat keeps to deep water (no ground under its corners within its draft, none over the
-// surface), stops at walls and shores, rides the surface and rocks a little.
+// surface), stops at walls and shores, rides the surface and rocks a little. A car's wheels (its
+// model's wheel_* nodes, tools/wuhu/stage_wuhu.py CAR_WHEELS) roll by the distance it goes and the
+// front pair turns with the stick.
 //
 // Mutated on the game's thread only while no World job is out (island.cpp take_job).
 #pragma once
@@ -66,7 +68,9 @@ private:
         bool boat;
         f32 bbox[6];         // the model's box (model space)
         Vec3 scale;          // its matrix's column lengths
+        int wheels[4];       // a car's wheel nodes (front left, front right, rear left, rear right; -1: none)
     };
+    void turn_wheels(const Vehicle& v, f32 rolled, f32 steer, f32 dt);
     bool car_move(const Vehicle& v, Vec3 next, Mtx34* out);
     bool boat_move(const Vehicle& v, Vec3 next, f32 time, Mtx34* out);
     bool hits_other(const Obstacle& was, const Obstacle& now) const;
@@ -80,6 +84,7 @@ private:
     u32 driven_ = NONE;
     f32 speed_ = 0, yaw_ = 0;
     f32 slope_f_ = 0, slope_s_ = 0;  // a car's tilt (rise a unit forward, a unit to its x side)
+    f32 roll_ = 0, steer_ = 0;       // its wheels' turn about their axle and the front pair's steer (degrees)
 };
 
 }  // namespace engine::wuhu
