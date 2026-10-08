@@ -34,7 +34,8 @@
 // surface below it facing up, not a fence: the stager's floors), which says whether the eye's cell's
 // visibility row applies (world.h).
 //
-// NOMA_WUHU_START=<marker name>: start at another of the package's markers (a landmark, a warp place,
+// NOMA_WUHU_AT=x,y,z[,yaw]: start on the ground at or below that place (host runs). NOMA_WUHU_START=
+// <marker name>: start at another of the package's markers (a landmark, a warp place,
 // or a camera preset view_*, whose target the Mii then stands at, facing away from its eye: the
 // follow camera then sees about what the preset does). NOMA_WUHU_LOG_EVERY=N: the frame line every N
 // frames (600). NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort: the World's speed-ups named turned off
@@ -91,6 +92,8 @@ constexpr u32 NONE32 = 0xFFFFFFFFu;
 // shown over the Mii while it glides (Player::gliding)
 constexpr u16 PARACHUTE_CLASS = 0xFFFEu;
 const char* const PARACHUTE_MODEL = "WS2_omk_parachute_01";
+constexpr f32 WSR_MII_HEIGHT = 15.24f;  // island units (research k.md)
+constexpr f32 PARACHUTE_HANG = 0.8f;    // its risers' end over the Mii's feet, times its height
 // the Mii's stand-ins for the shadows (stage_wuhu.py shadow_models): a caster a unit tall, a blob a
 // unit across; the blob is BLOB_WIDTH Mii heights across, the stand-in as wide as the Mii's height x 0.16
 constexpr u16 SHADOW_PROXY_CLASS = 0xFFFDu, SHADOW_BLOB_CLASS = 0xFFFCu;
@@ -229,6 +232,7 @@ private:
     std::unique_ptr<SandTracks> sand_;
     u32 parachute_instance_ = NONE32;
     bool parachute_visible_ = false;
+    u32 parachute_since_ = 0;  // (frame_ the glide began)
     u32 proxy_instance_ = NONE32, blob_instance_ = NONE32;
     bool proxy_visible_ = true, blob_visible_ = true;
     u32 wake_instance_ = NONE32;
@@ -392,7 +396,16 @@ void Island::finish_loading() {
     for (const fmt::Marker& m : package_->markers())
         if (!start && m.kind == fmt::MK_SPAWN)
             start = &m;
-    if (!start || !place_at(*start)) {
+    // NOMA_WUHU_AT=x,y,z[,yaw]: a place of one's own instead (host runs: a ledge, a shore), the ground
+    // at or below it
+    f32 at[4] = {0, 0, 0, 0};
+    const char* at_env = std::getenv("NOMA_WUHU_AT");
+    if (at_env && std::sscanf(at_env, "%f,%f,%f,%f", &at[0], &at[1], &at[2], &at[3]) >= 3 &&
+        player_->place(Vec3{at[0], at[1], at[2]}, at[3])) {
+        camera_->reset(player_->position(), player_->yaw());
+        guest::log("wuhu: NOMA_WUHU_AT: at (%.1f, %.1f, %.1f) facing %.0f", player_->position().x,
+                   player_->position().y, player_->position().z, player_->yaw());
+    } else if (!start || !place_at(*start)) {
         player_->place(Vec3{0, 1e4f, 0}, 0);
         camera_->reset(player_->position(), player_->yaw());
         guest::log("wuhu: no spawn point with ground under it: the Mii stands at the island's middle");
@@ -545,12 +558,17 @@ void Island::update_parachute() {
     if (open != parachute_visible_) {
         world_->set_group_visible(PARACHUTE_MODEL, open);
         parachute_visible_ = open;
+        parachute_since_ = frame_;
     }
     if (!open)
         return;
-    const f32 a = player_->yaw() * DEG, c = std::cos(a), s = std::sin(a);
+    // its clip is the canopy opening (30 frames): played once from the glide's start, then held open
+    world_->set_instance_anim_frame(parachute_instance_, (f32)(frame_ - parachute_since_));
+    // hung from the Mii's shoulders, as big against it as against WSR's Mii (15.24 units tall)
+    const f32 h = player_->params().height, sc = h / WSR_MII_HEIGHT;
+    const f32 a = player_->yaw() * DEG, c = std::cos(a) * sc, s = std::sin(a) * sc;
     const Vec3 p = player_->position();
-    const Mtx34 m{{{c, 0, s, p.x}, {0, 1, 0, p.y + player_->params().height}, {-s, 0, c, p.z}}};
+    const Mtx34 m{{{c, 0, s, p.x}, {0, sc, 0, p.y + PARACHUTE_HANG * h}, {-s, 0, c, p.z}}};
     world_->set_instance_transform(parachute_instance_, m);
 }
 

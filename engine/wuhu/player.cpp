@@ -39,9 +39,10 @@
 // plain gravity: held, the rise has 0.72 of gravity (about 1.4 jump_height), released, twice (half
 // of it), and the way down 1.45 times. A jump keeps its momentum over ground it couldn't land on; a
 // ceiling cuts the rise short, ground rising above the feet (a slope run up) ends it; holding A does
-// not start another jump in the air. A sprint (fast_run) off a ledge is a leap: it may drop any
-// height, and once a Mii height below where it left the ground it glides (gliding(): the island
-// opens the parachute), falling no faster than GLIDE_FALL Mii heights a second.
+// not start another jump in the air. A sprint (fast_run) off a ledge, or onto a slope too steep to
+// stand on, is a leap: it may drop any height, and once a Mii height below where it left the ground
+// it glides (gliding(): the island opens the parachute), falling no faster than GLIDE_FALL Mii
+// heights a second.
 // Falling and sliding: gravity (9.8 m/s^2: Wii no Ma's units are about centimetres) until walkable
 // ground is reached; on steep ground the Mii slides down the slope at run speed, keeping to it (a face
 // upright enough to be a wall it drops away from instead, as off a ledge); in the air it keeps
@@ -416,8 +417,9 @@ bool Player::try_step(Vec3 d) {
     if (!g.found || steep) {
         // a drop, or a slope to slide down (from its surface, within a step down, unless it is
         // upright enough to be a wall to the body)
-        p.y = steep && g.n.y >= p_.wall_ny ? g.y : pos_.y;
-        const bool run_leap = !steep && speed_ > p_.run_speed * RUN_LEAP_SPEED;
+        // (a sprint leaps off it either way: off the edge, over a slope it would otherwise slide down)
+        const bool run_leap = speed_ > p_.run_speed * RUN_LEAP_SPEED;
+        p.y = steep && !run_leap && g.n.y >= p_.wall_ny ? g.y : pos_.y;
         const f32 lowest = run_leap ? -1e30f : pos_.y - p_.max_drop;
         // (off a low edge into deep water: as low as a swimmer climbs out from)
         f32 s;
@@ -430,7 +432,7 @@ bool Player::try_step(Vec3 d) {
         pos_ = p;
         start_fall(false, lowest);
         run_leap_ = run_leap;
-        if (steep)
+        if (steep && !run_leap)
             ride_slope(g.n);
         return true;
     }

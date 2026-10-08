@@ -212,6 +212,7 @@ struct World::Impl {
         Vec3 mesh_centre{0, 0, 0};  // its meshes' bounding sphere as last posed (world)
         f32 mesh_r = 0;
         std::vector<NodeRot> rots;  // nodes of its own model turned at run time (set_instance_node_rotation)
+        f32 held = NAN;             // its animation's frame as the scene holds it (NaN: by the clock)
     };
     std::vector<Inst> insts;
     // node tracks per animation, by (model, node): track indices; and per (animation, model) each
@@ -361,7 +362,7 @@ struct World::Impl {
     u16 shadow_flags(const Material& m, const f32* box);
     const NodeMap* node_map(u16 anim, u16 model) const;
     void pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base,
-              const std::vector<NodeRot>* rots = nullptr);
+              const std::vector<NodeRot>* rots = nullptr, f32 held = NAN);
     void billboard(u16 model, u32 base);
     void pose_instance(u32 i, u16 model, f32 distance);
     int eye_cell() const;
@@ -608,7 +609,7 @@ const World::Impl::NodeMap* World::Impl::node_map(u16 anim, u16 model) const {
 // The world matrices of a model's nodes (into finals[base..]): at rest (the bind matrices) or posed
 // by an animation's node tracks at the current frame, under `mtx` (billboards: billboard()).
 void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u32 base,
-                       const std::vector<NodeRot>* rots) {
+                       const std::vector<NodeRot>* rots, f32 held) {
     const fmt::Model& m = pkg.models()[model];
     // (a model without nodes draws its batches with the matrix it is placed with)
     finals[base] = mtx;
@@ -617,7 +618,8 @@ void World::Impl::pose(u16 model, const Mtx34& mtx, u16 anim, f32 anim_offset, u
     f32 f = 0;
     if (tracks) {
         const fmt::Anim& an = pkg.anims()[anim];
-        f = anim_frame(frame + anim_offset, an.frames, an.loop);
+        f = std::isnan(held) ? anim_frame(frame + anim_offset, an.frames, an.loop)
+                             : std::min(std::max(held, 0.0f), an.frames);
     }
     for (u32 k = 0; k < m.n_nodes; k++) {
         const fmt::Node& nd = pkg.nodes()[m.first_node + k];
@@ -722,7 +724,7 @@ void World::Impl::pose_instance(u32 i, u16 model, f32 distance) {
             for (u32 k = 0; k < nn; k++)
                 was[k] = {finals[n.slot + k].m[0][3], finals[n.slot + k].m[1][3], finals[n.slot + k].m[2][3]};
         pose(model, n.mtx, n.animated ? in.anim : NONE, in.anim_offset, n.slot,
-             model == in.model && !n.rots.empty() ? &n.rots : nullptr);
+             model == in.model && !n.rots.empty() ? &n.rots : nullptr, n.held);
         if (track) {
             f32 most = 0;
             for (u32 k = 0; k < nn; k++)
@@ -1004,7 +1006,8 @@ Mtx34 World::Impl::root_now(u32 i) const {
     f32 sv[3], rv[3], tv[3];
     memcpy(sv, nd.scale, sizeof(sv)), memcpy(rv, nd.rotate, sizeof(rv)), memcpy(tv, nd.translate, sizeof(tv));
     const fmt::Anim& an = pkg.anims()[in.anim];
-    const f32 f = anim_frame(frame + in.anim_offset, an.frames, an.loop);
+    const f32 f = std::isnan(n.held) ? anim_frame(frame + in.anim_offset, an.frames, an.loop)
+                                     : std::min(std::max(n.held, 0.0f), an.frames);
     for (u32 ti : anim_nodes[in.anim][(u32)map->of_node[0]].tracks) {
         const fmt::Track& tr = pkg.tracks()[ti];
         const u32 c = tr.target;
@@ -1507,6 +1510,17 @@ int World::instance_node(u32 instance, const char* name) const {
         if (!std::strcmp(package_.str(package_.nodes()[m.first_node + k].name), name))
             return (int)k;
     return -1;
+}
+
+void World::set_instance_anim_frame(u32 instance, f32 frame) {
+    if (instance >= impl_->insts.size())
+        return;
+    Impl::Inst& n = impl_->insts[instance];
+    if (n.held == frame || (std::isnan(n.held) && std::isnan(frame)))
+        return;
+    n.held = frame;
+    n.posed_model = NONE;
+    impl_->dirty = true;
 }
 
 void World::set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]) {

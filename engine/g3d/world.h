@@ -147,6 +147,9 @@ public:
     // (a car's wheels: rolling about their axle, x, then steered about y). The model's LOD models
     // are drawn at rest.
     int instance_node(u32 instance, const char* name) const;
+    // an animated instance's animation held at `frame` (clamped to its length; NaN: by the World's
+    // clock, looping, as at the start): a clip the scene plays once (the parachute opening)
+    void set_instance_anim_frame(u32 instance, f32 frame);
     void set_instance_node_rotation(u32 instance, u16 node, const f32 degrees[3]);
     // A material's colour register set while the scene runs (as a CLR0 track sets it: fmt::ColorReg
     // CR_MAT0, CR_AMB0, CR_TEV0-2, CR_KONST0-3; RGBA, the TEV's as GX's signed 11 bits): a material
