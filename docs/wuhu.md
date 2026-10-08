@@ -274,6 +274,26 @@ waves, clouds and sun) runs to their common length, the shorter ones' keys repea
 animation sets all five components of a texture matrix it touches (nw4r does), so constants are
 tracks too.
 
+## The Mii's clips
+
+The household's Mii plays the channel's own clips (engine/wuhu/island_mii.cpp has the table): the
+gaits from Move (driven by the distance walked at each clip's measured planted-foot speed times the
+Mii's height scale, one shared phase across gait changes, a run's flight stretched over 4.6 steps a
+second), Wait by time with Wait_A..D fidgets, Turn_Simple turning on the spot. The stager also writes
+`DATA/wuhu/mii_anim.brres` (tools/wuhu/mii_anims.py, `--noma` for Wii no Ma's content 26, by default
+the content archive in DATA/content holding g3d/Mii/Model.lex): ten CHR0 clips on Wii no Ma's body,
+29,812 bytes -- the jump (Send_DSi_Jump 12..47) and the landings (Male_Land, Female_Land) without
+their own rise, a slide pose, WSR's swf_ava_fall and omk_ava_parachute moved onto the body, a pilot's
+seat (pln_ava_wait) and a standing helm with jsk_ava_drivepose's arms as a 21-frame steering axis, and
+a made front crawl and treading water. tools/g3d/chr0_write.py writes it (its dictionary trees come
+out as Nintendo's do for all 588 entries of the channel's files; every node carries its translation
+and the model node's segment scale compensation bits, without which nw4r scales the bones twice on a
+Mii of height scale under 1). The island hands it to the actor manager as one more animation file,
+"Island" (engine/ui/g3d.h anim_file_add), in place of Vote, Send_DSi and Sit_Sofa, which it loads
+when the archive isn't staged: 5 animation files of 314,712 bytes then, against 472,576 without it
+(and 319,488 before, with Seal). NOMA_WUHU_FEET=1 logs the planted foot's slide measured on the
+posed body each second (NOMA_WUHU_FEET_TRACE=1 every node's place every frame).
+
 ## Materials and textures
 
 A material is GX's register image as its display lists leave it: TEV colour and alpha words,

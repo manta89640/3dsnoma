@@ -816,6 +816,19 @@ void IslandMii::measure_feet(Vec3 at, f32 walked) {
             p[k] = Vec3{load_f32(mtx + 0xC), load_f32(mtx + 0x1C), load_f32(mtx + 0x2C)};
         }
     }
+    if (std::getenv("NOMA_WUHU_FEET_TRACE")) {
+        GFRAME(0x40);
+        const u32 mtx = (u32)&GS(u32, 0x8);
+        std::string nodes;
+        for (u32 k = 0; k < 21; k++) {
+            g3d::body_node_world(body, k, mtx);
+            char b[48];
+            std::snprintf(b, sizeof(b), " %u:(%.1f %.1f %.1f)", (unsigned)k, load_f32(mtx + 0xC) - at.x,
+                          load_f32(mtx + 0x1C) - at.y, load_f32(mtx + 0x2C) - at.z);
+            nodes += b;
+        }
+        guest::log("wuhu: feet trace: %s frame %.1f:%s", CLIP_NAMES[clip_], frame_, nodes.c_str());
+    }
     const int low = p[0].y <= p[1].y ? 0 : 1;
     const bool down = p[low].y - at.y < (ANKLE_REST + ANKLE_DOWN) * height_scale_;
     if (feet_had_ && down && walked > 0) {

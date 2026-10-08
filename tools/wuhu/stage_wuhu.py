@@ -1705,6 +1705,8 @@ def main(argv=None):
     ap.add_argument("--no-pvs", action="store_true", help="no visibility rows (CVIS)")
     ap.add_argument("--no-prelit", action="store_true", help="leave every material lit at run time (comparisons)")
     ap.add_argument("--no-pos16", action="store_true", help="write every position as f32 (comparisons)")
+    ap.add_argument("--noma", help="Wii no Ma's content 26 for the Mii's clip archive (tools/wuhu/mii_anims.py: "
+                                   "default the one in DATA/content, else extracted/fs/00000026)")
     a = ap.parse_args(argv)
     bake = None if a.no_bake else a.bake
     if bake and not os.access(bake, os.X_OK):
@@ -1780,6 +1782,16 @@ def main(argv=None):
         out, "baked" if bake else "GX texels", os.path.getsize(out), time.time() - t0,
         ", ".join("%s %d" % (t, s.size) for t, s in sections),
         "; unbaked %d bytes kept as %s" % (len(data), raw) if bake and a.keep_raw else ""))
+    # the Mii's clip archive beside the package (the island plays the content's clips without it)
+    import mii_anims
+    src = a.noma or mii_anims.Noma.find(a.data)
+    if os.path.exists(src):
+        data, clips = mii_anims.build(mii_anims.Noma(src), st.wsr)
+        with open(os.path.join(out_dir, "mii_anim.brres"), "wb") as f:
+            f.write(data)
+        st.say("wrote %s: %d bytes, %d clips" % (os.path.join(out_dir, "mii_anim.brres"), len(data), len(clips)))
+    else:
+        st.say("no Wii no Ma content at %s: no Mii clip archive (the island plays the content's clips)" % src)
     for k, v in sorted(st.cv.stats.items()):
         print("  %s: %s" % (k, v))
     print("  positions on a grid of 1/%g unit: moved by at most %.4f a coordinate, %.4f in all" % (
