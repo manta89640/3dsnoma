@@ -106,6 +106,7 @@ set(ENGINE_SOURCES
   engine/system/keyboard.cpp
   engine/system/room_accessories.cpp
   engine/system/save.cpp
+  engine/system/scrapped_scenes.cpp
   engine/system/thread.cpp
   engine/ui/bar_button.cpp
   engine/ui/caption.cpp

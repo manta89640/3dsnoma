@@ -7,9 +7,11 @@ program, a runtime emulates the Wii hardware the program talks to (interrupts, v
 the IOS services, the GX GPU), so the program itself runs unmodified, with its own SDK and
 middleware. Where the Wii's own parts have no purpose on a 3DS, native code takes their place:
 the Wii Remote is the 3DS's controls (`engine/input/remote.cpp`), the HOME Button Menu is left
-out. The content players, Adobe Flash and MobiClip, are left out too (`runtime/patches/players.cpp`):
-the shop, whose catalogues were Flash, is hidden from the room (`runtime/patches/menus.cpp`), as are
-the menu buttons for the Wii's own settings and services. The port adds a screen of its own to the
+out. The content players, Adobe Flash and MobiClip, are left out too (`runtime/patches/players.cpp`).
+The port is offline, and the channel's scenes that only the servers fed are left out
+(`engine/system/scrapped_scenes.cpp`): いろんな間, the shop, the TV programmes, the votes, deliveries
+and coupons, the browser, and the Wii's own settings and online checks; their buttons are hidden
+(`runtime/patches/menus.cpp`). The port adds a screen of its own to the
 room, the Sound Player (`engine/soundplayer`): the channel's music, with the household's Miis
 dancing to it.
 
@@ -30,16 +32,15 @@ decompiled sources, assembly, extracted files) stays out of git.
 - Host and 3DS (tested in Azahar) both: boot through the SDK, show the
   loading animation, play the channel's sound (the AX voices mixed natively,
   `engine/audio/ax_render.cpp`; streamed through ndsp on the 3DS), take the Wii Remote pointer
-  (3DS: touch screen or circle pad), and talk to the network: RC24's
-  `/notify` and WiiLink's `conf/first.bin`. "おわる" (the Wii Menu button) shuts the channel down and quits.
-- Offline by default (`NOMA_OFFLINE`, `=0` to go online): there is no network, and the channel's
-  online steps are skipped inside its own flow (`runtime/patches/offline.cpp`): its start-up
-  downloads finish as empty documents, the license agreement is left out, and what only a server
-  provides (videos, posters, messages, TV listings) is absent. The opening animation plays to its
-  end (online it plays while the start-up data downloads), and what needs a server shows the
-  channel's own "can't connect" message (Shopping, a video sample: error 50220). Online, WiiLink's server answers
-  the WAD this was developed on with error 354607 (its patch predates the server's current
-  User-Agent check).
+  (3DS: touch screen or circle pad). "おわる" (the Wii Menu button) shuts the channel down and quits.
+- Offline: there is no network (`runtime/hw/ios/net.cpp`: configured, its link down) and no
+  online mode. The channel's online steps are skipped inside its own flow
+  (`runtime/patches/offline.cpp`): its start-up downloads finish as empty documents, the license
+  agreement is left out, and what only a server provides (videos, posters, messages) is absent.
+  The opening animation plays to its end (online it played while the start-up data downloaded),
+  and what needs a server shows the channel's own "can't connect" message (a video sample: error
+  50220). The scenes only the servers fed are left out (above): what only they reached isn't
+  compiled (`tools/decomp/decompile.py` LEFT_OUT: about 3,600 functions).
 - The first start's setup runs from the welcome through the Mii, profile and family into the room
   (LivingRoomScene), its tutorial and menus; the video settings step (streaming quality) is left
   out (`runtime/patches/wii_parts.cpp`). The console clock is the host's local time: the room shows today's date.
@@ -149,7 +150,6 @@ Useful environment variables:
 | `NOMA_DUMP_FROM=F` | draw nothing before displayed frame F (with `NOMA_DUMP_FRAMES`: a later screen reached at the game's own speed) |
 | `NOMA_INPUT="3:A,6:AB:1,8:P(0.2;-0.1)"` | scripted Wii Remote input (time: buttons[: seconds], or pointer), timed by the game's own frames (60 to a second), so the same script works however fast the machine runs; a time can count from a text instead, `M0x91+1.5:A` pressing A 1.5 s after the game first asks for message 0x91, which keeps scripts on their screens wherever loading puts them; `P(off)` takes the pointer off the screen until the next `P(x;y)`; `OFF` presses the Wii's power button (as closing from the HOME Menu does); buttons, written together, are `A B 1 2 + - H` and the D-pad's `U D L R` (`+` is the PLUS button, not a separator: `A+B` holds A, PLUS and B), the 3DS's own `[L] [R] [ZL] [ZR]` (`5:[L]:2`), and the 3DS's names for the others as the platform maps them, `[X]` (1), `[Y]` (2), `[START]` (+), `[SELECT]` (−); `T(x;y)` touches the bottom screen at pixel x, y (0..319, 0..239) for the event's seconds (a tap: 0.15 s), moving the pointer as the touch screen does, and `T(x0;y0;x1;y1)` drags over them; for native scenes (the island), `S(x;y)` tilts the stick (the circle pad in stick mode; -1..1, y up) and `C(x;y)` the camera stick (the C-stick), for the event's seconds when given (`4:S(0;1):2.5` walks forward 2.5 s), else until the next `S` (`C`); `S(0;0)` lets go |
 | `NOMA_DEBUG_MSG=1` | log each text (BMG message) the game asks for, the first time, with its id and the game time: the screens a run went through, without frames |
-| `NOMA_OFFLINE=0` | go online (the default is offline: no network, online steps skipped) |
 | `NOMA_PROFILE=seconds` | profiling builds (`-DNOMA_PROFILE_CALLS=ON`): where the time goes; `NOMA_PROFILE_TOP=N` lines per list, `NOMA_PROFILE_UNDER=name` also ranks what runs below that function |
 | `NOMA_NO_RENDER=1` | host: don't rasterize (the software renderer dominates host profiles) |
 | `NOMA_GX_INLINE=1` | 3DS: decode and draw GX commands on the main thread instead of the GPU's own thread |
@@ -160,7 +160,7 @@ Useful environment variables:
 | `NOMA_ETC1=0/1` | 3DS: CMPR textures as ETC1 (a quarter of the memory, lossy, slower to upload); the default is on for the Old 3DS, off for the New 3DS |
 | `NOMA_DEBUG_GX_NAN` | report the first matrices holding a NaN (GXLoadPosMtxImm, g3d node matrices, XF loads; runs GX inline) |
 | `NOMA_DEBUG_GX`, `_IRQ`, `_IOS`, `_ES`, `_THREADS`, `_POLL`, `_EE`, `_MEM` | logging of the emulated hardware |
-| `NOMA_DEBUG_NET`, `NOMA_DEBUG_DRAWS=N` | socket traffic; every draw of the Nth frame (bounds, TEV, textures, matrices) |
+| `NOMA_DEBUG_NET`, `NOMA_DEBUG_DRAWS=N` | the guest's (failing) socket requests; every draw of the Nth frame (bounds, TEV, textures, matrices) |
 | `NOMA_TRACE=word,...`, `NOMA_TRACE_LAST=N`, `NOMA_WATCH=addr` | call tracing and a memory write watch (build with `-DNOMA_TRACE_CALLS=ON`) |
 | `NOMA_TRACE_BT=name,addr` | trace builds: the host stack (the guest's call chain) whenever those functions are entered |
 | `NOMA_TRACE_OPEN=/dev/...` | print the last traced calls when the guest opens that IOS path (trace builds) |
@@ -220,7 +220,7 @@ out of each.
 ## The Sound Player
 
 A screen of the port's own for listening to the channel's music: the sixth button of the room's
-bottom bar (サウンド, right of いろんな間) opens it, through the room's own circle wipe, and the Home
+bottom bar (サウンド, right of the theater's) opens it, through the room's own circle wipe, and the Home
 tab at the bottom left (or B) goes back to the room, whose music comes back by itself.
 
 - The tracks are the channel's own, found in its sound archive (`snd/douga.brsar`, which the

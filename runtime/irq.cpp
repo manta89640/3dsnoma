@@ -58,7 +58,6 @@ static void deliver(int kind) {
 }
 
 void ai_tick();
-void net_tick();
 void ios_async_poll();
 bool ios_async_busy();
 void ios_async_wait(u64 us);
@@ -79,12 +78,6 @@ void poll_devices() {
     ipc_tick();
     ios_async_poll();
     gx_poll();
-    // the sockets (system calls on the 3DS) at most every millisecond
-    static u64 s_slow;
-    if (now - s_slow >= 1000) {
-        s_slow = now;
-        net_tick();
-    }
 }
 
 static bool deliverable() {

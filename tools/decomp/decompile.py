@@ -48,6 +48,40 @@ OUT = os.path.join(ROOT, "build", "decomp")
 
 # Functions written by hand in runtime/ (by name). Anything using rfi/sc or saving the whole
 # register file is added automatically (see find_native()).
+# The scenes the 3DS port leaves out (engine/system/scrapped_scenes.cpp: the user's keep list for the
+# 3DS redesign): their factories' Create functions are natives that stop the program, so nothing of
+# those scenes is built, and what only they reached is stubbed (LEFT_OUT: about 3,500 functions).
+SCRAPPED_SCENES = (
+    "scene_CompanySelectScene_Factory_Create", "scene_CompanyLogoScene_Factory_Create",
+    "scene_CompanyRoomScene_Factory_Create", "scene_CompanyPictureScene_Factory_Create",
+    "scene_CompanyContactScene_Factory_Create", "scene_ShoppingRoomScene_Factory_Create",
+    "scene_TvScene_Factory_Create", "scene_VoteRoomScene_Factory_Create", "scene_VideoVoteRoomScene_Factory_Create",
+    "scene_PictureVoteRoomScene_Factory_Create", "scene_DeliveryServiceScene_Factory_Create",
+    "scene_DeliveryConfirmScene_Factory_Create", "scene_CouponConfirmScene_Factory_Create",
+    "scene_BrowserScene_Factory_Create", "scene_UrlLinkConfirmScene_Factory_Create",
+    "scene_ConfirmUpdateAgreeScene_Factory_Create", "scene_ConfirmParentalControlScene_Factory_Create",
+    "scene_ConfirmParentalControlMovieProfileScene_Factory_Create", "scene_PasswordScene_Factory_Create",
+    "scene_InputRegionScene_Factory_Create", "scene_RegionFailScene_Factory_Create",
+)
+
+# The channel without its servers (the port has no online mode): its online steps replaced whole
+# by natives (runtime/patches/offline.cpp); what only the originals reached is stubbed, as for
+# SCRAPPED_SCENES.
+OFFLINE_NATIVES = (
+    "comm_friends_FriendInitializer_Run",  # TitleScene's startup task: WiiConnect24 friend data, no online checks
+    "comm_httpcache_Manager_AddJob",  # the download manager taking a job: done at once, empty
+    "wii_ServerClock_SetServerTime",  # the server's time from the configuration document (empty)
+    "scene_TitleScene_PosterImageLoader_Update",  # TitleScene: preloading the posters' images (wall/*.img)
+    "scene_TitleScene_PosterInfoLoader_Update",  # TitleScene: preloading the posters' details (wall/*.met)
+    "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, no license agreement
+    "model_Weather_Read",  # the forecast, read through WiiConnect24: none
+    "comm_message_ReceiveMessageManager_WaitNextRead",  # the WC24 inbox, read again every 5 minutes: never
+)
+
+# Natives whose originals the port leaves out on purpose: what only those originals reached isn't
+# compiled (treatments()).
+LEFT_OUT = SCRAPPED_SCENES + OFFLINE_NATIVES
+
 NATIVE_NAMES = {
     "__start", "__init_registers", "__init_data", "__init_hardware", "__flush_cache",
     "__my_flush_cache", "__check_pad3", "__set_debug_bba", "__get_debug_bba",
@@ -136,6 +170,10 @@ NATIVE_NAMES = {
     "keyboard_Keyboard_SetMode", "keyboard_Keyboard_SetText", "keyboard_Keyboard_GetText",
     "keyboard_Keyboard_SetTitle", "keyboard_Keyboard_SetMaxLines", "keyboard_Keyboard_SetMaxLength",
     "keyboard_Keyboard_GetDefaultMaxLength",
+    # engine/system: the scenes the 3DS port leaves out (scrapped_scenes.cpp; SCRAPPED_SCENES below)
+    *SCRAPPED_SCENES,
+    # runtime/patches/offline.cpp: the channel's online steps replaced whole (OFFLINE_NATIVES below)
+    *OFFLINE_NATIVES,
     # engine/os: mutexes (a free or own mutex without the scheduler)
     "OSLockMutex", "OSUnlockMutex", "OSTryLockMutex",
     # engine/snd: nw4r::snd's voice layer (VoiceManager::UpdateAllVoices and below), native
@@ -183,17 +221,12 @@ PATCHED_NAMES = {
     # GXLoadPosMtxImm: NOMA_DEBUG_GX_NAN reports matrices holding NaNs (runtime/patches/debug.cpp)
     "GXLoadPosMtxImm",
     "nw4r_g3d_ScnMdlSimple_GetScnMtxPos",  # nw4r::g3d::ScnMdl: a node's world or view matrix (debug.cpp)
-    # offline mode (NOMA_OFFLINE): the channel's online steps (runtime/patches/offline.cpp)
-    "comm_friends_FriendInitializer_Run",  # TitleScene's startup task: WiiConnect24 friend data, then online checks
-    "comm_httpcache_Manager_AddJob",  # the download manager taking a job
+    # the channel without its servers: steps adjusted (runtime/patches/offline.cpp; the ones replaced
+    # whole are in NATIVE_NAMES)
     "comm_httpcache_Request_MakeUrl",  # a job's URL (logged offline: what would have been downloaded)
     "wii_ServerClock_ctor",  # the server clock: known only once a server has answered
-    "wii_ServerClock_SetServerTime",  # ... from the configuration document (empty offline)
-    "scene_TitleScene_PosterImageLoader_Update",  # TitleScene: preloading the posters' images (wall/*.img)
-    "scene_TitleScene_PosterInfoLoader_Update",  # TitleScene: preloading the posters' details (wall/*.met)
     "scene_TitleScene_Opening_OnLogoEnd",  # TitleScene: the opening starts (held offline until it ends)
     "scene_TitleScene_Opening_OnOpeningEnd",  # ... and ends
-    "scene_FirstSetupScene_StateWelcome_OnEnd",  # FirstSetupScene: after the welcome, the license agreement
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
     "g3d_living_Poster_ctor",  # the room's poster: hidden with none to show (engine/system/room_accessories.cpp)
     # nw4r::g3d's model draw, natively (engine/g3d/live_draw.cpp; the game's own stays for the
@@ -201,9 +234,7 @@ PATCHED_NAMES = {
     "nw4r_g3d_DrawResMdlDirectly",
     # the options' save-data button: its push asks through the system prompt (runtime/patches/menus.cpp)
     "scene_OptionScene_StateTop_OnButton", "app_SystemPrompt_OpenPending",
-    "model_Weather_Read",  # the forecast, read through WiiConnect24: none offline
-    "comm_message_ReceiveMessageManager_WaitNextRead",  # the WC24 inbox, read again every 5 minutes
-    # the EC and WiiConnect24 managers' threads: waiting for requests offline instead of polling
+    # the EC and WiiConnect24 managers' threads: waiting for requests instead of polling
     "comm_ec_EcManager_UpdateOff", "comm_ec_EcManager_AddRequest",
     "comm_nwc24_Nwc24Manager_UpdateClosed", "comm_nwc24_Nwc24Manager_AddRequest",
     # the AX's aux buses: their effect callbacks, logged as they're registered (engine/audio/aux.cpp)
@@ -414,11 +445,15 @@ def find_native(dol, st):
 
 def treatments(dol, st, protos):
     native_auto = find_native(dol, st)
-    live = set()
-    if any(r[3] == "dead" for r in REGIONS):  # what can still run, for the "dead" regions
-        natives = {f.name for f in st.functions if f.name in NATIVE_NAMES or f.addr in native_auto}
-        addr = reachable.load_symbols()
-        live, _ = reachable.reach(addr, *reachable.load_graph(addr), natives)
+    # What can still run: for the "dead" regions, and for what only the left-out originals reached
+    # (the functions live with LEFT_OUT's originals decompiled but not with them native: stubbed in
+    # any region; whatever was unreached anyway stays as it was)
+    natives = {f.name for f in st.functions if f.name in NATIVE_NAMES or f.addr in native_auto}
+    addr = reachable.load_symbols()
+    graph = reachable.load_graph(addr)
+    live, _ = reachable.reach(addr, *graph, natives)
+    live_with_left_out, _ = reachable.reach(addr, *graph, natives - set(LEFT_OUT))
+    left_out_only = live_with_left_out - live
     out = {}
     for f in st.functions:
         if not f.size or f.section not in (".text", ".init"):
@@ -434,6 +469,8 @@ def treatments(dol, st, protos):
             t = "native"
         elif how is None:
             t = "native"
+        elif f.name in left_out_only and f.addr not in KEEP:
+            t = "stub"
         else:
             t = "decomp"
         out[f.addr] = (t, rname)

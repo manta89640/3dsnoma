@@ -27,7 +27,6 @@
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
 #include "runtime/hw/ios/ios.h"
-#include "runtime/hw/ios/net.h"
 #include "runtime/runtime.h"
 
 void noma_start_guest();
@@ -77,7 +76,6 @@ void hw_init();
 
 static FILE* s_log;
 static u64 s_tick0;
-static bool s_soc;  // the SOC service is up (online only)
 static const char* DATA_DIR = "sdmc:/3ds/noma";
 
 static LightLock s_log_lock;  // (the GPU's thread logs too)
@@ -403,8 +401,6 @@ void platform_quit(const char* why) {
     };
     if (s_audio)
         step("the sound"), ndspExit();
-    if (s_soc)
-        step("the network"), socExit();
     // the graphics, unless the GPU's thread is still in them (waiting for a frame the GPU never
     // finished): the process's end frees them as well
     step(gpu ? "the graphics, then the app's end" : "the app's end (the graphics left as they are)");
@@ -1146,14 +1142,6 @@ int main(int argc, char** argv) {
     if (dol.empty()) {
         printf("no %s/main.dol\n(see README: tools/stage_data.py)\n", data.c_str());
         guest::platform_fatal("missing game data");
-    }
-    // online (NOMA_OFFLINE=0), the guest's network calls (/dev/net/ip/top) go to host sockets:
-    // start the SOC service, which takes a 1 MB buffer
-    if (!guest::net_offline()) {
-        u32* soc_buf = (u32*)memalign(0x1000, 0x100000);
-        guest::s_soc = soc_buf && R_SUCCEEDED(socInit(soc_buf, 0x100000));
-        if (!guest::s_soc)
-            printf("socInit failed: no network\n");
     }
     guest::mii_setup(data + "/nand");
     guest::memory_init(guest::MEM2_SIZE);

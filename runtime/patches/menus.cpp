@@ -198,57 +198,45 @@ u32 controller_theater_LayoutController_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
 
 // The room's bottom bar (layout::living, Move_Btn_Scene.lex): its buttons, in the order
 // layout_living_MoveBtn_CreateButtons makes them (+0xD04, a vector of layout::Button*), are the
-// theater, the shop, いろんな間, the TV programmes and the way back. The shop is left out: its
-// catalogues and menus were Flash files from the server, and Flash is left out of the port (it
-// only showed "can't connect"). Offline the TV programmes are too: the programme guide and the
-// programmes are the server's, and the TV scene (only reached from here) has nothing to show
-// (its top page says "今のおすすめはこちらです" over an empty screen, over and over).
-// いろんな間 moves into the shop's place: it hangs from the shop's locator (Loc_shopping_Btn), and
-// the Sound Player's button (engine/soundplayer) from いろんな間's own (Loc_ironna_Btn), so the bar
-// keeps its five places and its spacing, and its opening animation, which raises the locators one
-// after the other from the left, raises them in their order on the screen. The Sound Player's
-// button is made as the bar makes its others (layout_living_MoveBtn_AddTransitButton: the same
-// layout as いろんな間's, the cursor, the bar's focus group and locks, and SceneTransit::Request
-// when pushed, which wipes the room out and asks SceneTransit::Go for the scene).
+// theater, the shop, いろんな間, the TV programmes and the way back. The shop, いろんな間 and the TV
+// programmes are left out of the port (engine/system/scrapped_scenes.cpp): the shop's catalogues
+// were Flash files from the server, and いろんな間 and the TV programmes were the server's content
+// too. Their buttons stay where the bar made them, hidden and inactive (not hit-tested; the bar
+// never makes its buttons active again). The port's own buttons take their places, made as the
+// bar makes its others (layout_living_MoveBtn_AddTransitButton: the layout, the cursor, the bar's
+// focus group and locks, and SceneTransit::Request when pushed, which wipes the room out and asks
+// SceneTransit::Go for the scene): the Sound Player's (engine/soundplayer) with いろんな間's layout
+// in the shop's place (Loc_shopping_Btn), beside the theater's; 出発 (engine/wuhu) with the TV
+// programmes' layout (Move_Btn_Tv_Btn.lex, the bar's right end cap, its face running off the
+// screen's edge) in theirs (Loc_Tv_Btn). いろんな間's own place (Loc_ironna_Btn) stays empty. The
+// bar's opening animation raises the locators one after the other from the left, so the buttons
+// rise in their order on the screen.
 // The way back (Common/Wii_Btn.lex) went to the Wii Menu, and ends the app here: its back arrow
 // stays, the "Wii" logo under it goes (Pic_Wii and its shadow Pic_Shadow; the button's animations
 // change their colours, not whether they're shown).
-// Offline, where the TV programmes' button is hidden, 出発 (engine/wuhu) hangs from its locator
-// (Loc_Tv_Btn) and is made from its layout (Move_Btn_Tv_Btn.lex, the bar's right end cap, its face
-// running off the screen's edge), so the bar has its five places filled as online, 出発 rising last
-// in the bar's opening. The hidden button stays where it is, inactive (not hit-tested: the cursor
-// finds 出発, over it); the bar never makes its buttons active again. Online the bar is left as the
-// channel has it (there is no free place).
 void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
     layout_living_MoveBtn_ctor_orig(r3, r4, r5, r6, r7);
     enum : u32 { SHOP = 1, IRONNA = 2, TV = 3, BACK = 4 };
     u32 count = guest::load32(r3 + 0xD08);
-    if (count <= TV)
+    if (count <= BACK)
         return;
     u32 buttons = guest::load32(r3 + 0xD04);
     auto button = [buttons](u32 i) { return guest::load32(buttons + 4 * i); };
-    hide(button(SHOP));
-    if (guest::net_offline())
-        hide(button(TV));
-    // layout::Layout (the button's +0x14): detach from its locator, attach under another
-    layout_LayoutWrapper_Detach(button(IRONNA) + 0x14);
-    layout_LayoutWrapper_Attach(button(IRONNA) + 0x14, locator(button(SHOP)));
-    if (count <= BACK)
-        return;
+    for (u32 i : {SHOP, IRONNA, TV})
+        hide(button(i));
     for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
         if (u32 pane = find_pane(button(BACK), logo))
             nw4r_lyt_Pane_SetVisible(pane, 0);
     // (r4 the bar's scene layout, r5 the cursor, r7 the bar's focus group; the strings are the
-    // bar's own: "layout/Move_Btn/Move_Btn_Ironna_Btn.lex", "Loc_ironna_Btn")
-    layout_living_MoveBtn_AddTransitButton(r3, GA_layout_living_MoveBtn_sData + 0x1D0, r4, GA_layout_living_MoveBtn_sData + 0x1F8, r5, r7, TO_SOUND_PLAYER);
+    // bar's own: +0x1D0 "layout/Move_Btn/Move_Btn_Ironna_Btn.lex", +0x1BC "Loc_shopping_Btn",
+    // +0x208 "layout/Move_Btn/Move_Btn_Tv_Btn.lex", +0x22C "Loc_Tv_Btn")
+    const u32 strings = GA_layout_living_MoveBtn_sData;
+    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x1D0, r4, strings + 0x1BC, r5, r7, TO_SOUND_PLAYER);
     if (guest::load32(r3 + 0xD08) > BACK + 1)
         engine::soundplayer::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 1)));
-    // ("layout/Move_Btn/Move_Btn_Tv_Btn.lex", "Loc_Tv_Btn": the bar's own strings again)
-    if (guest::net_offline()) {
-        layout_living_MoveBtn_AddTransitButton(r3, GA_layout_living_MoveBtn_sData + 0x208, r4, GA_layout_living_MoveBtn_sData + 0x22C, r5, r7, engine::wuhu::TO_ISLAND);
-        if (guest::load32(r3 + 0xD08) > BACK + 2)
-            engine::wuhu::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 2)));
-    }
+    layout_living_MoveBtn_AddTransitButton(r3, strings + 0x208, r4, strings + 0x22C, r5, r7, engine::wuhu::TO_ISLAND);
+    if (guest::load32(r3 + 0xD08) > BACK + 2)
+        engine::wuhu::dress_bar_button(guest::load32(guest::load32(r3 + 0xD04) + 4 * (BACK + 2)));
 }
 
 // The application's scene factories, made at the start (one block of them): the Sound Player's

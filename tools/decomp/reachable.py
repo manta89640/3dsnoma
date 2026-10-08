@@ -7,7 +7,8 @@ Nodes are functions (.fn) and data objects (.obj); an edge is any symbol a node 
 tail branches, @ha/@l/@sda21 address loads, .4byte entries (vtables, callback tables). Execution
 starts at __start, main and the static constructors (the .ctors table, read from main.dol: dtk's
 assembly names only its first entry), and wherever the native C++ code
-(engine/, runtime/, platform/) names a guest function or global (g::name, GFN(name), GA_name).
+(engine/, runtime/, platform/) names a guest function or global (g::name, GFN(name), GA_name, or a
+call of a guest function by its plain name, as natives inside namespace g make them).
 Functions whose body isn't compiled -- natives (build/decomp/natives.txt) and stubbed regions
 (tools/decomp/regions.py) -- don't make their callees live. Exception tables don't either.
 
@@ -84,11 +85,16 @@ def load_graph(addr):
 
 
 def native_code_refs(addr):
+    """The guest names the native code uses: g::name, GFN(name), GA_name, and any call name(...) of a
+    guest function (natives inside namespace g call them unprefixed; a host function that happens to
+    share a guest name only keeps more alive)."""
     out = set()
     for d in ("engine", "runtime", "platform"):
-        for path in glob.glob(os.path.join(ROOT, d, "**", "*.cpp"), recursive=True):
-            for m in re.finditer(r"\bg::(\w+)|GFN\((\w+)\)|GA_(\w+)", open(path, errors="replace").read()):
-                n = m.group(1) or m.group(2) or m.group(3)
+        for path in glob.glob(os.path.join(ROOT, d, "**", "*.cpp"), recursive=True) + \
+                glob.glob(os.path.join(ROOT, d, "**", "*.h"), recursive=True):
+            text = open(path, errors="replace").read()
+            for m in re.finditer(r"\bg::(\w+)|GFN\((\w+)\)|GA_(\w+)|\b(\w+)\s*\(", text):
+                n = m.group(1) or m.group(2) or m.group(3) or m.group(4)
                 if n in addr:
                     out.add(n)
     return out
