@@ -211,7 +211,8 @@ The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom scree
 circle pad) to point, A/B as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad as the D-pad.
 Left alone for 3 seconds, the pointer leaves the screen as a remote put down would, so nothing
 stays highlighted; the next touch brings it back.
-At the start, A or a tap skips the rest of the opening. In the room the top screen shows the room alone (no bar, no hand) and the bottom one the room's
+At the start, A or a tap skips the rest of the opening ([docs/two_screens.md](docs/two_screens.md) has how the
+two screens are put together). In the room the top screen shows the room alone (no bar, no hand) and the bottom one the room's
 buttons, the channel's own, worked by touch (`engine/room/panel.h`): the bar along the bottom edge
 as the channel has it (the way back, ホームシアター, サウンド, 出発) and the その他 column's buttons two
 by two above it (メッセージボード, メッセージを送る, 使い方, 設定). The way back asks the room's question
