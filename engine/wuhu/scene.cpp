@@ -63,13 +63,12 @@ const std::vector<std::u16string> CHOICES = {u"部屋にもどる", u"ワープ"
 // the captions' room: the longest place name the list sets small still fits Top_Message's line
 const u32 CAPTION_CHARS = 32;
 
+// The bottom screen's part of the layouts' space (engine/ui/screen.h BOTTOM), as the Sound
+// Player's: the menu, the places and the question are centred in it (BOTTOM_MIDDLE_X)
+const engine::ui::screen::Region& BOTTOM_REGION = engine::ui::screen::BOTTOM;
+using engine::ui::screen::BOTTOM_MIDDLE_X;
 // the list of places: in the middle, its top tab clear of the prompt's rule (Top_Message's, at
 // y 160) and its bottom tab of the back tab at the bottom left (layout units as they show)
-// The bottom screen's part of the layouts' space (engine/ui/screen.h), as the Sound Player's: the
-// bottom left of the 608x456 layouts (the Home tab's corner), 533x400 units at 0.6 pixels a unit;
-// the menu, the places and the question are centred in it (BOTTOM_MIDDLE_X)
-const engine::ui::screen::Region BOTTOM_REGION{-304, 172, 1600.0f / 3, 400};
-const f32 BOTTOM_MIDDLE_X = -304 + 800.0f / 3;
 // the places' window (4 rows) low enough for its prompt over it and its tabs, clear of the back tab
 const f32 PLACES_X = BOTTOM_MIDDLE_X, PLACES_Y = -42, PLACES_W = 400;
 // the prompt over it, from the screens' heading (y 169) down into the region (whose top is 172)

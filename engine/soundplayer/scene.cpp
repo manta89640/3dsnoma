@@ -35,10 +35,9 @@ namespace {
 
 using engine::system::HostScene;
 
-// the bottom screen's part of the layouts' space: the bottom left of the 608x456 layouts (where the
-// Home tab is), 533x400 units (4:3), at 0.6 pixels a unit; the list window and the buttons are
-// placed in it (track_list.cpp, controls.cpp)
-const engine::ui::screen::Region BOTTOM_REGION{-304, 172, 1600.0f / 3, 400};
+// the bottom screen's part of the layouts' space (engine/ui/screen.h BOTTOM): the list window and
+// the buttons are placed in it (track_list.cpp, controls.cpp)
+const engine::ui::screen::Region& BOTTOM_REGION = engine::ui::screen::BOTTOM;
 
 class SoundPlayerScene : public HostScene {
 public:

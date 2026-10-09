@@ -33,16 +33,22 @@ void to_bottom(const Region& r) {
 
 void to_top() { write_screen(guest::SCREEN_TOP, 0, 0, 0, 0); }
 
+bool s_claimed;
+
 void claim(const Region& r) {
+    s_claimed = true;
     guest::platform_bottom_claim(true);
     guest::input_set_touch_region(true, r.left, r.top, r.width, r.height);
 }
 
 void release() {
+    s_claimed = false;
     squeeze(true);
     guest::input_set_touch_region(false, 0, 0, 0, 0);
     guest::platform_bottom_claim(false);
 }
+
+bool claimed() { return s_claimed; }
 
 void squeeze(bool on) {
     const u32 draw_info = guest::load32(GA_layout_sDrawInfo);

@@ -26,11 +26,20 @@ struct Region {
     f32 left, top, width, height;
 };
 
+// The native scenes' bottom screen: the bottom left of the 608x456 layouts (where the channel has
+// its Home tab and the room its bar), 533x400 units (4:3), at 0.6 pixels a unit, so that the
+// channel's parts read larger there than on the top screen; the middle of it across, BOTTOM_MIDDLE_X
+// (37 units left of the layouts'), and down, BOTTOM_MIDDLE_Y.
+constexpr Region BOTTOM{-304, 172, 1600.0f / 3, 400};
+constexpr f32 BOTTOM_MIDDLE_X = BOTTOM.left + BOTTOM.width / 2, BOTTOM_MIDDLE_Y = BOTTOM.top - BOTTOM.height / 2;
+
 void to_bottom(const Region& r);
 void to_top();
 
 void claim(const Region& r);
 void release();
+// a scene has the bottom screen (claim() .. release())
+bool claimed();
 
 // the channel's 16:9 squeeze of panes laid out for 4:3 (layout_sDrawInfo's location adjust): on for
 // the top screen's layouts, off for the bottom screen's

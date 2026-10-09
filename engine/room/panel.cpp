@@ -23,13 +23,12 @@ namespace {
 
 using engine::ui::Confirm;
 
-// The bottom screen's part of the layouts' space: the Sound Player's and the island's, the bottom
-// left of the 608x456 layouts, 533x400 units at 0.6 pixels a unit. The bar's places in
-// Move_Btn_Scene (y -162, the way back at x -267 to the TV programmes' end cap at 246) are inside
-// it as they are inside the TV picture, the end cap running off its right edge as it ran off the
-// picture's.
-const screen::Region BOTTOM_REGION{-304, 172, 1600.0f / 3, 400};
-const f32 MIDDLE_X = -304 + 800.0f / 3;
+// The bottom screen's part of the layouts' space (engine/ui/screen.h BOTTOM: the Sound Player's
+// and the island's). The bar's places in Move_Btn_Scene (y -162, the way back at x -267 to the TV
+// programmes' end cap at 246) are inside it as they are inside the TV picture, the end cap running
+// off its right edge as it ran off the picture's.
+const screen::Region& BOTTOM_REGION = screen::BOTTOM;
+const f32 MIDDLE_X = screen::BOTTOM_MIDDLE_X;
 
 const char* const SCENE_LEX = "layout/Move_Btn/Move_Btn_Scene.lex";
 
