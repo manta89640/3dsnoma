@@ -277,7 +277,8 @@ theme (Sound Player semantics).
   shared UI helpers; the island scene shell is engine/wuhu/scene.cpp around engine/wuhu/content.h
   (IslandContent); music is engine/wuhu/music.h (music_boot/depart/arrive/leave, WIDE_WORLD_ID 0x1000).
 - **Music:** the user chose variant B (stately 3/4, D major 108 bpm, last section in E): its score
-  replaces tools/music/hiroi_sekai.py.
+  replaced tools/music/hiroi_sekai.py; recomposed 2026-10-09 at the user's request (4/4, 132 bpm, a
+  departure cue with the castle, the volcano and the ruins hinted at: tools/music/hiroi_sekai.py).
 - **Depth:** the native draws share the depth buffer with the GX path (the Mii), so both must use the
   same depth mapping (no w-buffer for the island alone). The coplanar overlays (_blend, Kiwa: 0.03-0.4
   iu above the terrain) need a depth offset toward the camera in the PICA backend (and the soft one).

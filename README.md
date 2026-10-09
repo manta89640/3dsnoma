@@ -320,7 +320,9 @@ what each Mii plays, every frame.
   renderer on the 3DS GPU.
 - `tools/` — WAD extraction, signature inference, the decompilation driver.
 - `tools/music/` — the port's own music: the island's score (`hiroi_sekai.py`: 「広い世界へ」, a
-  stately 3/4 at 108 bpm on the channel's orchestral instruments, D major rising to E), an RSEQ
+  departure cue in D major, 4/4 at 132 bpm on the channel's own instruments: an 8-bar intro once, then
+  a 68-bar loop of 124 s through the theme and hints of the castle, the volcano and the ruins; its
+  helpers in `score_lib.py`), an RSEQ
   assembler, disassembler and score compiler (`rseq.py`; `rseq.py header` makes
   `engine/wuhu/hiroi_sekai_seq.h`), a reader of the channel's sound archive and a model of its
   sequencer (`brsar.py`), a preview renderer with the channel's own instruments (`sndrender.py`),
