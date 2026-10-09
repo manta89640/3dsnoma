@@ -88,7 +88,9 @@ decompiled sources, assembly, extracted files) stays out of git.
 - Not yet: the channel's dynamically linked Opera
   browser module (`wwwlib-rvl.lz7`, an RSO module with ~4.8 MB of PowerPC code, linked through
   `rso/douga.sel`): the RSO linker is stubbed, so whatever the channel shows with the browser
-  won't work until that module is decompiled too.
+  won't work until that module is decompiled too. Nor the help's videos (使い方: the channel's own
+  MobiClip files): MobiClip is left out, so choosing one ends it at once and the list stays
+  (`runtime/patches/players.cpp`); they need a native MobiClip decoder.
 
 ## Building
 

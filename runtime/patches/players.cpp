@@ -9,6 +9,8 @@
 
 namespace g {
 
+u32 movie_Player_Open_orig(u32 r3, u32 r4, u32 r5);
+
 // The Flash player's start (flash_Manager_ctor: r3 the manager, then the sizes of its MEM1 and
 // MEM2 heaps and its sound buffer): its heaps "FMEM1" and "FMEM2" (+0x10, +0x3C) on blocks of
 // MEM1 and MEM2 (+0x0, +0x4; their expanded heaps +0x8, +0xC), then the player and its sound
@@ -33,6 +35,27 @@ u32 movie_Manager_ctor(u32 r3, u32) {
     M2C_FIELD(r3, gp<u8>, 0xC) = 0;
     M2C_FIELD(r3, gp<u8>, 0xD) = 0;
     return r3;
+}
+
+// A movie opened on it (r4 the movie's player, r5 a heap for it): none is made, as MobiClip isn't
+// there to play it (the help's videos, 使い方: the channel's own files, not the server's), and the
+// movie's methods leave the manager alone (no movie at +0x0).
+u32 movie_Manager_Open(u32 r3, u32 r4, u32 r5) {
+    (void)r4, (void)r5;
+    M2C_FIELD(r3, gp<u32>, 0x0) = 0;
+    guest::log("movie: not played (no MobiClip)");
+    return 0;
+}
+
+// A movie player (the help's, 使い方; movie_Player_Update plays it: +0x3854 its state, 1 playing, 4
+// ending, 5 ended; +0x4 its own movie manager) opening a movie: with none made, it goes straight to
+// its end (playing, it would read the movie's stream, which isn't there), and the help's list
+// comes back.
+u32 movie_Player_Open(u32 r3, u32 r4, u32 r5) {
+    u32 r = movie_Player_Open_orig(r3, r4, r5);
+    if (!M2C_FIELD(r3 + 4, gp<u32>, 0x0))
+        M2C_FIELD(r3, gp<s32>, 0x3854) = 4;
+    return r;
 }
 
 // ... and its destructor, without stopping MobiClip (r4 > 0: delete it too)

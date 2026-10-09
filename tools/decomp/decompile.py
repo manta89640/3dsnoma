@@ -254,7 +254,7 @@ PATCHED_NAMES = {
     "nw4r_g3d_Camera_GetProjectionTexMtx",
     # the content players left out (runtime/patches/players.cpp): Flash never starts, the movie
     # manager starts MobiClip and its work area no more
-    "flash_Manager_Init", "movie_Manager_ctor", "movie_Manager_dtor",
+    "flash_Manager_Init", "movie_Manager_ctor", "movie_Manager_dtor", "movie_Manager_Open", "movie_Player_Open",
     # VF volume files: their zeros in 16 KB writes, not 512 bytes (runtime/patches/vf.cpp)
     "VFi_CreateNandFile",
     # menu buttons for the Wii's own settings and services, and the shop (Flash), hidden
