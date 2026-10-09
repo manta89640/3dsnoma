@@ -41,6 +41,9 @@ void draw();
 void leaving(u32 to);
 void back();
 bool away();
+// The first start's setup (scene::FirstSetupScene: the welcome, the Mii, profile and family steps,
+// its dialogs and lists) the same way, from its making until the room's.
+void away_for_setup();
 // The top screen meanwhile: white, the channel's menus' ground (an app::ScreenFade of the app's own
 // kind, held at full white: its block made at the start, boot()).
 void boot();

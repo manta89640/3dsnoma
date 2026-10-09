@@ -261,6 +261,15 @@ void leaving(u32 to) {
     }
 }
 
+void away_for_setup() {
+    if (s_away)
+        return;
+    s_away = true;
+    screen::layouts_43(true);
+    screen::claim(screen::FULL);
+    guest::log("room: the first start's setup, its layouts for 4:3 on the bottom screen");
+}
+
 void back() {
     if (!s_away)
         return;

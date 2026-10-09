@@ -271,10 +271,12 @@ PATCHED_NAMES = {
     # the room's buttons on the bottom screen (runtime/patches/room.cpp, engine/room): the room
     # scene made, its frame and its end
     "scene_LivingRoomScene_ctor", "scene_LivingRoomScene_dtor", "scene_LivingRoomScene_Update",
-    "scene_LivingRoomScene_Draw",
+    "scene_LivingRoomScene_Draw", "scene_FirstSetupScene_ctor",
     # the app's overlays on the two screens (runtime/patches/overlays.cpp): the system prompt's
     # dialogs on the bottom one, the wipes and the way out's fade on both
     "app_SystemPrompt_Update", "app_SystemPrompt_Draw", "app_Application_Draw",
+    # and the pointer's hand drawn nowhere (the same file)
+    "layout_Cursor_Update",
     # the texts the game asks for: logged with NOMA_DEBUG_MSG, and scripts can wait for one
     # (runtime/patches/debug.cpp)
     "lib_Message_Get",

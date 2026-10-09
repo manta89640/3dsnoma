@@ -17,6 +17,10 @@
 // (the room, the Sound Player, the island), the same layout or quad over the region, under the
 // prompt: so the bottom screen's buttons go with the picture.
 //
+// The Wii Remote's pointer, the hand (layout::Cursor's layouts: +0x8 the hand, +0x130 its shadow),
+// isn't drawn anywhere: what is touched is pointed at directly, on the bottom screen, and nothing
+// on the top screen is pointed at. The cursor still follows the touch and hit-tests as before.
+//
 // app::SystemPrompt (the app's +0x2000): +0x2 u8 open, +0x10 its layout::Cursor, +0x14 the dialog
 // (+0x0 set while it has its layouts, +0x108 its scene layout, a LayoutWrapper).
 // app::Application: +0x330 app::Exit (+0x0 set once asked, +0x8 its app::ScreenFade), +0x1368
@@ -35,6 +39,8 @@
 namespace g {
 
 void app_Application_Draw_orig(u32 r3);
+u32 layout_Cursor_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+                              f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 u32 app_SystemPrompt_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2,
                                  f64 f3, f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 
@@ -134,6 +140,14 @@ void app_Application_Draw(u32 r3) {
     app_SystemPrompt_Draw(guest::load32(r3 + 0x2000));
     homebutton_Manager_Draw(r3 + 0x1368);
     app_Exit_Draw(r3 + 0x330);
+}
+
+u32 layout_Cursor_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+                         f64 f4, f64 f5, f64 f6, f64 f7, f64 f8) {
+    u32 r = layout_Cursor_Update_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
+    for (u32 layout : {0x8u, 0x130u})
+        lyt::show(lyt::root_pane(r3 + layout), false);
+    return r;
 }
 
 }  // namespace g
