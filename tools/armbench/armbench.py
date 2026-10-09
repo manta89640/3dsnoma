@@ -265,7 +265,8 @@ def bench_snd(counts):
 
 
 GX_KINDS = [("layout quad, immediate", 4), ("model draw, into the cache", 8), ("cached draw: fixed slots", 8),
-            ("cached draw: skinned slots", 8), ("cached draws, frame by frame", 8)]
+            ("cached draw: skinned slots", 8), ("cached draws, frame by frame", 8),
+            ("cached draws, 4 a matrix", 8)]
 GX_SOURCES = ("tools/armbench/gx_bench.cpp", "runtime/hw/gx/tnl.cpp", "runtime/hw/gx/vertex.cpp",
               "runtime/hw/gx/pica_vsh.cpp", "runtime/hw/gx/texture.cpp")
 # textures like the room's: GX format, width, height (non-powers of two are padded)

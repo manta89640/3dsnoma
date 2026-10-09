@@ -64,7 +64,10 @@ void put_f32(u8* p, f32 f) {
     memcpy(&b, &f, 4);
     put_be32(p, b);
 }
+// (as the decoder loads XF, runtime/hw/gx/cp.cpp: only a word that changes counts as written)
 void xf_set(u32 addr, u32 v) {
+    if (g_gx.xf[addr] == v)
+        return;
     g_gx.xf[addr] = v;
     gx_xf_written(g_gx, addr, 1);
 }
@@ -162,7 +165,7 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
     static const f32 clip[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
     u32 h = 2166136261u;
     // kinds 2 and 3 draw vertices built before: built once here
-    if (kind >= 2 && kind != 4) {
+    if (kind >= 2 && kind != 4 && kind != 5) {
         const GxTnlPlan& plan = gx_tnl_plan(0, su, 1, clip, 1);
         gx_tnl_vertices(plan, s_stream, 0, vertices, s_pal, s_out, s_slots, s_rows);
         s_pal.flushed();
@@ -170,13 +173,14 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
     GxTnlSlots fixed = {};
     static GxTnlSlots hints[24];
     static bool hinted[24];
-    for (u32 d = 0; d < draws && kind == 4; d++) {
+    // kind 5: as 4, four draws in a row under one matrix (a model's shapes under one node)
+    for (u32 d = 0; d < draws && (kind == 4 || kind == 5); d++) {
         const u32 i = d % 24;
         if (i == 0)
             s_pal = GxTnlPalette();
         if (i % 6 == 0)  // (six lit draws' matrices and the texture matrix fill the palette's 14 groups)
             s_pal.flushed();
-        load_matrix(0, d);
+        load_matrix(0, kind == 5 ? d / 4 : d);
         const GxTnlPlan& plan = gx_tnl_plan(0, su, 1, clip, 1);
         GxTnlSlots got;
         if (!gx_tnl_fixed_slots(plan, s_pal, hinted[i] ? &hints[i] : nullptr, &got)) {
@@ -186,7 +190,7 @@ extern "C" u32 gx(u32 kind, u32 draws, u32 vertices, u32 flush_every) {
         hints[i] = got, hinted[i] = true;
         h = hash_out(h, &got, sizeof(got));
     }
-    for (u32 d = 0; d < draws && kind != 4; d++) {
+    for (u32 d = 0; d < draws && kind != 4 && kind != 5; d++) {
         load_matrix(0, d);
         if (kind == 3)
             load_matrix(3, d + 1), load_matrix(6, d + 2);

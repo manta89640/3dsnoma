@@ -53,7 +53,10 @@ static std::atomic<u32> s_pe_token{0};
 // written; tail: taken by the GPU's thread)
 static bool s_gpu_thread;
 static const u32 RING_SIZE = 4u << 20;
-static const u32 PUBLISH_EVERY = 16u << 10;
+// (published every PUBLISH_EVERY bytes: the room's frame is 30-40 KB of commands, so at 16 KB the
+// GPU's thread waited ~2 ms of the CPU's drawing for its first bytes; a publish is a store and a
+// signal)
+static const u32 PUBLISH_EVERY = 4u << 10;
 static u8* s_ring;
 static std::atomic<u32> s_ring_head{0}, s_ring_tail{0};
 static u32 s_put;

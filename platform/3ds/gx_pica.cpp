@@ -166,6 +166,7 @@ struct DlRecord {
     u32 slots_frame = 0;       // the frame it was last drawn in (0: never)
     u64 data_hash = 0;         // its vertex data's bytes in the list ...
     u32 list_gen = 0;          // ... as they were at this write generation of the list
+    u32 plan_serial = 0;       // the plan it was last found good with (the same: the same registers and recipe)
 };
 // an offset's records at most, drawn with other registers or arrays: in the room a list of 9 draws
 // is drawn about 6 times a frame with other arrays (12 sets of them in a run); with 4 kept a draw,
@@ -176,6 +177,7 @@ struct DlEntry {
     u32 gen = 0;             // its bytes' write generation when the records were made
     u32 last_frame = 0;
     std::vector<DlRecord> recs;
+    u32 next_rec = 0;        // where the next draw's record is looked for first (after the last one found)
 };
 const u32 DL_ENTRIES = 1024;
 
@@ -2042,18 +2044,23 @@ u64 dl_data_hash(const u8* p, u32 n) {
 // generation on).
 int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, const u8* data, u32 count) {
     const u32* cp = g_gx.cp;
-    if (r.vat != vat || r.regs[0] != cp[CP_VCD_LO] || r.regs[1] != cp[CP_VCD_HI] || r.regs[2] != cp[CP_VAT_A + vat] ||
-        r.regs[3] != cp[CP_VAT_B + vat] || r.regs[4] != cp[CP_VAT_C + vat])
+    // (the plan it was last good with: the same vertex format, so the same registers, and recipe)
+    const bool same_plan = r.plan_serial == plan.serial;
+    if (!same_plan && (r.vat != vat || r.regs[0] != cp[CP_VCD_LO] || r.regs[1] != cp[CP_VCD_HI] ||
+                       r.regs[2] != cp[CP_VAT_A + vat] || r.regs[3] != cp[CP_VAT_B + vat] ||
+                       r.regs[4] != cp[CP_VAT_C + vat]))
         return 1;
     for (u32 i = 0; i < r.nranges; i++) {
         const DlRange& g = r.ranges[i];
         if (cp[CP_ARRAY_BASE + g.attr] != r.arrays[i][0] || cp[CP_ARRAY_STRIDE + g.attr] != r.arrays[i][1])
             return 1;
     }
-    u8 recipe[12];
-    dl_recipe(plan, recipe);
-    if (memcmp(recipe, r.recipe, sizeof(recipe)) != 0)
-        return 1;
+    if (!same_plan) {
+        u8 recipe[12];
+        dl_recipe(plan, recipe);
+        if (memcmp(recipe, r.recipe, sizeof(recipe)) != 0)
+            return 1;
+    }
     if (r.list_gen != list_gen) {  // the list was written again: the draw's own bytes
         if (count != r.count || dl_data_hash(data, count * plan.fmt->size) != r.data_hash)
             return 2;
@@ -2071,6 +2078,7 @@ int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, c
         rehashed = true;
     }
     P.kept_by_bytes += rehashed;
+    r.plan_serial = plan.serial;
     return 0;
 }
 
@@ -2475,7 +2483,11 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             else
                 x.alt = keep_first;
         };
-        for (DlRecord& x : e->recs) {
+        // (from where the last draw's record was found on: a list's draws come in its order, so a
+        // list of many draws isn't searched from its start for each)
+        const u32 nrecs = (u32)e->recs.size();
+        for (u32 n = 0, i = e->next_rec < nrecs ? e->next_rec : 0; n < nrecs; n++, i = i + 1 < nrecs ? i + 1 : 0) {
+            DlRecord& x = e->recs[i];
             if (x.offset != offset)
                 continue;
             variants++;
@@ -2485,6 +2497,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             if (stale == 1)
                 continue;
             r = &x;
+            e->next_rec = i + 1;
             if (stale == 2) {
                 P.rebuilt_arrays++;
                 remake(x);
@@ -2570,6 +2583,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 e->recs.push_back(DlRecord());
                 r = &e->recs.back();
                 r->offset = offset;
+                e->next_rec = (u32)e->recs.size();
                 pushed = true;
             }
             const bool in_place = reuse_count == count;
@@ -2607,6 +2621,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                     }
                     dl_recipe(plan, r->recipe);
                     r->data_hash = dl_data_hash(data, count * plan.fmt->size), r->list_gen = e->gen;
+                    r->plan_serial = plan.serial;
                     r->slots_valid = (u8)(1u << P.sbuf), r->slots_last = (u8)P.sbuf;
                     if (!gx_tnl_rows_vary(plan))
                         r->slots[P.sbuf] = P.slots[first];

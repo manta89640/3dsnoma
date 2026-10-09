@@ -495,7 +495,59 @@ bool pal_reuse(GxTnlPalette& pal, u8 kind, u8 xf_row, u32 slot) {
 
 }  // namespace
 
+// The last fixed-slot draw's matrices (their kinds and XF rows) and the slots it got. A draw after it
+// with the same ones (a model's shapes under one node, a layout's quads under one matrix) takes the
+// same slots at once while they hold the same rows: nothing written to XF matrix memory since
+// (g_gx.xf_gen), and the slots still the pending batch's (pal.used: no submit, no new frame since,
+// so no other rows took them).
+namespace {
+bool fixed_slots_search(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots* hint, GxTnlSlots* out);
+struct FixedMemo {
+    const GxTnlPalette* pal = nullptr;
+    u32 xf_gen = ~0u;
+    u32 key[2] = {};  // pos kind, pos row, then each texgen's kind (0: none) and row, a byte each
+    GxTnlSlots out = {};
+    u16 groups = 0;   // the slots' groups (in the pending batch's used_groups while it lasts)
+} s_fixed_memo;
+
+void fixed_key(const GxTnlPlan& p, u32 key[2]) {
+    u32 k0 = (u32)(p.nrm_eye ? PAL_R3N : PAL_R3) | (u32)p.def_pos_index << 8, k1 = 0;
+    if (p.tc[0].src != TNL_SRC_ZERO)
+        k0 |= ((u32)(p.tc[0].stq ? PAL_R3 : PAL_R2) | (u32)p.tc[0].def_index << 8) << 16;
+    if (p.tc[1].src != TNL_SRC_ZERO)
+        k1 |= (u32)(p.tc[1].stq ? PAL_R3 : PAL_R2) | (u32)p.tc[1].def_index << 8;
+    if (p.tc[2].src != TNL_SRC_ZERO)
+        k1 |= ((u32)(p.tc[2].stq ? PAL_R3 : PAL_R2) | (u32)p.tc[2].def_index << 8) << 16;
+    key[0] = k0, key[1] = k1;
+}
+}  // namespace
+
 bool gx_tnl_fixed_slots(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots* hint, GxTnlSlots* out) {
+    FixedMemo& m = s_fixed_memo;
+    u32 key[2];
+    fixed_key(p, key);
+    if (m.xf_gen == g_gx.xf_gen && m.pal == &pal && key[0] == m.key[0] && key[1] == m.key[1] && m.groups &&
+        (pal.used_groups & m.groups) == m.groups) {
+        pal.ref |= m.groups;
+        *out = m.out;
+        return true;
+    }
+    if (!fixed_slots_search(p, pal, hint, out)) {
+        m.groups = 0;
+        return false;
+    }
+    m.pal = &pal, m.xf_gen = g_gx.xf_gen, m.out = *out, m.key[0] = key[0], m.key[1] = key[1];
+    u32 g = (p.nrm_eye ? 3u : 1u) << (out->s[0] / 3);
+    for (u32 k = 0; k < 3; k++)
+        if (p.tc[k].src != TNL_SRC_ZERO)
+            g |= 1u << (out->s[1 + k] / 3);
+    m.groups = (u16)g;
+    return true;
+}
+
+namespace {
+// (gx_tnl_fixed_slots' search)
+bool fixed_slots_search(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots* hint, GxTnlSlots* out) {
     // the slots the draw had last time, when they can be had again (each frame starts with an
     // empty palette, so a frame drawing what the last one did usually finds them free)
     if (hint) {
@@ -520,6 +572,7 @@ bool gx_tnl_fixed_slots(const GxTnlPlan& p, GxTnlPalette& pal, const GxTnlSlots*
     const u8 none[4] = {0, 0, 0, 0};
     return m.slots(p, pal, none, *out);
 }
+}  // namespace
 
 // The commonest immediate draws, the layouts' quads and glyphs: float positions in the stream,
 // no normal, a direct RGBA8 color or none, texgen sources from direct float, u16 or s16 texture
