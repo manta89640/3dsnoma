@@ -71,10 +71,16 @@ const u32 POOL_VERTICES = 40 << 10;  // 2.5 MB + 160 KB of slots
 const u32 IMM_VERTICES = 20 << 10;
 const u32 IBUF_INDICES = 128 << 10;  // 256 KB
 
+// NOMA_TOP_SSAA=1: the top screen drawn at twice its size each way (a 480x800 target) and box-
+// filtered down to the screen by the display transfer (GX_TRANSFER_SCALE_XY): smoother edges and
+// text, and the frame's copies to textures (the Mii faces) made from twice the samples each way;
+// four times the pixels for the GPU to fill and 3 MB of VRAM. Off by default (the plan's P2
+// experiment, to time on a console); without the VRAM it falls back to 400x240.
+u32 s_top_scale = 1;
 #define DISPLAY_TRANSFER_FLAGS                                                                  \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
-     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+     GX_TRANSFER_SCALING(s_top_scale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO))
 // the bottom screen's frame buffer is the log console's: RGB565
 #define BOTTOM_TRANSFER_FLAGS                                                                     \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |             \
@@ -786,8 +792,8 @@ void dump_open() {
     GPUCMD_GetBuffer(&cmdbuf, &size, &off);
     dump_word(0x53594850), dump_word(7);
     dump_phys("linear", (void*)__ctru_linear_heap, __ctru_linear_heap_size);
-    dump_phys("color", P.top->frameBuf.colorBuf, 240 * 400 * 4);
-    dump_phys("depth", P.top->frameBuf.depthBuf, 240 * 400 * 4);
+    dump_phys("color", P.top->frameBuf.colorBuf, 240 * 400 * 4 * s_top_scale * s_top_scale);
+    dump_phys("depth", P.top->frameBuf.depthBuf, 240 * 400 * 4 * s_top_scale * s_top_scale);
     dump_phys("vbuf", P.vbuf, POOL_VERTICES * sizeof(PVertex));
     dump_phys("slots", P.slots, POOL_VERTICES * sizeof(GxTnlSlots));
     dump_phys("ibuf", P.ibuf, IBUF_INDICES * sizeof(u16));
@@ -1467,8 +1473,9 @@ void set_xform() {
     auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; };
     float X0 = clampf(x0 * kx, 0, SW), X1 = clampf(x1 * kx, 0, SW);
     float Y0 = clampf(y0 * ky, 0, 240), Y1 = clampf(y1 * ky, 0, 240);
-    st_scissor(GPU_SCISSOR_NORMAL, (u32)(240 - Y1), (u32)(SW - X1), (u32)std::ceil(240 - Y0),
-                   (u32)std::ceil(SW - X0));
+    const float S = bottom ? 1.0f : (float)s_top_scale;  // (the target's pixels a screen pixel)
+    st_scissor(GPU_SCISSOR_NORMAL, (u32)((240 - Y1) * S), (u32)((SW - X1) * S), (u32)std::ceil((240 - Y0) * S),
+                   (u32)std::ceil((SW - X0) * S));
 }
 
 // The piece of a draw's vertices that can be drawn when only `n` of those left were built (the
@@ -1606,8 +1613,16 @@ int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, c
 bool PicaRenderer::init() {
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8))
         return false;
-    P.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    if (!P.top)
+    if (const char* v = getenv("NOMA_TOP_SSAA"); v && atoi(v) != 0) {
+        s_top_scale = 2;
+        if (!(P.top = C3D_RenderTargetCreate(480, 800, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8))) {
+            log("pica: no VRAM for the top screen at twice its size: 400x240");
+            s_top_scale = 1;
+        } else {
+            log("pica: the top screen drawn at 800x480, filtered down (NOMA_TOP_SSAA)");
+        }
+    }
+    if (!P.top && !(P.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8)))
         return false;
     C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     P.bottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -2052,15 +2067,17 @@ immediate:
 // NOMA_SHOT_EVERY=N (env.txt): every Nth frame, the top screen goes to sdmc:/3ds/noma/shots/
 // as a BMP (and the bottom screen beside it, platform_save_bottom_shot) (the render target untiled by the GPU, then turned upright: it is 240x400, rotated)
 static void save_shot(C3D_RenderTarget* t, u32 n) {
-    const u32 W = 240, H = 400;
+    const u32 W = 240, H = 400, S = t == P.top ? s_top_scale : 1;  // (a twice-size target filtered down)
     u32* buf = (u32*)linearAlloc(W * H * 4);
     if (!buf)
         return;
-    C3D_SyncDisplayTransfer((u32*)t->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), buf, GX_BUFFER_DIM(W, H),
+    // (scaling, the transfer engine halves the output dimensions it is given, as citro3d gives it
+    // the target's own for both)
+    C3D_SyncDisplayTransfer((u32*)t->frameBuf.colorBuf, GX_BUFFER_DIM(W * S, H * S), buf, GX_BUFFER_DIM(W * S, H * S),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+                                GX_TRANSFER_SCALING(S == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
     mkdir("sdmc:/3ds/noma/shots", 0777);
     char path[64];
     snprintf(path, sizeof(path), "sdmc:/3ds/noma/shots/%05u.bmp", (unsigned)n);
@@ -2097,14 +2114,15 @@ static void save_shot(C3D_RenderTarget* t, u32 n) {
 // ---------------------------------------------------------------- EFB copies to textures
 namespace {
 
-u32* s_readback;  // the render target after read_back(), untiled: 240x400, 0xRRGGBBAA, rotated
+u32* s_readback;  // the render target after read_back(), untiled: 240x400 (x s_top_scale), 0xRRGGBBAA, rotated
 
 // let the GPU finish what was drawn so far and read the render target back; the frame then
 // goes on drawing over it (its end is not shown: the output is detached meanwhile)
 bool read_back() {
     NOMA_PROF_SCOPE("(gx readback)");
     Timed timed(Timers::READBACK);
-    if (!s_readback && !(s_readback = (u32*)linearAlloc(240 * 400 * 4)))
+    const u32 RW = 240 * s_top_scale, RH = 400 * s_top_scale;
+    if (!s_readback && !(s_readback = (u32*)linearAlloc(RW * RH * 4)))
         return false;
     bool in_frame = P.in_frame;
     if (in_frame) {
@@ -2116,13 +2134,13 @@ bool read_back() {
     }
     // outside a frame this waits for the GPU's queue, then for the transfer
     GpuWait w("for a read-back (C3D_SyncDisplayTransfer)");
-    C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), s_readback,
-                            GX_BUFFER_DIM(240, 400),
+    C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(RW, RH), s_readback,
+                            GX_BUFFER_DIM(RW, RH),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
-    GSPGPU_InvalidateDataCache(s_readback, 240 * 400 * 4);
+    GSPGPU_InvalidateDataCache(s_readback, RW * RH * 4);
     if (in_frame) {
         C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         C3D_FrameBegin(0);
@@ -2148,11 +2166,12 @@ void set_efb_offset(s32 ox, s32 oy) {
     if (efb_off_x == s_rb_off_x && efb_off_y == s_rb_off_y)
         return;
     s_rb_off_x = efb_off_x, s_rb_off_y = efb_off_y;
+    const float SW = 400.0f * s_top_scale, SH = 240.0f * s_top_scale;  // (the target, upright)
     for (u32 v = 0; v < 1024; v++) {
         float fx = (float)((s32)v + efb_off_x) + 0.5f, fy = (float)((s32)v + efb_off_y) + 0.5f;
-        u32 X = (u32)std::min(399.0f, std::max(0.0f, fx * 400.0f / FRAME_W));
-        u32 Y = (u32)std::min(239.0f, std::max(0.0f, fy * 240.0f / FRAME_H));
-        s_rb_col[v] = X * 240, s_rb_row[v] = 239 - Y;
+        u32 X = (u32)std::min(SW - 1, std::max(0.0f, fx * SW / FRAME_W));
+        u32 Y = (u32)std::min(SH - 1, std::max(0.0f, fy * SH / FRAME_H));
+        s_rb_col[v] = X * (u32)SH, s_rb_row[v] = (u32)SH - 1 - Y;
     }
 }
 void load_efb_offset() {
