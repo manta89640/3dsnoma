@@ -1198,6 +1198,7 @@ int main(int argc, char** argv) {
     guest::audio_init();
     if (!guest::load_dol(dol))
         guest::platform_fatal("bad main.dol");
+    std::vector<u8>().swap(dol);  // (in guest memory now: its 8.9 MB back to the heap for the session)
     guest::setup_low_memory(0x00010001, 0x4843494A);  // HCIJ
     guest::ios_init(data + "/nand", data + "/content");
     guest::hw_init();
