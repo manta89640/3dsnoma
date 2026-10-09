@@ -81,11 +81,14 @@ u32 s_top_scale = 1;
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |           \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(s_top_scale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO))
-// the bottom screen's frame buffer is the log console's: RGB565
+// the bottom screen's frame buffer is the log console's: RGB565. NOMA_BOTTOM_SSAA=1: the bottom
+// screen drawn at twice its size each way (a 480x640 target, 2.4 MB of VRAM) and filtered down,
+// as NOMA_TOP_SSAA does for the top one (the two together don't fit beside the island's shadow map)
+u32 s_bottom_scale = 1;
 #define BOTTOM_TRANSFER_FLAGS                                                                     \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |             \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
-     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+     GX_TRANSFER_SCALING(s_bottom_scale == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO))
 
 using PVertex = GxTnlVertex;  // the vertex shader's inputs (tnl.h)
 static_assert(sizeof(PVertex) == 64, "PVertex layout");
@@ -1473,7 +1476,7 @@ void set_xform() {
     auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; };
     float X0 = clampf(x0 * kx, 0, SW), X1 = clampf(x1 * kx, 0, SW);
     float Y0 = clampf(y0 * ky, 0, 240), Y1 = clampf(y1 * ky, 0, 240);
-    const float S = bottom ? 1.0f : (float)s_top_scale;  // (the target's pixels a screen pixel)
+    const float S = (float)(bottom ? s_bottom_scale : s_top_scale);  // (the target's pixels a screen pixel)
     st_scissor(GPU_SCISSOR_NORMAL, (u32)((240 - Y1) * S), (u32)((SW - X1) * S), (u32)std::ceil((240 - Y0) * S),
                    (u32)std::ceil((SW - X0) * S));
 }
@@ -1625,7 +1628,17 @@ bool PicaRenderer::init() {
     if (!P.top && !(P.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8)))
         return false;
     C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-    P.bottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    if (const char* v = getenv("NOMA_BOTTOM_SSAA"); v && atoi(v) != 0) {
+        s_bottom_scale = 2;
+        if (!(P.bottom = C3D_RenderTargetCreate(480, 640, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8))) {
+            log("pica: no VRAM for the bottom screen at twice its size: 320x240");
+            s_bottom_scale = 1;
+        } else {
+            log("pica: the bottom screen drawn at 640x480, filtered down (NOMA_BOTTOM_SSAA)");
+        }
+    }
+    if (!P.bottom)
+        P.bottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     if (P.bottom)
         C3D_RenderTargetSetOutput(P.bottom, GFX_BOTTOM, GFX_LEFT, BOTTOM_TRANSFER_FLAGS);
     else
