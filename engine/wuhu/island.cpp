@@ -63,6 +63,14 @@
 // stand-in (the package's shadow_proxy, a capsule its height, never seen; on foot only: in a vehicle the
 // vehicle casts), and has a blob under it (shadow_blob, WSR's spectators' silhouette) on the ground
 // below its feet, which the map fades out where it covers: so the blob shows only without the map.
+//
+// Sounds (sounds.h, docs/wuhu.md "Sounds"): Wii Sports Resort's own effects, from DATA/wuhu/sounds.nsfx
+// (read with the package, on the worker), played as things happen: the Mii's feet coming down as its
+// gait's clip puts them down (IslandMii::footfalls), on the ground under them (its KCL attribute) or in
+// the water over them, a jump off the ground and a landing on it again (as loud as the drop was deep),
+// the splashes going in (by their strength) and each stroke's hand, the parachute opening, a car or a
+// boat got into and out of; and, once an update, the loops for what goes on: the wind while it glides,
+// the vehicle's engine by its speed and throttle (faded out while the island is frozen).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -82,6 +90,7 @@
 #include "engine/wuhu/island_mii.h"
 #include "engine/wuhu/player.h"
 #include "engine/wuhu/sand_tracks.h"
+#include "engine/wuhu/sounds.h"
 #include "engine/wuhu/vehicles.h"
 #include "noma_decomp.h"
 
@@ -97,6 +106,7 @@ using engine::math::Mtx34;
 using engine::math::Vec3;
 
 const char* const PACKAGE = "/wuhu/island.ng3d";
+const char* const SOUNDS = "/wuhu/sounds.nsfx";
 constexpr f32 TICK = 1.0f / 60.0f;
 constexpr f32 DEG = 3.14159265f / 180.0f;
 constexpr u32 NONE32 = 0xFFFFFFFFu;
@@ -126,6 +136,10 @@ constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
 // ENTRY_LEAD of the Mii's height along the way it went.
 constexpr f32 SPLASH_WEAKEST = 0.15f, SPLASH_STRONGEST = 1.5f, DROP_IN_STRENGTH = 0.35f, HAND_STRENGTH = 0.2f;
 constexpr f32 ENTRY_LEAD = 0.2f;
+// The sounds' (sounds.h): a fall lands with a sound when it was a jump or came down faster than a drop
+// of LAND_DROP of the Mii's height would (not a kerb stepped off); the feet step in the water's sound
+// when it is deeper over them than WADE_STEPS of the Mii's height (over the ankles).
+constexpr f32 LAND_DROP = 0.25f, WADE_STEPS = 0.08f;
 // a surface within this of the sea's level is the sea's (its waves); else a lake's or a pool's
 constexpr f32 SEA_LEVEL_SLACK = 1.0f;
 
@@ -239,6 +253,9 @@ private:
     bool on_sea(f32 surface) const;
     void splash(Vec3 at, f32 strength, f32 yaw, f32 speed, u8 kind);
     void update_water(Vec3 drawn);
+    IslandSounds::Ground ground_sound() const;
+    void land_sounds(bool was_air, u16 ground_before);
+    void loop_sounds(const Controls& controls, bool frozen, f32 dt);
     Vec3 controlled_position() const;
     bool in_car() const { return vehicles_ && vehicles_->driven() != Vehicles::NONE && !vehicles_->boat(); }
     f32 controlled_yaw() const;
@@ -255,6 +272,7 @@ private:
     std::unique_ptr<FollowCamera> camera_;
     std::unique_ptr<Vehicles> vehicles_;
     std::unique_ptr<SandTracks> sand_;
+    std::unique_ptr<IslandSounds> sounds_;
     u32 parachute_instance_ = NONE32;
     bool parachute_visible_ = false;
     u32 parachute_since_ = 0;  // (frame_ the glide began)
@@ -286,10 +304,17 @@ private:
     // offset is added then), the Mii's entry speed for a swim begun over a boat's side
     std::vector<engine::g3d::WaterSplash> splashes_;
     f32 drop_in_speed_ = 0;
+    // the sounds': the last airborne update's fall speed (island units a second, down) and whether it
+    // was a jump, a leap or a glide (for the landing's); the glide's (for the canopy's opening)
+    f32 fall_speed_ = 0;
+    bool fall_sounds_ = false;
+    bool glided_ = false;
 };
 
 Island::~Island() {
     take_job();  // (the World is the helper's while a job is out)
+    // (what plays from the sound bank stops with it)
+    sounds_.reset();
     // the Mii's guest objects (the content's only ones); then the package's GPU resources, before
     // the package (native_draw.h), and what reads the package and the collision before them
     mii_.reset();
@@ -311,7 +336,7 @@ void Island::start_loading() {
     start_us_ = guest::host_time_us();
     if (const char* e = std::getenv("NOMA_WUHU_LOG_EVERY"))
         log_every_ = std::max(1, std::atoi(e));
-    load_ = std::make_unique<PackageLoad>(guest::data_dir() + PACKAGE);
+    load_ = std::make_unique<PackageLoad>(guest::data_dir() + PACKAGE, guest::data_dir() + SOUNDS);
     load_->start();
     mii_ = std::make_unique<IslandMii>();
 }
@@ -348,6 +373,7 @@ void Island::finish_loading() {
     }
     package_ = std::move(l.package);
     collision_ = std::move(l.collision);
+    sounds_ = std::make_unique<IslandSounds>(std::move(l.sounds), l.sounds_error);
     // the Mii drawn MII_SCALE times as big against the island as the package's k makes it
     k_ = package_->env().mii_units_per_unit / MII_SCALE;
     clear_ = clear_of(*package_);
@@ -547,6 +573,8 @@ bool Island::enter_vehicle() {
     FollowCameraParams cp = FollowCameraParams::make(std::max(pp.height, 0.8f * box.half_length));
     cp.aspect = mii_->aspect();
     camera_->set_params(cp);
+    if (sounds_)
+        sounds_->vehicle_in(vehicles_->boat());
     guest::log("wuhu: into the %s (vehicle %u)", vehicles_->boat() ? "boat" : "car", (unsigned)v);
     return true;
 }
@@ -561,7 +589,7 @@ bool Island::leave_vehicle() {
     const bool boat = vehicles_->boat();
     // (the vehicle is an obstacle again for where the Mii may be)
     player_->set_obstacles(vehicles_->obstacles());
-    bool out = false;
+    bool out = false, into_water = false;
     for (const Vec3& at : vehicles_->exits(pp.radius + 0.1f * pp.height)) {
         // (`at` is at the vehicle's bottom: a boat's is about the water's surface)
         Vec3 feet;
@@ -571,7 +599,7 @@ bool Island::leave_vehicle() {
             const f32 v = DROP_IN_STRENGTH * std::sqrt(2.0f * pp.gravity * pp.max_drop);
             splash(Vec3{at.x, surface, at.z}, DROP_IN_STRENGTH, vehicles_->yaw(), 0, engine::g3d::WaterSplash::DROP_IN);
             drop_in_speed_ = v * TICK * k_;
-            out = true;
+            out = into_water = true;
             break;
         }
         // ground no higher than a step over its bottom, no lower than a safe drop under it
@@ -587,6 +615,12 @@ bool Island::leave_vehicle() {
         return false;
     }
     vehicles_->leave();
+    if (sounds_) {
+        if (into_water)
+            sounds_->splash(DROP_IN_STRENGTH);
+        else
+            sounds_->vehicle_out(boat, ground_sound());
+    }
     FollowCameraParams cp = FollowCameraParams::make(pp.height);
     cp.aspect = mii_->aspect();
     camera_->set_params(cp);
@@ -735,6 +769,8 @@ void Island::update_water(Vec3 drawn) {
         guest::log("wuhu: water: splash cause %s strength %.2f (in at %.1f units a second down, %.1f along) at "
                    "(%.1f, %.1f, %.1f)%s", CAUSES[(int)e->cause], strength, -e->vy, e->speed * 60.0f, at.x, at.y,
                    at.z, on_sea(at.y) ? " on the sea" : "");
+        if (sounds_)
+            sounds_->splash(strength);
     }
     const bool swimming = on_foot && player_->swimming();
     // (on the waves where the sea has them: at the time the World's frame is made for)
@@ -754,6 +790,51 @@ void Island::update_water(Vec3 drawn) {
     sw.scale = pp.height / WSR_MII_HEIGHT;
     sw.on_sea = swimming && on_sea(player_->position().y + player_->water_depth());
     world_->set_swimmer(sw);
+}
+
+// the ground the feet are on, for their sounds: its KCL attribute, or the water's over the ankles
+IslandSounds::Ground Island::ground_sound() const {
+    return IslandSounds::ground(player_->ground_attribute(),
+                                player_->water_depth() > WADE_STEPS * player_->params().height);
+}
+
+// The player's own sounds of the update: a jump off the ground, and a landing on it again (a jump's, a
+// leap's or a glide's, or a fall faster than a short drop's), as loud as the fall was fast against the
+// deepest drop the Mii may take (PlayerParams::max_drop), on the ground it came down on; out of the
+// water onto a quay or a rock over it, the softest landing there (the hands and knees on its edge).
+// Into the water is a splash instead (update_water).
+void Island::land_sounds(bool was_air, u16 ground_before) {
+    const Player& p = *player_;
+    const PlayerParams& pp = p.params();
+    if (!was_air && p.jumping())
+        sounds_->jump(IslandSounds::ground(ground_before, p.water_depth() > WADE_STEPS * pp.height));
+    if (const WaterExit* x = p.water_exit())
+        if (x->over_surface > 0)
+            sounds_->land(ground_sound(), 0.0f);
+    if (was_air && !p.airborne() && !p.swimming()) {
+        const f32 drop = std::sqrt(2.0f * pp.gravity * LAND_DROP * pp.height);
+        if (fall_sounds_ || fall_speed_ >= drop)
+            sounds_->land(ground_sound(), fall_speed_ / std::sqrt(2.0f * pp.gravity * pp.max_drop));
+    }
+    fall_speed_ = p.airborne() ? std::max(0.0f, -p.vertical_speed()) : 0.0f;
+    fall_sounds_ = p.airborne() && (p.jumping() || p.leaping() || p.gliding());
+}
+
+// The loops of the update (sounds.h Going): the wind under the parachute, the driven vehicle's engine
+// by its speed and the stick; and the canopy's opening as a glide begins. Frozen, they fade out.
+void Island::loop_sounds(const Controls& controls, bool frozen, f32 dt) {
+    const bool on_foot = vehicles_->driven() == Vehicles::NONE;
+    IslandSounds::Going g;
+    g.glide = on_foot && player_->gliding();
+    if (g.glide && !glided_)
+        sounds_->parachute();
+    glided_ = g.glide;
+    if (!on_foot) {
+        g.vehicle = vehicles_->boat() ? IslandSounds::BOAT : IslandSounds::CAR;
+        g.speed = vehicles_->speed_fraction();
+        g.throttle = frozen ? 0.0f : controls.move_y;
+    }
+    sounds_->update(g, frozen, dt);
 }
 
 void Island::warp(u32 marker) {
@@ -796,7 +877,11 @@ void Island::update(const Controls& controls, bool frozen) {
     const f32 walked = player_->distance(), yaw_before = player_->yaw();
     const Vec3 before = controlled_position();
     if (vehicles_->driven() == Vehicles::NONE) {
+        const bool was_air = player_->airborne();
+        const u16 ground_before = player_->ground_attribute();
         player_->update(move, dt);
+        if (sounds_ && !toggled)
+            land_sounds(was_air, ground_before);
         const bool on_foot = !player_->airborne() && !player_->swimming() && !toggled;
         sand_->walk(before, player_->position(), player_->distance() - walked, player_->yaw(), player_->params().height,
                     on_foot, frame_);
@@ -895,6 +980,18 @@ void Island::update(const Controls& controls, bool frozen) {
                 splash(Vec3{w.x, surface, w.z}, HAND_STRENGTH, player_->yaw(), player_->speed() * 60.0f,
                        engine::g3d::WaterSplash::HAND);
             }
+    }
+    if (sounds_) {
+        // the feet coming down as the gait's clip put them down this update, the stroke's hands going in
+        const u8 down = motion.kind == MiiMotion::GROUND ? mii_->footfalls() : 0;
+        for (int side = 0; side < 2; side++)
+            if (down >> side & 1)
+                sounds_->step(ground_sound(), side, (down & IslandMii::FOOTFALL_RUN) != 0);
+        if (motion.kind == MiiMotion::SWIM)
+            for (int side = 0; side < 2; side++)
+                if (mii_->strokes() >> side & 1)
+                    sounds_->stroke();
+        loop_sounds(controls, frozen, dt);
     }
 }
 

@@ -32,7 +32,8 @@ double stream_seconds();
 
 // the game's thread, once a frame: read and decode ahead
 void stream_pump();
-// the AX frame: add n samples of the piece into main L and R (in 16-bit units)
+// the AX frame: add n samples of the piece into main L and R (in 16-bit units), and the native
+// sound effects' (sfx.h: sfx_mix)
 void stream_mix(s32* left, s32* right, u32 n);
 
 }  // namespace engine::audio

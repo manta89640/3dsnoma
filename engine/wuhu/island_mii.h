@@ -97,6 +97,10 @@ public:
     // right; and where the posed body had each wrist then (guest units)
     u8 strokes() const { return strokes_; }
     engine::math::Vec3 wrist(int side) const { return wrist_[side & 1]; }
+    // The gait's feet coming down on the ground in the last update (its clip's strike frames passed,
+    // walking or running): bit 0 the left, bit 1 the right; FOOTFALL_RUN with them in a run or sprint
+    u8 footfalls() const { return footfalls_; }
+    static constexpr u8 FOOTFALL_RUN = 4;
 
     // The clips: what each is and how its frame goes is island_mii.cpp's table.
     enum Clip : u8 {
@@ -164,6 +168,7 @@ private:
     bool placed_ = false, was_swimming_ = false;
     engine::math::Vec3 placed_at_{0, 0, 0};  // the body's last place (guest units)
     u8 strokes_ = 0;
+    u8 footfalls_ = 0;
     u32 wrist_node_[2] = {};
     engine::math::Vec3 wrist_[2] = {};
     bool female_ = false;

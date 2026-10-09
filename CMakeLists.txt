@@ -58,6 +58,7 @@ endif()
 set(ENGINE_SOURCES
   engine/audio/aux.cpp
   engine/audio/ax_render.cpp
+  engine/audio/sfx.cpp
   engine/audio/stream.cpp
   engine/collision/kcl.cpp
   engine/cw/int64.cpp
@@ -134,6 +135,7 @@ set(ENGINE_SOURCES
   engine/wuhu/player.cpp
   engine/wuhu/sand_tracks.cpp
   engine/wuhu/scene.cpp
+  engine/wuhu/sounds.cpp
   engine/wuhu/vehicles.cpp
 )
 

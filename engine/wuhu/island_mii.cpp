@@ -689,7 +689,7 @@ void IslandMii::choose(const MiiMotion& m) {
     const f32 speed = m.walked / ticks, hs = std::max(height_scale_, 0.1f);
     const bool moving = speed > (clip_ >= WALK && clip_ <= SPRINT ? STOP : START) * hs;
     const bool air_clip = clip_ == JUMP || clip_ == DROP || clip_ == FALL || clip_ == GLIDE || clip_ == SLIDE;
-    strokes_ = 0;
+    strokes_ = footfalls_ = 0;
     if (m.kind != MiiMotion::SWIM)
         treading_ = 0;
     // the clip
@@ -805,14 +805,19 @@ void IslandMii::choose(const MiiMotion& m) {
     case BY_DISTANCE: {
         const f32 was = frame_;
         move_gait((Clip)clip_, m.walked, m.frames);
-        // the archive's stroke: a hand in the water at its strike frame passed (the left's, the right's)
-        if (clip_ == SWIM && s.archive && m.walked > 0) {
+        // the strike frames passed (the left's, the right's): the archive's stroke, a hand in the
+        // water; a gait's, a foot down on the ground (the island's footsteps)
+        if (m.walked > 0) {
             const f32 gone = wrap(frame_ - was, n);
             auto passed = [&](u8 at) {
                 const f32 d = wrap((f32)at - was, n);
                 return d > 0 && d <= gone;
             };
-            strokes_ = (passed(s.strike) ? 1 : 0) | (passed(s.right) ? 2 : 0);
+            const u8 bits = (passed(s.strike) ? 1 : 0) | (passed(s.right) ? 2 : 0);
+            if (clip_ == SWIM && s.archive)
+                strokes_ = bits;
+            else if (clip_ >= WALK && clip_ <= SPRINT && m.kind == MiiMotion::GROUND && bits)
+                footfalls_ = bits | (clip_ >= RUN ? FOOTFALL_RUN : 0);
         }
         break;
     }

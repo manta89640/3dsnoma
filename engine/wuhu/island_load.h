@@ -8,11 +8,15 @@
 //
 // A package still holding GX textures (made without --bake) is refused: converting them here would run
 // pica_tex.h's work tables on this thread while the 3DS's GPU thread uses them for its own uploads.
+//
+// The island's sound effects (DATA/wuhu/sounds.nsfx, about 0.7 MB: sounds.h) are read on the same
+// worker after the package, for the same reason: not the game's thread.
 #pragma once
 
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "engine/collision/kcl.h"
 #include "engine/g3d/package.h"
@@ -22,7 +26,8 @@ namespace engine::wuhu {
 
 class PackageLoad {
 public:
-    explicit PackageLoad(std::string path);
+    // the package at `path`, and the sound bank at `sounds_path` (none if empty)
+    explicit PackageLoad(std::string path, std::string sounds_path = std::string());
     // (waits for the worker, if it is still at it)
     ~PackageLoad();
     PackageLoad(const PackageLoad&) = delete;
@@ -40,12 +45,18 @@ public:
     std::unique_ptr<engine::collision::World> collision;
     std::string error;
     f32 read_ms = 0, check_ms = 0, collision_ms = 0;
+    // the sound bank's bytes as they are (empty if it can't be had, `sounds_error` saying why), read
+    // whether or not the package could be
+    std::vector<u8> sounds;
+    std::string sounds_error;
 
 private:
     static void run(void* self);
     void work();
 
-    const std::string path_;
+    void read_sounds();
+
+    const std::string path_, sounds_path_;
     std::atomic<u32> read_{0}, total_{0};
     std::atomic<bool> done_{false};
     bool started_ = false;

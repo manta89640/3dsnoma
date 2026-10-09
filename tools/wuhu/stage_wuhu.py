@@ -46,7 +46,9 @@ build-host/ng3d-bake, which converts the GX texels to PICA ones offline), with U
 DATA/wuhu/NAME.unbaked.ng3d (kept with --keep-raw: tools/g3d/preview.py reads GX texels) and OUT =
 DATA/wuhu/NAME.ng3d. Without the tool it stops: the 3DS refuses an unbaked package. --no-bake
 writes one anyway (the host converts GX texels as it loads). --no-prelit and --no-pos16 make
-packages for comparisons.
+packages for comparisons. After the package: the Mii's clip archive (DATA/wuhu/mii_anim.brres,
+tools/wuhu/mii_anims.py) and the island's sound effects (DATA/wuhu/sounds.nsfx,
+tools/wuhu/stage_sounds.py), which each can also be staged alone.
 """
 import argparse
 import json
@@ -2470,6 +2472,10 @@ def main(argv=None):
         st.say("wrote %s: %d bytes, %d clips" % (os.path.join(out_dir, "mii_anim.brres"), len(data), len(clips)))
     else:
         st.say("no Wii no Ma content at %s: no Mii clip archive (the island plays the content's clips)" % src)
+    # the island's sound effects beside it (tools/wuhu/stage_sounds.py; without them the island has only
+    # its music)
+    import stage_sounds
+    stage_sounds.stage(a.wsr, a.data, say=st.say)
     for k, v in sorted(st.cv.stats.items()):
         print("  %s: %s" % (k, v))
     print("  positions on a grid of 1/%g unit: moved by at most %.4f a coordinate, %.4f in all" % (

@@ -140,7 +140,9 @@ this project's patches, and for the 3DS devkitARM with libctru and citro3d.
    `tools/wuhu/stage_wuhu.py DATA --wsr EXTRACTION` writes `DATA/wuhu/island.ng3d` (NG3D version 2:
    a package staged before the speed round is refused, the reason in the log; stage it again), baked with
    the host build's `ng3d-bake` and with its cells' visibility from `ng3d-pvs` (build the host
-   targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it.
+   targets first); [docs/wuhu.md](docs/wuhu.md) says what goes into it. It also stages the island's
+   sound effects, Wii Sports Resort's own, beside it (`DATA/wuhu/sounds.nsfx`, 0.7 MB; alone:
+   `tools/wuhu/stage_sounds.py DATA --wsr EXTRACTION`); without them the island has only its music.
    Wii Sports' and Wii Sports Resort's music for the Sound Player, from the same disc:
    `tools/music/stage_music.py DATA [--extract ROOT]` (ROOT: the disc split into `launcher/`,
    `wii-sports/`, `wii-sports-resort/`; default `../wii-sports-extract`) writes
@@ -192,6 +194,7 @@ Useful environment variables:
 | `NOMA_WUHU_BY_FRAMES=1` | Wuhu Island: the Mii, the camera and the World's animations move 1/60 s a game frame, as before they went by the time a frame takes (the display's frames since the last, at most 3): repeatable host runs |
 | `NOMA_G3D_STATS=N` | 3DS: every N frames the island's native draws: draws, prelit draws, triangles, the PICA backend's milliseconds a frame (and its worst), material and matrix changes, uniform vectors and command words a frame, items not drawn, what is resident and the linear heap left; the shadow map's casters, their triangles, the milliseconds of its pass, the receiving items and the decals faded a frame |
 | `NOMA_WUHU_SHADOWS=0`, `NOMA_WUHU_SHADOW_MAP=N` | Wuhu Island: no shadow map (the trees' and props' silhouette decals and the cars' and the Mii's blobs stay); its size, N texels a side (512 by default; 256 and 1024 to try on the console) (docs/wuhu.md "Shadows") |
+| `NOMA_WUHU_SFX_DB=x`, `NOMA_WUHU_SFX=0`, `NOMA_WUHU_SFX_LOG=1` | Wuhu Island's sound effects (`engine/wuhu/sounds.h`, `DATA/wuhu/sounds.nsfx`; docs/wuhu.md "Sounds"): their level moved by x dB against the music (`-3`, `+3`); none; each one logged as it plays (`wuhu: sound NAME at GAIN`), and every second the loops playing (the engine's, the glide's wind) and the voices the mixer has |
 | `NOMA_WUHU_SPEED_OFF=pvs,detail,anim,sort` | Wuhu Island: the named speed-ups of the island's World off (`engine/g3d/world.h` WorldFeature: the cells' visibility rows, detail batches culled by distance, far props animated at a lower rate, the opaque items grouped by material; `all`), for comparisons on the console |
 | `NOMA_WUHU_LOAD_MS=ms`, `NOMA_WUHU_TEST_PACKAGE=file.ng3d` | Wuhu Island's stand-in content (`NOMA_WUHU_PLACEHOLDER=1`): how long it "loads" (1500 by default), and a package whose warp markers (kind 3) the exploration menu lists, a warp then giving the stand-in's sky another colour (tests of the scene's shell) |
 | `NOMA_WUHU_MUSIC_TEST=N,M[,L]` | the island's music without the island: at game time N s the room's music pauses, L s later (1 if not given: the island loading) 「広い世界へ」 plays, M s after that the room's theme comes back; the BGM player's state logged (`tools/music/dump_check.py` reads a recording of it) |

@@ -39,6 +39,9 @@ Numbers are measured on the PAL disc (SP2P01) unless marked est.
   archives it needs (Yaz0 U8 `.carc`, unpacked in memory); two runs give the same bytes. Before
   writing it checks every reference in the package, that the package reads back to the same bytes,
   and that every warp spot has room for the Mii (below); it stops if any fails.
+- After the package it stages the island's sound effects beside it: `DATA/wuhu/sounds.nsfx` and
+  `DATA/wuhu/sounds.json` ("Sounds" below; under a second). `tools/wuhu/stage_sounds.py DATA [--wsr
+  ROOT] [--wav DIR]` stages them alone (`--wav`: each sound as a .wav to audition).
 
 The tools: `tools/g3d/brres.py` reads BRRES (models, textures, CHR0/SRT0/CLR0 keyframes, SCN0
 light sets), `tools/g3d/gxtex.py` decodes GX textures, `tools/g3d/convert.py` turns BRRES
@@ -531,6 +534,72 @@ drawn by `engine/g3d/water_fx.h`.
   island then draws no water effects. `island.json`'s `water_fx` lists each picture's archive,
   texture, format, size and cell.
 
+## Sounds
+
+`tools/wuhu/stage_sounds.py` (SOUNDS, GROUNDS), the bank's format `engine/audio/nsfx.h`; played by
+`engine/audio/sfx.*` and `engine/wuhu/sounds.*`, told what happens by `engine/wuhu/island.cpp`.
+
+- WSR has one sound archive, `Sound/Static/Sp2Snd.brsar` (59,383,776 bytes; RSAR 1.04: 1,610 sounds,
+  21 banks, 141 files). Most of its effects are sequences (RSEQ) playing a note or two on an
+  instrument of an effects bank; some are wave sounds (RWSD). The bank keeps the waves those notes
+  play, the disc's own mono DSP-ADPCM as it is, with nw4r::snd's level and pitch for each note: the
+  velocity squared, times the instrument's volume, the track's volume squared and the sound's archive
+  volume (`tools/music/sndrender.py`'s model); 2^((key - original key) / 12) times the instrument's
+  tune.
+- A sequence is run 64 times (seeds 1-64) through `tools/music/brsar.py`'s model of nw4r's sequencer,
+  with the player variables the game sets. Its random transposes give the variants: Showdown's
+  sequence picks one of two recordings for each foot. Its random pitch bends and volumes give the
+  spreads the engine draws at each play: a step varies up to a semitone either way and 1.6 dB.
+- The bank: 50 sounds, 82 variants, 76 waves (45.7 s at their own rates, 16 to 32 kHz), 672,200
+  bytes of ADPCM, 681,104 bytes in all. `sounds.json` lists each sound's WSR label, variables,
+  variants (wave, level, pitch, length) and spreads.
+
+| what | WSR's sound | |
+|---|---|---|
+| a foot down, walking or running | `SE_SWF_KUMITE_FOOTNOTE_WALK_L`, `_R`, `_RUN_L`, `_R` (Swordplay Showdown) | by the ground (below) |
+| a jump, a landing | `SE_SWF_KUMITE_FOOTNOTE_JUMP`, `_LANDING` | by the ground; a landing at half to full level by how fast the Mii came down |
+| into the water | `SE_BIC_LANDING_WATER` (a wheel in the shallows, two layers), `SE_BIC_FALL_WATER_ONE` (a cyclist falling in), `SE_SWF_PLAYER_FALL_WATER` (a Mii knocked off the duel stage into the sea) | by the splash's strength: under 0.45, under 0.9, over (a jump off a beach is about 0.65, the plaza's sea front 1.5); over a boat's side the first; walking in, Showdown's landing in water |
+| a swimming hand going in | `SE_CAN_PADDLING_S` (Canoeing's light stroke, two layers) | at 0.4 of its level: four a second at speed |
+| the parachute opening, the glide | `SE_OMK_PARACHUTE_L_OPEN_PLAYER` (Skydiving), `SE_PLN_WIND_FLYING` (Island Flyover; a loop) | |
+| into and out of a car | `SE_OMK_FOOTNOTE_TO_HATCH`, `SE_OMK_FOOTNOTE_JUMP_OUT` (Skydiving: steps on the plane's floor and out of its hatch) | WSR has no car door |
+| driving a car | `SE_CMN_ELEC_CAR_RUNNING_1` (the island's electric cars, a loop) | louder and up to a fifth higher with the speed and the throttle |
+| into and out of a boat | Showdown's landing on wood (the deck); out onto land, the landing on the ground there | out into the water: the small splash |
+| driving a boat | `SE_JSK_BOAT_ENGINE_IDLE`, `_LOW`, `_HIGH`, `SE_JSK_BOAT_RUN_WATER_LOW`, `_HIGH` (Wakeboarding's tow boat, loops) | the engine's three crossfaded by the speed, each higher with it; the hull's water rising with it |
+
+- The grounds. Showdown's footsteps play program 8 + var1 of bank `SE_SWF_KUMITE`, and programs 8 to
+  13 are six grounds: var1 is the KCL attribute's low byte less one, 0x1101 grass, 0x1102 dirt,
+  0x1103 hard ground, 0x1104 sand, 0x1105 wood, 0x1106 water. The six programs match the attributes'
+  first six; the hard ground's waves are the same recordings as the duel stage's (`SE_SWF`) and the
+  basketball court's (`SE_BSK`); the water's are long splashes with no slide among them. The island
+  plays the hard ground's for 0x1108 (structures) and anything else, and the water's where the water
+  over the feet is deeper than 0.08 of the Mii's height (wading). Of the island's walkable ground by
+  area: grass 1.2 %, sand 0.4 %, hard ground 0.4 %, dirt 0.1 %, wood and structures under 0.05 %
+  (the sea's plane under it all is the other 97.9 %).
+- When: the feet as the gait's clip puts them down (its strike frames passed: `IslandMii::footfalls`,
+  as `strokes` for the hands), so a step is heard as the foot lands at any speed; a run's strides
+  are capped at 4.6 a second (the clip's cadence), and so are its steps.
+- The engine plays them natively (`engine/audio/sfx.h`): nw4r::snd can play only the sounds of the
+  channel's own archive. 24 voices mixed into the AX main bus beside the music stream (through
+  `stream_mix`, the AX frame's one call into the native mixing); each decodes its wave's ADPCM a frame
+  of 14 samples at a time as it plays and resamples it to 32 kHz (linear); a play, a change and a
+  stop are commands queued from the game's thread, so the mixer never waits for it. The bank is read
+  on the island's load worker with the package (`island_load.h`).
+- Checked against a reference in Python (the stager's decoder, the mixer's own fixed-point
+  arithmetic): one-shots at their own pitch and at 1.37, and a loop through 2 s (its wraps by the
+  loop's history), bit-identical to it; a level change's and a fade's steps smaller than the wave's
+  own largest; 40 plays at once keep 24 voices; released while playing, silence the next frame.
+- Levels: WSR's own, all times one level against the island's music. 「広い世界へ」 plays at a loud RMS
+  (50 ms windows within 20 dB of the loudest) of -21.6 dBFS in the host's recording, WSR's streamed
+  music at its archive's volumes at a median of -18.3 dBFS (42 pieces over 30 s): WSR's balance
+  would be 3.3 dB down. A jump into the sea off the plaza's front (the large splash with strokes
+  after it) went 8 dB over the music there and clipped: the effects are 6 dB down (the splash then
+  at -15.5 dBFS against the music's -19, its peaks 1.7 dB under full scale), the steps 3 dB up from
+  that (WSR keeps Showdown's well under its music), the strokes at 0.4. `NOMA_WUHU_SFX_DB` moves the
+  whole by so many dB, `NOMA_WUHU_SFX_LOG=1` logs each sound as it plays.
+- The loops follow the speed and the stick eased over a quarter of a second, and fade out while the
+  island is frozen (the menu, a warp, the way out). A bank staged before this one, or none, leaves the
+  island its music only (logged: `wuhu: sounds: none (...)`).
+
 ## Markers
 
 - `spawn` (kind 0): (-2029, 69, 2330) facing -Z, Wuhu Town's plaza south of the coin-toss
@@ -627,7 +696,8 @@ alpha-blended geometry on the ground under it, and the cars and the spectators h
 their own. The staged island has those, and on top of them a shadow map around the player. The user
 asked for both, because baked shadows miss what moves (the windmills' blades, the boats, the cars, the
 Mii). The shadow map is switchable: `NOMA_WUHU_SHADOWS=0` turns it off, and `NOMA_WUHU_SHADOW_MAP=N`
-sets its size.
+sets its size. On the 3DS it is off unless `NOMA_G3D_SHADOWS=1` (below: it has never come out right
+there), so the decals and the Mii's blob are the island's shadows, as in WSR.
 
 - **Decals** (`tools/g3d/shadow_decals.py`):
   - **Types and textures:** WSR's table at main.dol 0x8066F1C0 (size, offset, depth, straight down)
@@ -679,13 +749,19 @@ sets its size.
     blends), so nothing darkens twice.
   - **Darkness:** a shadow keeps 55 % of the light, as a decal's does.
 - **On the 3DS** (`platform/3ds/g3d_pica.cpp`):
+  - **Off by default:** the backend says it draws no shadow map (`native_draw.h`
+    `Backend::shadow_maps`), so the World makes none: no casters, no receivers, no decal faded, no CPU
+    spent on them. `NOMA_G3D_SHADOWS=1` in env.txt turns it on, for testing (the log's
+    `g3d pica: backend ready` line says which; the island's `wuhu: shadows:` line says "the shadow map
+    off (0 texels a side ...)" without it).
   - **Pass:** the opaque packet first draws the map into a shadow texture (VRAM, 1 MB at 512) through
     `pica_native_target` (gx_pica.cpp).
   - **Clear:** a quad clears it.
   - **Casters:** drawn in the GPU's shadow mode: green 0 (no penumbra), depth scale -1, no depth test
     (the GPU keeps the nearer depth), no culling, the leaves cut out by their alpha test.
   - **Receivers:** the material's unit 0 moves to unit 2 and the map takes unit 0 (only unit 0 can be
-    a shadow texture: orthographic, a bias). Two combiner stages are added: darkness x lit +
+    a shadow texture: orthographic, a bias; its parameter word has the shadow bit as well as the shadow
+    type, as citro3d's `C3D_TexInitShadow` makes it). Two combiner stages are added: darkness x lit +
     (1 - darkness), times the material's colour kept in the combiner buffer.
   - **Fade:** a decal's fade window is on unit 1.
   - **Shader:** the vertex shader is unchanged (unit 0's position mapping carries the depth in
@@ -715,9 +791,35 @@ Gaps:
   shapes.
 - **The Mii's shape:** the Mii casts as a capsule.
 
-**Open on the 3DS (2026-10-08, Azahar 2126.1.2, Vulkan):** the shadow map darkens nothing on the PICA
-path, though the host's software backend shows it. Narrowed down with three debug switches
-(platform/3ds/g3d_pica.cpp, for env.txt):
+**Open on the 3DS, so off by default there.** In the emulator (Azahar 2126.1.2, Vulkan) the
+receivers' compare doesn't read the map that was drawn, and what it reads instead has changed from run
+to run:
+- 2026-10-08: it darkened nothing, even against a map cleared to depth 0 (below).
+- 2026-10-09 (the restaged package, the user's run): it darkened the whole square about the Mii, casters
+  or not: "a shadow follows the player around". Against the host's frame from the same place
+  (`NOMA_WUHU_AT=-3398.2,150,1382.7,-134`), the grass inside the square comes out at 0.64-0.69 of the
+  host's brightness and outside it at 1.01-1.03; the host with every compare forced to "in shadow"
+  comes out at 0.55. So the compare returned about a quarter lit everywhere in the square, the Mii's
+  stand-in's shadow and the trees' were lost in it, and the decals, faded inside the square, were gone
+  too. The receivers include the cliffs' rock and the grass edge strips laid over it, which is the
+  likeliest source of the "squares of rock" the user saw where grass overhangs a cliff: a map texel
+  (0.94 units) stretches over a steep face, and the strip and the rock under it can compare differently
+  (host renders of those cliffs, without the emulator's compare, show nothing of the kind).
+- What the map holds was right on 2026-10-08: drawn as an ordinary texture (`NOMA_G3D_SHADOW_SHOW`,
+  and `NOMA_G3D_SHADOW_PROBE=1` on the receivers) it showed the casters where they belong. Only the shadow
+  type's read differs, and Azahar's Vulkan shaders make it through a view of the surface of their own
+  (an R32UI `texelFetch`); whether that view sees the surface the map was drawn into is the emulator's
+  doing, and nothing in the command stream is known to decide it.
+- Fixed on the way, for the console: the shadow unit's parameter word lacked the shadow bit
+  (`GPU_TEXTURE_SHADOW_PARAM`, which citro3d sets for shadow textures; the emulator reads the type
+  alone), and the pass's clear and casters gave `set_pixel` six of its eight words, so the stencil test
+  and operation were whatever the stack held (it takes an array of eight by reference now).
+- To switch it on by default, a console has to show it right (`NOMA_G3D_SHADOWS=1`: the Mii's capsule
+  shadow at its feet, the trees' shadows inside the square, nothing darker elsewhere in it); an
+  emulator's picture is no guide.
+
+Narrowed down on 2026-10-08 with three debug switches (platform/3ds/g3d_pica.cpp, for env.txt, with
+`NOMA_G3D_SHADOWS=1`):
 - `NOMA_G3D_SHADOW_SHOW=1` draws the map in a corner as an ordinary RGBA8 texture: the casters reach
   it (the trees' crowns, the Mii's stand-in as coloured depth bytes on white).
 - `NOMA_G3D_SHADOW_PROBE=1` shows the map on the receivers as an ordinary texture: their coordinates
@@ -730,7 +832,9 @@ path, though the host's software backend shows it. Narrowed down with three debu
   two combiner stages shadow_receiver_combiners appends (f = texture0 x darkness + (1 - darkness),
   then the buffered material colour x f) don't take effect. Azahar's sampler (its fragment shader
   generator's shadowTexture) returns 1 only outside the texture or where the stored depth is past
-  the reference, so a depth-0 clear that reaches it must darken.
+  the reference, so a depth-0 clear that reaches it must darken. (The combiner stages follow the
+  PICA's buffer as the emulator's own reference model does: a stage reads the result of the stage two
+  before it; the 2026-10-09 run, where the stages did darken, bears that out.)
 
 ## Left out (fidelity gaps)
 
@@ -744,6 +848,12 @@ path, though the host's software backend shows it. Narrowed down with three debu
 - The far island (5,000 units off) is island_R's: no edge-blend strips (less grass over cliff
   edges), simpler shading, the mountain without its cave; detail (strips, foam, small props) goes
   beyond 3,000 units; trees and boats beyond 15,000.
+- The order of the edge-blend strips: WSR draws the island's translucent list in its model's order
+  (gake, kusa, stage logo, suna, tuti, net: the package's material order), the World each cell's
+  batches back to front by their boxes' centres, so where two kinds overlap the one on top can change
+  as the eye moves. Places where two kinds lie within 4 units of each other are few (about 40 such
+  4-unit squares on the island: kusa and tuti by the castle and the jogging square, gake and kusa on
+  the volcano's trails).
 - Fog (since version 2): the far sea meets the clear colour in an edge from raised views.
 - The sun's glare and lens flares (`WS2_common_sunshine`, `WS2_common_sun_lensfx`): their alpha
   follows the sun's place on the screen and whether the depth buffer hides it. The sun's height
@@ -764,7 +874,9 @@ path, though the host's software backend shows it. Narrowed down with three debu
   wrong when the bones move.
 - Whales stay where they are placed (WSR also moves them along routes); gulls and hawks circle
   instead of flocking; the airship takes the title sequence's flight.
-- The ambient sounds (PMP group 5), the time of day.
+- The ambient sounds (PMP group 5: the beaches' waves, the birds, the waterfalls and windmills, the
+  traffic), the time of day. The player's own sounds are in ("Sounds"), all from where it is: none
+  placed in the world or panned by direction, no reverb.
 - Model nodes whose batches aren't one run in the model's draw order have `n_batches` 0:
   renderers find a node's batches by `Batch.node`.
 

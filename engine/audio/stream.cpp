@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "engine/audio/sfx.h"
 #include "runtime/runtime.h"
 
 namespace engine::audio {
@@ -201,6 +202,9 @@ void stream_pump() {
 }
 
 void stream_mix(s32* left, s32* right, u32 n) {
+    // (the native effects first: this is the AX frame's one call into the native mixing, and the
+    // piece's own returns early when nothing plays)
+    sfx_mix(left, right, n);
     u32 gen = s_gen.load(std::memory_order_acquire);
     u32 r = s_read.load(std::memory_order_relaxed);
     u32 w = s_write.load(std::memory_order_acquire);

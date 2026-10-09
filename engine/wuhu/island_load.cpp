@@ -50,7 +50,8 @@ f32 ms_since(u64 t0) { return (f32)(guest::host_time_us() - t0) / 1000.0f; }
 
 }  // namespace
 
-PackageLoad::PackageLoad(std::string path) : path_(std::move(path)) {}
+PackageLoad::PackageLoad(std::string path, std::string sounds_path)
+    : path_(std::move(path)), sounds_path_(std::move(sounds_path)) {}
 
 PackageLoad::~PackageLoad() {
     while (started_ && !done())
@@ -144,7 +145,33 @@ void PackageLoad::work() {
         }
     }
     collision_ms = ms_since(t2);
+    guest::platform_worker_pause_point();
+    read_sounds();
     done_.store(true, std::memory_order_release);
+}
+
+// the sound bank, whole (its checks are SfxBank::load's, on the game's thread: they take no time)
+void PackageLoad::read_sounds() {
+    if (sounds_path_.empty())
+        return;
+    FILE* f = std::fopen(sounds_path_.c_str(), "rb");
+    if (!f) {
+        sounds_error = "there is no " + sounds_path_ + " (stage it: tools/wuhu/stage_sounds.py DATA)";
+        return;
+    }
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n > 0) {
+        sounds.resize((size_t)n);
+        if (std::fread(sounds.data(), 1, sounds.size(), f) != sounds.size()) {
+            sounds.clear();
+            sounds_error = sounds_path_ + ": it can't be read whole";
+        }
+    } else {
+        sounds_error = sounds_path_ + ": empty";
+    }
+    std::fclose(f);
 }
 
 }  // namespace engine::wuhu
