@@ -28,6 +28,10 @@ const f32 TITLE_FONT_W = 30.0f, TITLE_FONT_H = 36.0f, TITLE_BOX_GROWN = 46.0f;
 // pixels) to each of eight sides under the grey one
 const f32 OUTLINE = 2.4f;
 const int OUTLINE_SIDES = 8;
+// Room for it: the characters apart by a little more than two outlines (theirs would run into
+// each other), the title lifted and the second line lowered off the rule
+const f32 TITLE_CHAR_SPACE = 6.0f, SUBTITLE_CHAR_SPACE = 4.0f;
+const f32 TITLE_LIFT = 4.0f, SUBTITLE_DROP = 5.0f;
 
 }  // namespace
 
@@ -45,11 +49,14 @@ Caption::Copy Caption::make_copy(const std::u16string& text, bool subtitle, f32 
     const u32 rule = lyt::find_pane(c.layout, "Pic_Line");
     if (subtitle) {
         lyt::show(rule, false);
-        lyt::move(box, 0.0f, SUBTITLE_TOP - TITLE_BOX_H / 2);
+        lyt::move(box, 0.0f, SUBTITLE_TOP - TITLE_BOX_H / 2 - SUBTITLE_DROP);
         lyt::font_size(box, SUBTITLE_FONT_W, SUBTITLE_FONT_H);
+        lyt::char_space(box, SUBTITLE_CHAR_SPACE);
     } else {
         lyt::font_size(box, TITLE_FONT_W, TITLE_FONT_H);
         lyt::resize(box, lyt::load_f32(box + 0x4C), TITLE_BOX_GROWN);
+        lyt::move(box, lyt::load_f32(box + 0x2C), lyt::load_f32(box + 0x30) + TITLE_LIFT);
+        lyt::char_space(box, TITLE_CHAR_SPACE);
     }
     if (white) {
         // (a text box's glyphs are its material's colours times its own text colours, top and bottom:
