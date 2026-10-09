@@ -4,6 +4,7 @@
 // first start's setup, before the room, is whole on the bottom screen.
 
 #include "engine/room/panel.h"
+#include "engine/ui/lyt.h"
 #include "noma_decomp.h"
 
 namespace g {
@@ -32,9 +33,13 @@ u32 scene_LivingRoomScene_Update(u32 r3) {
     return r;
 }
 
-// The room draws its 3D, its layouts, then the cursor's (its hand hidden: overlays.cpp), then the
-// panel on the bottom screen.
+// The room draws its 3D, its layouts, then its cursor's, then the panel on the bottom screen; the
+// cursor's hand (shown when the circle pad moves the pointer: overlays.cpp) points at the panel's
+// buttons, so the panel draws it there instead (engine/room/panel.cpp).
 u32 scene_LivingRoomScene_Draw(u32 r3) {
+    namespace lyt = engine::ui::lyt;
+    for (u32 layout : {0x8u, 0x130u})
+        lyt::show(lyt::root_pane(r3 + 0x498 + layout), false);
     u32 r = scene_LivingRoomScene_Draw_orig(r3);
     engine::room::draw();
     return r;

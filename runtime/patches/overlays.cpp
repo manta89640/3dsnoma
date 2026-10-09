@@ -18,8 +18,9 @@
 // prompt: so the bottom screen's buttons go with the picture.
 //
 // The Wii Remote's pointer, the hand (layout::Cursor's layouts: +0x8 the hand, +0x130 its shadow),
-// isn't drawn anywhere: what is touched is pointed at directly, on the bottom screen, and nothing
-// on the top screen is pointed at. The cursor still follows the touch and hit-tests as before.
+// isn't drawn for the touch: what is touched is pointed at directly, on the bottom screen, and
+// nothing on the top screen is pointed at; the cursor still follows the touch and hit-tests as
+// before. Moved by the circle pad (buttons only), it shows, as the channel shows it.
 //
 // app::SystemPrompt (the app's +0x2000): +0x2 u8 open, +0x10 its layout::Cursor, +0x14 the dialog
 // (+0x0 set while it has its layouts, +0x108 its scene layout, a LayoutWrapper).
@@ -29,6 +30,7 @@
 // notice (the channel's "new data" window: online only), +0x2020 the wipe (layout::parts::Wipe,
 // +0x20 set while it shows).
 
+#include "engine/input/remote.h"
 #include "engine/room/panel.h"
 #include "engine/system/host_scene.h"
 #include "engine/ui/confirm.h"
@@ -145,8 +147,9 @@ void app_Application_Draw(u32 r3) {
 u32 layout_Cursor_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                          f64 f4, f64 f5, f64 f6, f64 f7, f64 f8) {
     u32 r = layout_Cursor_Update_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
+    const bool shown = guest::input_pointer_by_stick();
     for (u32 layout : {0x8u, 0x130u})
-        lyt::show(lyt::root_pane(r3 + layout), false);
+        lyt::show(lyt::root_pane(r3 + layout), shown);
     return r;
 }
 

@@ -881,6 +881,8 @@ static void poll_input() {
         s_in.stick_x = s_in.stick_y = 0;
         nudged = cx != 0 || cy != 0;
     }
+    s_in.nudge_x = nudged ? cx * 0.03f : 0.0f;
+    s_in.nudge_y = nudged ? -cy * 0.03f : 0.0f;
     if (nudged) {
         s_in.x += cx * 0.03f;
         s_in.y -= cy * 0.03f;

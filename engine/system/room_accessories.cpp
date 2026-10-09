@@ -89,6 +89,7 @@ u32 g3d_living_Poster_ctor(u32 r3, u32 r4, u32 r5, u32 r6) {
     if ((s32)guest::load32(r3 + 0x598) <= 0 && engine::system::room_accessories().posters.empty()) {
         if (u32 mdl = guest::load32(r3 + 0x14))
             nw4r_g3d_ScnObj_SetScnObjOption(mdl, 1, 1);
+        guest::store8(r3 + 0x2C + 0x11, 0);
         guest::log("room: no posters to show: the poster is hidden");
     }
     return r;

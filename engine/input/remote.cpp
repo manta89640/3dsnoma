@@ -7,6 +7,7 @@
 // (the game's connect callback only sets one up).
 #include "engine/input/remote.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,7 @@ bool s_stick_dpad;  // input_set_stick_as_dpad
 // the bottom screen's region (input_set_touch_region), and the pointer it last gave
 bool s_region;
 f32 s_region_box[4], s_region_x, s_region_y;
+bool s_pointer_by_stick;  // (input_pointer_by_stick)
 }
 
 // NOMA_OLD3DS=1: an Old 3DS's controls on any machine (a New 3DS, an emulator, the host's scripts):
@@ -54,11 +56,21 @@ void wiimote_set_input(const WiimoteInput& in) {
     }
     s_pressed |= s_in.buttons & ~s_prev_buttons;
     s_prev_buttons = s_in.buttons;
+    const f32 dx = s_in.nudge_x, dy = s_in.nudge_y;
+    if (s_in.touching)
+        s_pointer_by_stick = false;
+    else if (dx != 0 || dy != 0)
+        s_pointer_by_stick = true;
     if (s_region) {
         if (s_in.touching) {
             const f32 lx = s_region_box[0] + (f32)s_in.touch_x / 320.0f * s_region_box[2];
             const f32 ly = s_region_box[1] - (f32)s_in.touch_y / 240.0f * s_region_box[3];
             s_region_x = lx / 304.0f, s_region_y = -ly / 228.0f;
+        } else if (dx != 0 || dy != 0) {
+            const f32 x0 = s_region_box[0] / 304.0f, x1 = (s_region_box[0] + s_region_box[2]) / 304.0f;
+            const f32 y0 = -s_region_box[1] / 228.0f, y1 = -(s_region_box[1] - s_region_box[3]) / 228.0f;
+            s_region_x = std::min(std::max(s_region_x + dx, x0), x1);
+            s_region_y = std::min(std::max(s_region_y + dy, y0), y1);
         }
         s_in.x = s_region_x, s_in.y = s_region_y;
     }
@@ -89,6 +101,7 @@ bool wiimote_take_tap() {
 }
 const WiimoteInput& wiimote_input() { return s_in; }
 void input_set_stick_mode(bool on) { s_stick_mode = on; }
+bool input_pointer_by_stick() { return s_pointer_by_stick; }
 bool input_stick_mode() { return s_stick_mode; }
 
 }  // namespace guest

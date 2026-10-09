@@ -44,6 +44,10 @@ struct WiimoteInput {
     // input layer to come (touch as a press, not a pointer); the game reads none of it.
     bool touching = false;
     u16 touch_x = 0, touch_y = 0;
+    // how far the circle pad moved the pointer with this input (out of stick mode; in the pointer's
+    // units): inside the bottom screen's region (input_set_touch_region) it moves the region's
+    // pointer by as much
+    float nudge_x = 0.0f, nudge_y = 0.0f;
 };
 // remote 1 from now on (the game sees it at its next read); with NOMA_OLD3DS=1 less what an Old
 // 3DS doesn't have (ZL, ZR, the C-stick)
@@ -58,9 +62,13 @@ bool wiimote_take_tap();
 // While a native scene has the bottom screen (engine/ui/screen.h), the touch screen points into a
 // region of the layouts' space (its left and top edges, width and height, in the channel's layout
 // units, y up): the game's pointer goes where the touch is in it, as the game's cursor reads the
-// pointer (x / 304, -y / 228 of the layout units), and only there (the circle pad doesn't move it);
-// a tap is a press there in stick mode too.
+// pointer (x / 304, -y / 228 of the layout units), and stays inside it (the circle pad, out of
+// stick mode, moves it about there as it moves the pointer otherwise); a tap is a press there in
+// stick mode too.
 void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height);
+// whether the pointer was last moved by the circle pad (or a script), not by a touch: the pointer's
+// hand shows only then (what is touched is pointed at directly)
+bool input_pointer_by_stick();
 // The stick (in stick mode) as the D-pad as well, while a scene's menus are up: tilted more than half
 // way, it holds the D-pad's direction for the game (its menus and lists move their highlight).
 void input_set_stick_as_dpad(bool on);

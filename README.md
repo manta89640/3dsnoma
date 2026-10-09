@@ -216,7 +216,9 @@ are still the channel's own (the message board, sending a message, 使い方, th
 are made for a 4:3 screen and shown whole on the bottom screen, worked by touch, the top screen
 white meanwhile, and the first start's setup the same way; the channel's dialogs (its system prompt: errors, the save erase's question)
 show on the bottom screen over any scene, and the room's wipes cover both screens. The Wii
-Remote's pointer (the hand) isn't drawn: what is touched is pointed at.
+Remote's pointer (the hand) isn't drawn for the touch (what is touched is pointed at); the circle
+pad still moves the pointer about the bottom screen, the hand showing then, so every screen also
+works with the buttons alone (the circle pad and A).
 The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.

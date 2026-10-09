@@ -284,6 +284,15 @@ static void scripted_input() {
     in.stick_x = in.stick_y = in.cam_x = in.cam_y = 0;
     in.touching = false;  // (a T(x;y) event touches while it lasts)
     input_script_apply(in);
+    // out of stick mode a scripted S(x;y) is the circle pad nudging the pointer, as on the 3DS
+    // (platform/3ds/main.cpp)
+    in.nudge_x = in.nudge_y = 0;
+    if (!input_stick_mode() && (in.stick_x != 0 || in.stick_y != 0)) {
+        in.nudge_x = in.stick_x * 0.03f, in.nudge_y = -in.stick_y * 0.03f;
+        in.x = std::min(std::max(in.x + in.nudge_x, -1.0f), 1.0f);
+        in.y = std::min(std::max(in.y + in.nudge_y, -1.0f), 1.0f);
+        in.stick_x = in.stick_y = 0;
+    }
     wiimote_set_input(in);
 }
 

@@ -3,6 +3,7 @@
 
 #include <vector>
 
+#include "engine/input/remote.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
 #include "engine/ui/confirm.h"
@@ -202,6 +203,12 @@ void Panel::draw() {
     screen::squeeze(false);
     lyt::layout_draw(scene_);
     quit_->draw();
+    // the room's hand, when the circle pad moves it (the room's own draw leaves it out)
+    if (guest::input_pointer_by_stick()) {
+        for (u32 layout : {0x8u, 0x130u})
+            lyt::show(lyt::root_pane(cursor_ + layout), true);
+        game::cursor_draw(cursor_);
+    }
     screen::squeeze(true);
     screen::to_top();
 }
