@@ -53,15 +53,25 @@ Caption::Copy Caption::make_copy(const std::u16string& text, bool subtitle, f32 
     }
     if (white) {
         // (a text box's glyphs are its material's colours times its own text colours, top and bottom:
-        // all white)
-        lyt::paint(box, lyt::WHITE);
+        // all white; the materials again at every update, whitened())
         guest::store32(box + 0xDC, 0xFFFFFFFFu);
         guest::store32(box + 0xE0, 0xFFFFFFFFu);
-        if (!subtitle)
-            lyt::paint(rule, lyt::WHITE);
+        c.white_box = box;
+        c.white_rule = subtitle ? 0 : rule;
+        whiten(c);
     }
     lyt::move(lyt::root_pane(c.layout), dx, dy);
     return c;
+}
+
+// Top_Message's FadeIn_All and FadeOut_All set the text's and the rule's material colour (tev colour
+// 1) to the channel's grey (80, 80, 80) at every update, fading them by the panes' alpha alone: an
+// outline copy's materials are made white again after its update, its alpha the animation's
+void Caption::whiten(const Copy& c) {
+    if (c.white_box)
+        lyt::paint(c.white_box, lyt::WHITE);
+    if (c.white_rule)
+        lyt::paint(c.white_rule, lyt::WHITE);
 }
 
 Caption::Caption(const std::u16string& title, const std::u16string& subtitle, u32 chars) {
@@ -133,8 +143,11 @@ void Caption::update() {
         }
     }
     for (Line* line : {&title_, &subtitle_})
-        for (const Copy& c : line->copies)
+        for (const Copy& c : line->copies) {
             lyt::layout_update(c.layout);
+            if (line == &title_ ? shown_ : sub_shown_)
+                whiten(c);
+        }
 }
 
 void Caption::draw() {

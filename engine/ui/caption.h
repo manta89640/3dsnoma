@@ -43,11 +43,13 @@ private:
     struct Copy {
         u32 layout = 0, fade_in = 0, fade_out = 0;
         f32 dx = 0, dy = 0;
+        u32 white_box = 0, white_rule = 0;  // an outline copy's text box and rule, kept white
     };
     struct Line {
         std::vector<Copy> copies;  // the outline's, then the grey line
     };
     Copy make_copy(const std::u16string& text, bool subtitle, f32 dx, f32 dy, bool white) const;
+    static void whiten(const Copy& c);
     static void play(const Line& line, bool in);
     static bool animating(const Line& line);
     Line title_, subtitle_;
