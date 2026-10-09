@@ -121,6 +121,7 @@ struct TexEntry {
     u32 last_used = 0;
     float sx = 1, sy = 1;  // texture coordinate scale (image padded to a power of two)
     u32 wrap = 0xFFFF;
+    bool mips = false;     // with its smaller images (texture_for)
 };
 
 struct State {
@@ -1055,15 +1056,64 @@ bool evict_texture(u32 unused_before = ~0u) {
 
 // texture memory, from the linear heap: a little stays free for screenshots and read-backs;
 // older textures make room
-bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f) {
+bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f, bool mips = false) {
     const u32 MARGIN = 512 << 10;
-    u32 need = w * h * texel_bits(f) / 8;
+    u32 need = w * h * texel_bits(f) / 8 * (mips ? 4 : 3) / 3;
+    auto init = [&] { return mips ? C3D_TexInitMipmap(t, w, h, f) : C3D_TexInit(t, w, h, f); };
     for (;;) {
-        if (linearSpaceFree() >= need + MARGIN && C3D_TexInit(t, w, h, f))
+        if (linearSpaceFree() >= need + MARGIN && init())
             return true;
         if (!evict_texture())
-            return C3D_TexInit(t, w, h, f);  // nothing left to drop: whatever fits
+            return init();  // nothing left to drop: whatever fits
     }
+}
+
+// Text and the channel's other grey pictures (GX's I4, I8, IA4 and IA8: the font's glyph sheets
+// above all) are drawn much smaller than their texels: the system font's sheets at about a third,
+// where sampling the full-size sheet with no smaller images drops whole strokes (the text shimmers
+// and breaks up as it moves). Such a texture gets its smaller images (each a 2x2 box filter of
+// the one before, down to 8x8) and is sampled between them (GPU_LINEAR mipmapping), which the
+// PICA picks by the size it is drawn at; drawn at full size it samples the texture as before.
+// Only whole power-of-two images that don't repeat and are filtered (not padded, not resampled,
+// not pixel art); NOMA_TEX_MIPS=0: none.
+bool tex_mips_on() {
+    static int s_on = -1;
+    if (s_on < 0) {
+        const char* v = getenv("NOMA_TEX_MIPS");
+        s_on = !v || atoi(v) != 0;
+    }
+    return s_on > 0;
+}
+
+pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f);
+
+void build_mips(C3D_Tex* t, const u8* raw, const GxTexture* gt, GPU_TEXCOLOR fmt) {
+    static std::vector<u32> a, b;
+    u32 w = gt->width, h = gt->height;
+    a.resize((size_t)w * h);
+    gx_decode_texture_tlut(raw, gt->fmt, w, h, gt->tlut_addr, gt->tlut_fmt, a.data());
+    for (int level = 1; level <= (int)t->maxLevel; level++) {
+        const u32 lw = w >> 1, lh = h >> 1;
+        b.resize((size_t)lw * lh);
+        for (u32 y = 0; y < lh; y++) {
+            const u32* r0 = &a[(size_t)(2 * y) * w];
+            const u32* r1 = r0 + w;
+            for (u32 x = 0; x < lw; x++) {
+                const u32 c[4] = {r0[2 * x], r0[2 * x + 1], r1[2 * x], r1[2 * x + 1]};
+                u32 out = 0;
+                for (int k = 0; k < 32; k += 8)
+                    out |= ((((c[0] >> k) & 0xFF) + ((c[1] >> k) & 0xFF) + ((c[2] >> k) & 0xFF) + ((c[3] >> k) & 0xFF) + 2) >> 2)
+                           << k;
+                b[(size_t)y * lw + x] = out;
+            }
+        }
+        u8* out = (u8*)C3D_Tex2DGetImagePtr(t, level, nullptr);
+        pica_tex::from_rgba(b.data(), lw, lh, out, lw, lh, tex_fmt(fmt), false);
+        std::swap(a, b);
+        w = lw, h = lh;
+    }
+    if (a.size() > (64u << 10))
+        std::vector<u32>().swap(a), std::vector<u32>().swap(b);
 }
 
 // NOMA_ETC1: CMPR textures as ETC1 (default: on the Old 3DS only, and a New 3DS run as one,
@@ -1119,11 +1169,14 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
         // default where memory is tightest, the Old 3DS (NOMA_ETC1=0/1)
         if (gt->fmt == 14 && etc1_on() && !(repeat && (W != gt->width || H != gt->height)))
             fmt = pica_tex::cmpr_has_alpha(raw, gt->width, gt->height) ? GPU_ETC1A4 : GPU_ETC1;
-        if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt)) {
+        const bool mips = tex_mips_on() && linear && !repeat && gt->fmt <= 3 && W == gt->width &&
+                          H == gt->height && W >= 64 && H >= 64;
+        if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt || e.mips != mips)) {
             P.dead.push_back(e.tex);
             e.tex.data = nullptr;
+            e.wrap = 0xFFFF;
         }
-        if (!e.tex.data && !tex_init(&e.tex, W, H, fmt)) {
+        if (!e.tex.data && !tex_init(&e.tex, W, H, fmt, mips)) {
             P.failed++;
             if (P.warned++ < 4)
                 log("pica: no memory for a %ux%u texture (%u KB linear heap free)", W, H,
@@ -1145,6 +1198,9 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
             if (rgba.size() > (64u << 10))
                 std::vector<u32>().swap(rgba);
         }
+        e.mips = mips && e.tex.maxLevel > 0;
+        if (e.mips)
+            build_mips(&e.tex, raw, gt, fmt);
         C3D_TexFlush(&e.tex);
         e.version = gt->version;
         e.sx = repeat ? 1.0f : (float)gt->width / (float)W;
@@ -1156,6 +1212,8 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
         C3D_TexSetWrap(&e.tex, gx_wrap(ws), gx_wrap(wt));
         GPU_TEXTURE_FILTER_PARAM f = linear ? GPU_LINEAR : GPU_NEAREST;
         C3D_TexSetFilter(&e.tex, f, f);
+        if (e.mips)
+            C3D_TexSetFilterMipmap(&e.tex, GPU_LINEAR);
     }
     *sx = e.sx;
     *sy = e.sy;
