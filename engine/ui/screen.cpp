@@ -34,9 +34,11 @@ void to_bottom(const Region& r) {
 void to_top() { write_screen(guest::SCREEN_TOP, 0, 0, 0, 0); }
 
 bool s_claimed;
+Region s_region;
 
 void claim(const Region& r) {
     s_claimed = true;
+    s_region = r;
     guest::platform_bottom_claim(true);
     guest::input_set_touch_region(true, r.left, r.top, r.width, r.height);
 }
@@ -49,6 +51,22 @@ void release() {
 }
 
 bool claimed() { return s_claimed; }
+const Region& claimed_region() { return s_region; }
+
+// app::VideoMode: +4 the layouts' width (s16), +8 wide (u8)
+void layouts_43(bool on) {
+    const u32 video = guest::load32(GA_app_VideoMode_sInstance);
+    if (!video)
+        return;
+    guest::store16(video + 0x4, on ? 608 : 760);
+    guest::store8(video + 0x8, on ? 0 : 1);
+    squeeze(!on);
+}
+
+bool layouts_43() {
+    const u32 video = guest::load32(GA_app_VideoMode_sInstance);
+    return video && guest::load8(video + 0x8) == 0;
+}
 
 void squeeze(bool on) {
     const u32 draw_info = guest::load32(GA_layout_sDrawInfo);

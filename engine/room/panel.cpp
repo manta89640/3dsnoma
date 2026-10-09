@@ -225,6 +225,10 @@ void Panel::on_pushed(u32 button) {
 }
 
 Panel* s_panel;
+bool s_away;  // (away())
+// app::ScreenFade (app_ScreenFade_Draw: a quad over the screen in a colour): +2 u16 its length in
+// frames (0: no fading, the colour's full), +4 u16 the frame, +6 the colour (RGBA)
+u32 s_white;
 
 }  // namespace
 
@@ -233,9 +237,51 @@ void open(u32 scene) {
         s_panel = new Panel(scene);
 }
 
+// the panel goes; for a scene of the room's that is the channel's own, the bottom screen is the
+// scene's whole (its touch over all of it)
 void close() {
     delete s_panel;
     s_panel = nullptr;
+    if (s_away)
+        screen::claim(screen::FULL);
+}
+
+void leaving(u32 to) {
+    switch (to) {
+    case TO_THEATER:
+    case TO_MESSAGE_BOARD:
+    case TO_MESSAGE_SEND:
+    case TO_OPTIONS:
+    case TO_HELP:
+        s_away = true;
+        screen::layouts_43(true);
+        guest::log("room: away to scene %u, its layouts for 4:3 on the bottom screen", to);
+        break;
+    default: break;
+    }
+}
+
+void back() {
+    if (!s_away)
+        return;
+    s_away = false;
+    screen::release();
+    screen::layouts_43(false);
+}
+
+bool away() { return s_away; }
+
+void boot() {
+    engine::system::host_scene_boot([] {
+        s_white = engine::system::lasting_alloc(12);
+        for (u32 i = 0; i < 12; i++)
+            guest::store8(s_white + i, i >= 6 ? 0xFF : 0);
+    });
+}
+
+void draw_away_top() {
+    if (s_white)
+        g::app_ScreenFade_Draw(s_white);
 }
 
 void update() {

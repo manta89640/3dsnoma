@@ -208,7 +208,11 @@ In the room the top screen shows the room alone (no bar, no hand) and the bottom
 buttons, the channel's own, worked by touch (`engine/room/panel.h`): the bar along the bottom edge
 as the channel has it (the way back, ホームシアター, サウンド, 出発) and the その他 column's buttons two
 by two above it (メッセージボード, メッセージを送る, 使い方, 設定). The way back asks the room's question
-(Wiiの間をおわります) on the bottom screen; B there is いいえ.
+(Wiiの間をおわります) on the bottom screen; B there is いいえ. The screens those buttons lead to that
+are still the channel's own (the message board, sending a message, 使い方, the options, the theater)
+are made for a 4:3 screen and shown whole on the bottom screen, worked by touch, the top screen
+white meanwhile; the channel's dialogs (its system prompt: errors, the save erase's question)
+show on the bottom screen over any scene, and the room's wipes cover both screens.
 The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.

@@ -15,6 +15,7 @@
 // end: the way to Wuhu Island (engine/wuhu), made the same way.
 
 #include "engine/math/vecmath.h"
+#include "engine/room/panel.h"
 #include "engine/ui/lyt.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
@@ -219,6 +220,7 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
 void app_SceneFactories_ctor(u32 r3) {
     app_SceneFactories_ctor_orig(r3);
     engine::soundplayer::boot();
+    engine::room::boot();
     engine::wuhu::boot();
     engine::wuhu::music_boot();
 }
@@ -226,6 +228,7 @@ void app_SceneFactories_ctor(u32 r3) {
 // controller::living::SceneTransit::Go(To): the scene a room button leads to, once the room has
 // been wiped out. The Sound Player's button and 出発 (engine/room/panel.cpp) ask for their own To.
 u32 controller_living_SceneTransit_Go(u32 r3, u32 r4) {
+    engine::room::leaving(r4);
     if (r4 == engine::soundplayer::TO_SOUND_PLAYER) {
         engine::system::change_scene(engine::soundplayer::scene_factory());
         return 0;

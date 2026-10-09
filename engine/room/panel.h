@@ -32,4 +32,18 @@ void update();
 // after the room's own draw (on the top screen): the panel on the bottom screen
 void draw();
 
+// The scenes the room's buttons lead to that are still the channel's own (the theater, the message
+// board, sending a message, the options, 使い方: menus of buttons and lists) are made for 4:3
+// (engine/ui/screen.h layouts_43) and drawn whole on the bottom screen (FULL), where the touch
+// works them directly, from the room's transit to one of them (SceneTransit::Go: leaving) until
+// the room is made again (back); away() meanwhile (runtime/patches/overlays.cpp draws the scene
+// there).
+void leaving(u32 to);
+void back();
+bool away();
+// The top screen meanwhile: white, the channel's menus' ground (an app::ScreenFade of the app's own
+// kind, held at full white: its block made at the start, boot()).
+void boot();
+void draw_away_top();
+
 }  // namespace engine::room

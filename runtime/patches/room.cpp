@@ -21,6 +21,7 @@ const u32 ROOM_CURSOR = 0x498;
 }  // namespace
 
 u32 scene_LivingRoomScene_ctor(u32 r3) {
+    engine::room::back();  // (the room's layouts for the top screen's 5:3 again, before it makes them)
     u32 r = scene_LivingRoomScene_ctor_orig(r3);
     engine::room::open(r3);
     return r;

@@ -25,6 +25,8 @@
 // notice (the channel's "new data" window: online only), +0x2020 the wipe (layout::parts::Wipe,
 // +0x20 set while it shows).
 
+#include "engine/room/panel.h"
+#include "engine/system/host_scene.h"
 #include "engine/ui/confirm.h"
 #include "engine/ui/lyt.h"
 #include "engine/ui/screen.h"
@@ -44,12 +46,18 @@ namespace screen = engine::ui::screen;
 bool is_open(u32 prompt) { return guest::load8(prompt + 0x2) != 0; }
 u32 dialog(u32 prompt) { return guest::load32(prompt + 0x14); }
 
+// the bottom screen's region the prompt shows in: the scene's, if one has it
+const screen::Region& region() { return screen::claimed() ? screen::claimed_region() : screen::BOTTOM; }
+
 // the dialog's place on the bottom screen (its scene layout's root pane: the dialog's animations
-// move the window and buttons inside it)
+// move the window and buttons inside it): in the middle of the region (the window and buttons
+// span y 191 to -196, their middle 2.5 under the dialog's origin)
 void place(u32 prompt) {
     u32 d = dialog(prompt);
-    if (d && guest::load32(d))
-        lyt::move(lyt::root_pane(d + 0x108), screen::BOTTOM_MIDDLE_X, engine::ui::Confirm::DROP);
+    if (!d || !guest::load32(d))
+        return;
+    const screen::Region& r = region();
+    lyt::move(lyt::root_pane(d + 0x108), r.left + r.width / 2, r.top - r.height / 2 + 2.5f);
 }
 
 bool s_claimed;  // the prompt pointed the touch into the region (no scene had the bottom screen)
@@ -92,7 +100,7 @@ void app_SystemPrompt_Draw(u32 r3) {
     if (!is_open(r3) || !dialog(r3) || !guest::load32(dialog(r3)))
         return;
     place(r3);
-    screen::to_bottom(screen::BOTTOM);
+    screen::to_bottom(region());
     screen::squeeze(false);
     lyt::layout_draw(dialog(r3) + 0x108);
     screen::squeeze(true);
@@ -104,7 +112,15 @@ void app_Application_Draw(u32 r3) {
     u32 state = guest::load32(r3 + 0x2028);
     guest::store8(state + 0x24, 1);
     lib_SceneManager_PreDraw(r3 + 0x1958, state, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // a scene of the room's that is the channel's own: whole on the bottom screen
+    const bool away = engine::room::away() && !engine::system::current_host_scene();
+    if (away) {
+        engine::room::draw_away_top();
+        screen::to_bottom(screen::FULL);
+    }
     lib_SceneManager_Draw(r3 + 0x1958, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    if (away)
+        screen::to_top();
     draw_wipe(r3);
     const bool exiting = guest::load32(r3 + 0x330) != 0;
     if (screen::claimed()) {

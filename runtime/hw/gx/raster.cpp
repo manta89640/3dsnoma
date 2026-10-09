@@ -54,10 +54,23 @@ struct State {
     bool early_z;
     s32 sc_l, sc_t, sc_r, sc_b;  // scissor, inclusive, EFB coordinates
     f32 xoff, yoff;              // viewport origin minus the scissor offset
+    // on the bottom screen: the frame's rectangle that fills it (its corner, and the scale to the
+    // whole bottom buffer), as gx_pica.cpp maps each draw there
+    bool map;
+    f32 mx, my, kx, ky;
 };
 State S;
 
+// The bottom screen (SoftRenderer::screen): its buffers are swapped in while it is drawn on (s_color
+// and s_depth are what every draw writes), and each draw there maps the frame's rectangle given
+// with it onto the whole of them (a scene's region of its layouts, engine/ui/screen.h), so draws in
+// different rectangles in one frame land as on the 3DS
+bool s_on_bottom;
+u32 s_bottom_rect[4];  // the current rectangle: x, y, w, h in the frame
+
 s32 sext11(u32 v) { return (s32)(v << 21) >> 21; }
+s32 to_int(f32 f);
+s32 floor_int(f32 f);
 
 void load_state() {
     const u32* bp = g_gx.bp;
@@ -109,6 +122,15 @@ void load_state() {
     S.sc_r = std::min<s32>(S.sc_r, EFB_W - 1), S.sc_b = std::min<s32>(S.sc_b, EFB_H - 1);
     S.xoff = (f32)sox;
     S.yoff = (f32)soy;
+    S.map = s_on_bottom;
+    if (S.map) {
+        S.mx = (f32)s_bottom_rect[0], S.my = (f32)s_bottom_rect[1];
+        S.kx = (f32)EFB_W / (f32)s_bottom_rect[2], S.ky = (f32)EFB_H / (f32)s_bottom_rect[3];
+        S.sc_l = std::max<s32>(floor_int(((f32)S.sc_l - S.mx) * S.kx), 0);
+        S.sc_t = std::max<s32>(floor_int(((f32)S.sc_t - S.my) * S.ky), 0);
+        S.sc_r = std::min<s32>(to_int(std::ceil(((f32)S.sc_r + 1 - S.mx) * S.kx)) - 1, EFB_W - 1);
+        S.sc_b = std::min<s32>(to_int(std::ceil(((f32)S.sc_b + 1 - S.my) * S.ky)) - 1, EFB_H - 1);
+    }
     if (bits(bp[BP_FOG_PARAM3], 21, 3) && !s_warned_fog) {
         s_warned_fog = true;
         log("gx: fog used -- not emulated");
@@ -488,6 +510,8 @@ void to_screen(const GxOutVertex& v, RV& o) {
     o.x = v.clip[0] * iw * xf_f32(XF_VIEWPORT + 0) + xf_f32(XF_VIEWPORT + 3) - S.xoff;
     o.y = v.clip[1] * iw * xf_f32(XF_VIEWPORT + 1) + xf_f32(XF_VIEWPORT + 4) - S.yoff;
     o.z = v.clip[2] * iw * xf_f32(XF_VIEWPORT + 2) + xf_f32(XF_VIEWPORT + 5);
+    if (S.map)
+        o.x = (o.x - S.mx) * S.kx, o.y = (o.y - S.my) * S.ky;
     for (int c = 0; c < 2; c++)
         for (int i = 0; i < 4; i++)
             o.col[c][i] = v.color[c][i] * iw;
@@ -1104,12 +1128,10 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
 
 void SoftRenderer::native(u32 id) { engine::g3d::native_draw_execute(id); }
 
-// The bottom screen: its EFB is swapped in while it is drawn on (s_color and s_depth are what every
-// draw writes), out again for the top screen.
+// The bottom screen's buffers (see State::map), swapped in while it is drawn on.
 namespace {
 std::vector<u32> s_bottom_color(EFB_W * EFB_H, 0xFFFFFFFFu), s_bottom_depth(EFB_W * EFB_H, 0xFFFFFF);
-bool s_on_bottom, s_bottom_drawn, s_bottom_shown;
-u32 s_bottom_rect[4];  // x, y, w, h in the bottom EFB
+bool s_bottom_drawn, s_bottom_shown;
 }  // namespace
 
 void SoftRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
@@ -1139,7 +1161,7 @@ bool gx_host_bottom_screen(u32* out) {
     if (!s_bottom_shown)
         return false;
     const std::vector<u32>& c = s_on_bottom ? s_color : s_bottom_color;
-    const u32 rx = s_bottom_rect[0], ry = s_bottom_rect[1], rw = s_bottom_rect[2], rh = s_bottom_rect[3];
+    const u32 rx = 0, ry = 0, rw = EFB_W, rh = EFB_H;  // (every draw mapped onto the whole buffer)
     for (u32 y = 0; y < 240; y++) {
         const u32 y0 = ry + y * rh / 240, y1 = std::max(y0 + 1, ry + (y + 1) * rh / 240);
         for (u32 x = 0; x < 320; x++) {
