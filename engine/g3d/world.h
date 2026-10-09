@@ -178,7 +178,9 @@ public:
     void set_swimmer(const Swimmer& swimmer);
 
     // The shadow map: `size` texels a side (0: none: the decals are drawn whole), if the package has
-    // shadows (SHDW); and the point its square is about (package units), each frame before the cull.
+    // shadows (SHDW) and the platform's backend draws shadow maps (native_draw.h Backend::shadow_maps;
+    // shadow_map() says what was taken); and the point its square is about (package units), each frame
+    // before the cull.
     void set_shadow_map(u32 size);
     u32 shadow_map() const;
     void set_shadow_focus(Vec3 focus);

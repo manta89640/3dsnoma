@@ -1587,7 +1587,9 @@ void World::set_instance_node_rotation(u32 instance, u16 node, const f32 degrees
 }
 
 void World::set_shadow_map(u32 size) {
-    impl_->shadow_size = package_.shadow_env() ? size : 0;
+    // (none where the platform's backend doesn't draw one right: native_draw.h Backend::shadow_maps)
+    const Backend* backend = native_draw_backend();
+    impl_->shadow_size = package_.shadow_env() && (!backend || backend->shadow_maps()) ? size : 0;
     impl_->dirty = true;
 }
 u32 World::shadow_map() const { return impl_->shadow_size; }

@@ -35,6 +35,10 @@
 // island's have none). The command list is gx_pica's, and an item is drawn only with room left in it
 // for the GX draws to come (ITEM_WORDS).
 // NOMA_G3D_STATS=N (env.txt): every N frames the draws, triangles, time, state changes and memory.
+// NOMA_G3D_SHADOWS=1 (env.txt): the shadow map drawn (shadow_pass), which is off by default: in the
+// emulator's runs it has never come out right (docs/wuhu.md "Shadows"), and no console run has shown
+// it right yet; without it the World makes no map (Backend::shadow_maps) and the package's decals and
+// the Mii's blob are the shadows, as in Wii Sports Resort.
 #include <3ds.h>
 #include <citro3d.h>
 
@@ -276,8 +280,10 @@ public:
     void prepare(g3::Package& package) override;
     void draw(const g3::Packet& packet, const g3::GxView& view) override;
     void release(g3::Package& package) override;
+    bool shadow_maps() const override { return shadows_on_; }
 
 private:
+    bool shadows_on_ = false;  // NOMA_G3D_SHADOWS=1 (read at init)
     DVLB_s* dvlb_ = nullptr;
     shaderProgram_s prog_;
     // the sea's wave grid's program, and the ring the frame's vertex data goes into
@@ -389,7 +395,7 @@ private:
     void set_layout(const PkgRes& r, int vbuf, u32 dynamic_pa = 0);
     void set_texenv(const tev::Combiners& comb);
     void set_units(const UnitRes units[3], u32 tex_shadow = 1);
-    void set_pixel(const u32 pixel[8]);
+    void set_pixel(const u32 (&pixel)[8]);  // (by reference: an array of another size doesn't compile)
     void draw_batch(const PkgRes& r, const fmt::Batch& b) { draw_indices(r, b.first_index, b.n_indices); }
     void draw_indices(const PkgRes& r, u32 first, u32 count);
     void forget_state();
@@ -470,6 +476,8 @@ bool PicaBackend::init() {
         s_lod_bias_add = (f32)atof(v);
     if (const char* v = getenv("NOMA_G3D_STATS"))
         stats_every_ = std::max(1, atoi(v));
+    if (const char* v = getenv("NOMA_G3D_SHADOWS"))
+        shadows_on_ = atoi(v) != 0;
     // the fog ramp (A8, 8x8 in Z order: the alpha of column x is 255 x / 7, every row alike)
     if (!(s_fog_tex = linearAlloc(64)))
         return false;
@@ -509,7 +517,8 @@ bool PicaBackend::init() {
     fade_unit_.regs[3] = 0;
     fade_unit_.regs[4] = osConvertVirtToPhys(fade_tex_) >> 3;
     fade_unit_.regs[5] = GPU_A8;
-    log("g3d pica: backend ready (shader %u bytes)%s", (unsigned)g3d_shbin_size,
+    log("g3d pica: backend ready (shader %u bytes); the shadow map %s%s", (unsigned)g3d_shbin_size,
+        shadows_on_ ? "on (NOMA_G3D_SHADOWS=1)" : "off (NOMA_G3D_SHADOWS=1 turns it on)",
         stats_every_ > 0 ? "; NOMA_G3D_STATS on" : "");
     return true;
 }
@@ -885,7 +894,7 @@ void PicaBackend::set_units(const UnitRes units[3], u32 tex_shadow) {
 }
 
 // the pixel pipeline's registers that differ (as citro3d's effect binding writes them)
-void PicaBackend::set_pixel(const u32 px[8]) {
+void PicaBackend::set_pixel(const u32 (&px)[8]) {
     if (px[0] != pixel_[0])
         cmd_write(GPUREG_FRAGOP_ALPHA_TEST, px[0]);
     if (px[1] != pixel_[1]) {
@@ -1220,7 +1229,7 @@ bool PicaBackend::draw_sea_grid(const g3::Packet& p, const PkgRes& r, const g3::
     light_set_ = -2;
     mcur_ = nullptr;
     mkey_ = MatrixKey();
-    mat_key_ = ~0u;
+    mat_key_ = ~0ull;
     rows_uv_[0] = rows_uv_[1] = 0;
     return true;
 }
@@ -1413,9 +1422,11 @@ bool PicaBackend::make_shadow(u32 size) {
     u.on = true;
     u.regs[0] = 0xFFFFFFFF;  // (off the map: nothing in front: lit)
     u.regs[1] = size | size << 16;
+    // (the shadow bit with the shadow type, as citro3d's C3D_TexInitWithParams sets them for a shadow
+    // texture: the emulator reads the type alone, the console's sampler may want both)
     u.regs[2] = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
                 GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_BORDER) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_BORDER) |
-                GPU_TEXTURE_MODE(GPU_TEX_SHADOW_2D);
+                GPU_TEXTURE_SHADOW_PARAM | GPU_TEXTURE_MODE(GPU_TEX_SHADOW_2D);
     u.regs[3] = 0;
     u.regs[4] = osConvertVirtToPhys(shadow_tex_.data) >> 3;
     u.regs[5] = GPU_RGBA8;
@@ -1489,10 +1500,12 @@ void PicaBackend::shadow_pass(const g3::Packet& p, PkgRes& r) {
         set_texenv(comb);
         UnitRes none[3];
         set_units(none, 1);
-        const u32 pixel[6] = {0, (u32)GPU_WRITE_COLOR << 8,
+        // (all eight of set_pixel's words, the stencil test off: this array and the casters' had six,
+        // and the stencil test and operation were whatever the stack held past them)
+        const u32 pixel[8] = {0, (u32)GPU_WRITE_COLOR << 8,
                               GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_ONE << 16 | GPU_ZERO << 20 | GPU_ONE << 24 |
                                   (u32)GPU_ZERO << 28,
-                              0xE40100, GPU_LOGICOP_COPY, 0};
+                              0xE40100, GPU_LOGICOP_COPY, 0, (u32)GPU_ALWAYS << 4, 0};
         set_pixel(pixel);
         set_bools(0);
         for (int i = 0; i < 4; i++)
@@ -1544,10 +1557,10 @@ void PicaBackend::shadow_pass(const g3::Packet& p, PkgRes& r) {
             texture_rows(m, mr, nullptr, vb, k_slot0);
         }
         set_units(units, 1);
-        const u32 pixel[6] = {cut ? mr.pixel[0] : 0, (u32)GPU_WRITE_COLOR << 8,
+        const u32 pixel[8] = {cut ? mr.pixel[0] : 0, (u32)GPU_WRITE_COLOR << 8,
                               GPU_BLEND_ADD | GPU_BLEND_ADD << 8 | GPU_ONE << 16 | GPU_ZERO << 20 | GPU_ONE << 24 |
                                   (u32)GPU_ZERO << 28,
-                              0xE40103, GPU_LOGICOP_COPY, 0};
+                              0xE40103, GPU_LOGICOP_COPY, 0, (u32)GPU_ALWAYS << 4, 0};
         set_pixel(pixel);
         set_bools(0);
         draw_indices(r, c.first_index, c.n_indices);
@@ -1785,7 +1798,8 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
                     c2.buf_rgb = c2.buf_a = 0;
                     // (=2: the shadow compare's result shown as it comes, the unit left comparing)
                     if (atoi(getenv("NOMA_G3D_SHADOW_PROBE")) == 1)
-                        u3[0].regs[2] = (u3[0].regs[2] & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_2D);
+                        u3[0].regs[2] = (u3[0].regs[2] & ~(GPU_TEXTURE_MODE(7) | GPU_TEXTURE_SHADOW_PARAM)) |
+                                        GPU_TEXTURE_MODE(GPU_TEX_2D);
                 }
                 set_texenv(c2);
                 set_units(u3, tex_shadow);
@@ -1857,7 +1871,7 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
     // shader doesn't write; a shadow one compares), its shadow register as citro3d keeps it
     if (units_[0][2] != ~0u && (((units_[0][2] >> 28) & 7) == GPU_TEX_PROJECTION ||
                                 ((units_[0][2] >> 28) & 7) == GPU_TEX_SHADOW_2D))
-        cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~GPU_TEXTURE_MODE(7));
+        cmd_write(GPUREG_TEXUNIT0_PARAM, units_[0][2] & ~(GPU_TEXTURE_MODE(7) | GPU_TEXTURE_SHADOW_PARAM));
     if (tex_shadow_ != 1)
         cmd_write(GPUREG_TEXUNIT0_SHADOW, 1);
     // the GX path uses the same complemented clip depth

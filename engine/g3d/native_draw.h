@@ -226,6 +226,11 @@ public:
     virtual void draw(const Packet& packet, const GxView& view) = 0;
     // free what prepare made
     virtual void release(Package& package) = 0;
+    // Whether it draws the shadow map (ShadowMap) as it should: World::set_shadow_map asks, and a
+    // backend that says no gets packets without one (no casters, no receivers, no decal faded: the
+    // package's decals and the Mii's blob are the shadows then). Asked from the guest's thread too: a
+    // value fixed at start-up. (The 3DS GPU's says no unless switched on: g3d_pica.cpp.)
+    virtual bool shadow_maps() const { return true; }
 };
 
 // the platform's backend (set at start-up, before the guest runs)
