@@ -1339,8 +1339,10 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f, bool mips = false) {
 // above all) are drawn much smaller than their texels: the system font's sheets at about a third,
 // where sampling the full-size sheet with no smaller images drops whole strokes (the text shimmers
 // and breaks up as it moves). Such a texture gets its smaller images (each a 2x2 box filter of
-// the one before, down to 8x8) and is sampled between them (GPU_LINEAR mipmapping), which the
-// PICA picks by the size it is drawn at; drawn at full size it samples the texture as before.
+// the one before, down to 8x8, but on its border: pica_tex::mip_down, so that a pane sampling it
+// clamped far past its edge still gets the full-size edge, as GX does) and is sampled between them
+// (GPU_LINEAR mipmapping), which the PICA picks by the size it is drawn at; drawn at full size it
+// samples the texture as before.
 // Only whole power-of-two images that don't repeat and are filtered (not padded, not resampled,
 // not pixel art); NOMA_TEX_MIPS=0: none.
 bool tex_mips_on() {
@@ -1362,18 +1364,7 @@ void build_mips(C3D_Tex* t, const u8* raw, const GxTexture* gt, GPU_TEXCOLOR fmt
     for (int level = 1; level <= (int)t->maxLevel; level++) {
         const u32 lw = w >> 1, lh = h >> 1;
         b.resize((size_t)lw * lh);
-        for (u32 y = 0; y < lh; y++) {
-            const u32* r0 = &a[(size_t)(2 * y) * w];
-            const u32* r1 = r0 + w;
-            for (u32 x = 0; x < lw; x++) {
-                const u32 c[4] = {r0[2 * x], r0[2 * x + 1], r1[2 * x], r1[2 * x + 1]};
-                u32 out = 0;
-                for (int k = 0; k < 32; k += 8)
-                    out |= ((((c[0] >> k) & 0xFF) + ((c[1] >> k) & 0xFF) + ((c[2] >> k) & 0xFF) + ((c[3] >> k) & 0xFF) + 2) >> 2)
-                           << k;
-                b[(size_t)y * lw + x] = out;
-            }
-        }
+        pica_tex::mip_down(a.data(), w, h, b.data());
         u8* out = (u8*)C3D_Tex2DGetImagePtr(t, level, nullptr);
         pica_tex::from_rgba(b.data(), lw, lh, out, lw, lh, tex_fmt(fmt), false);
         std::swap(a, b);
@@ -2083,6 +2074,76 @@ int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, c
     return 0;
 }
 
+// ---- NOMA_CHECK_GX_CACHE=1 (env.txt): every list draw drawn from the cache is built again beside
+// it and compared with what the GPU will read for it: the kept vertices, the palette slots in the
+// frame's buffer of them and the matrix rows those slots hold in the palette (the check's own build
+// takes its slots from a copy of the palette, so that the frame's isn't moved). The first
+// differences are logged with the draw's list and record, and a count every 600 frames: for a
+// draw that comes out wrong in an emulator or on a console, whether the cache's keeping is why.
+struct CacheCheck {
+    int on = -1;
+    u32 draws = 0, bad = 0, logged = 0;
+    std::vector<PVertex> v;
+    std::vector<GxTnlSlots> s;
+    std::vector<GxTnlRows> rows;
+} s_cc;
+bool check_cache_on() {
+    if (s_cc.on < 0)
+        s_cc.on = getenv("NOMA_CHECK_GX_CACHE") && atoi(getenv("NOMA_CHECK_GX_CACHE")) != 0;
+    return s_cc.on > 0;
+}
+
+// the rows a palette slot's matrix takes (from slot s on), as the shader reads them
+bool same_rows(const GxTnlPalette& a, u32 sa, const GxTnlPalette& b, u32 sb, u32 n) {
+    if (sa + n > TNL_PAL_SLOTS || sb + n > TNL_PAL_SLOTS)
+        return false;
+    return memcmp(a.rows[sa], b.rows[sb], n * sizeof(a.rows[0])) == 0;
+}
+
+// vertices [done, done + n) of a cached draw whose vertices are at pool index `first`, its slots
+// set in the frame's buffer of them
+void check_cached(const GxTnlPlan& plan, const u8* data, u32 first, u32 done, u32 n, u32 prim, const DlRecord& r) {
+    s_cc.draws++;
+    s_cc.v.resize(n), s_cc.s.resize(n), s_cc.rows.resize(n);
+    GxTnlPalette pal = P.pal;
+    u32 built = gx_tnl_vertices(plan, data, done, n, pal, s_cc.v.data(), s_cc.s.data(), s_cc.rows.data());
+    if (built < n) {  // (the batch's slots fill the copy too: an empty palette has room)
+        pal = GxTnlPalette();
+        built = gx_tnl_vertices(plan, data, done, n, pal, s_cc.v.data(), s_cc.s.data(), s_cc.rows.data());
+    }
+    const u32 pos_rows = plan.nrm_eye ? 6 : 3;
+    for (u32 i = 0; i < built; i++) {
+        const PVertex& kept = P.vbuf[first + done + i];
+        const GxTnlSlots& ks = P.slots[first + done + i];
+        const GxTnlSlots& cs = s_cc.s[i];
+        const char* what = nullptr;
+        if (memcmp(&kept, &s_cc.v[i], sizeof(PVertex)) != 0)
+            what = "its vertex";
+        else if (!same_rows(P.pal, ks.s[0], pal, cs.s[0], pos_rows))
+            what = "its position matrix";
+        for (u32 k = 0; k < 3 && !what; k++)
+            if (plan.tc[k].src != TNL_SRC_ZERO && !same_rows(P.pal, ks.s[1 + k], pal, cs.s[1 + k], plan.tc[k].stq ? 3 : 2))
+                what = "a texgen's matrix";
+        if (!what)
+            continue;
+        s_cc.bad++;
+        if (s_cc.logged++ < 24)
+            log("pica cache check: frame %u: list %08X+%X, draw of %u vertices (primitive %02X) kept at %u (second place "
+                "%u, last drawn in frame %u): vertex %u: %s differs (kept: position %g %g %g, slots %u %u %u %u; built: "
+                "position %g %g %g, slots %u %u %u %u)",
+                P.frame, P.dl_addr, r.offset, r.count, prim, r.first, r.alt, r.slots_frame, done + i, what, kept.pos[0],
+                kept.pos[1], kept.pos[2], ks.s[0], ks.s[1], ks.s[2], ks.s[3], s_cc.v[i].pos[0], s_cc.v[i].pos[1],
+                s_cc.v[i].pos[2], cs.s[0], cs.s[1], cs.s[2], cs.s[3]);
+        break;  // (a draw's first difference)
+    }
+    static u32 s_reported;
+    if (P.frame / 600 != s_reported) {
+        s_reported = P.frame / 600;
+        log("pica cache check: %u cached draws checked, %u differ", s_cc.draws, s_cc.bad);
+        s_cc.draws = s_cc.bad = 0;
+    }
+}
+
 }  // namespace
 
 bool PicaRenderer::init() {
@@ -2368,8 +2429,10 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         return done + (prim == 0x98 ? n - 2 : n);
     };
 
-    // ---- a display list's draw: its vertices from the cache, or into it
-    if (gx_in_display_list() && !P.cache_full) {
+    // ---- a display list's draw: its vertices from the cache, or into it (NOMA_PICA_LIST_CACHE=0:
+    // every list draw the immediate way, to tell the cache's part in a draw that comes out wrong)
+    static const bool s_list_cache = !getenv("NOMA_PICA_LIST_CACHE") || atoi(getenv("NOMA_PICA_LIST_CACHE")) != 0;
+    if (gx_in_display_list() && !P.cache_full && s_list_cache) {
         const u32 addr = gx_display_list_addr(), size = gx_display_list_size(), offset = gx_display_list_offset();
         DlEntry* e = dl_entry(addr, size);
         // a new call of a list: its bytes' generation decides whether its records still hold
@@ -2467,6 +2530,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                         }
                     }
                     slots_written(r->first + done, n);
+                    if (check_cache_on())
+                        check_cached(plan, data, r->first, done, n, prim, *r);
                     submit(r->first + done, n);
                     done = next_piece(done, n);
                 }
@@ -2487,6 +2552,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                     r->slots_valid |= (u8)(1u << b);
                     slots_written(r->first, count);
                 }
+                if (check_cache_on())
+                    check_cached(plan, data, r->first, 0, count, prim, *r);
                 submit(r->first, count);
             }
             r->slots_last = (u8)b;
@@ -2604,6 +2671,8 @@ static void save_shot(C3D_RenderTarget* t, u32 n) {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_SCALING(S == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO));
+    wait_gpu();  // (the transfer itself, as read_back waits for it)
+    GSPGPU_InvalidateDataCache(buf, W * H * 4);
     mkdir("sdmc:/3ds/noma/shots", 0777);
     char path[64];
     snprintf(path, sizeof(path), "sdmc:/3ds/noma/shots/%05u.bmp", (unsigned)n);
@@ -2659,8 +2728,12 @@ bool read_back() {
         P.env_valid = false;
         P.cull = ~0u;
     }
-    // outside citro3d's frame this waits for its queue, then for the transfer: the GPU has then
-    // finished everything sent to it
+    // outside citro3d's frame this waits for its queue, then sends the transfer. Its own wait for the
+    // transfer (gspWaitForPPF) ends at once when an earlier transfer's interrupt is still signalled,
+    // which nothing else clears (the screens' transfers, every frame): the transfer is then waited
+    // for as the end of citro3d's queue, before the buffer is read (wait_gpu: the GPU has then
+    // finished everything sent to it). (An emulator does the transfer at once: only a console reads
+    // a buffer half written without it.)
     {
         GpuWait w("for a read-back (C3D_SyncDisplayTransfer)");
         s_ppf_sent++;
@@ -2671,7 +2744,7 @@ bool read_back() {
                                     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     }
-    s_done = P.frame;
+    wait_gpu();  // (s_done = P.frame)
     GSPGPU_InvalidateDataCache(s_readback, RW * RH * 4);
     if (in_frame) {
         if (s_overlap) {
@@ -2823,6 +2896,11 @@ void PicaRenderer::draw_done() {
             log("pica: frame %u's draw calls dumped to batches.bin", P.frame);
         }
         P.frame++;
+        // the texture cache's frame (the host's renderer moves it on at its XFB copy, which this one
+        // never makes): without it a texture was checked against guest memory once, ever (but after
+        // an EFB copy), and kept the texels it was first seen with whatever the guest wrote there
+        // later: an image made again in the same place, size and format, a palette loaded anew
+        gx_texture_frame();
         static int s_shot_every = getenv("NOMA_SHOT_EVERY") ? atoi(getenv("NOMA_SHOT_EVERY")) : 0;
         if (s_shot_every > 0 && P.frame % (u32)s_shot_every == 0) {
             save_shot(P.top, P.frame);  // (its transfer waits for the GPU to finish the frame)
@@ -2838,6 +2916,14 @@ void PicaRenderer::draw_done() {
             log("pica: texture KB by format: RGBA8 %u, RGB565 %u, RGBA5551 %u (CMPR), LA8 %u, LA4 %u, L8 %u, L4 %u, ETC1 %u, "
                 "ETC1A4 %u", kb_fmt[GPU_RGBA8], kb_fmt[GPU_RGB565], kb_fmt[GPU_RGBA5551], kb_fmt[GPU_LA8], kb_fmt[GPU_LA4],
                 kb_fmt[GPU_L8], kb_fmt[GPU_L4], kb_fmt[GPU_ETC1], kb_fmt[GPU_ETC1A4]);
+            // the texture cache's checks against guest memory since the last report (once a frame a
+            // texture; its image hashed when its memory was written, and now and then anyway)
+            static GxTextureStats s_ts0;
+            const GxTextureStats ts = gx_texture_stats();
+            log("pica: the texture cache: %u checks, %u images hashed (%u KB), %u found changed",
+                ts.checks - s_ts0.checks, ts.hashes - s_ts0.hashes, (u32)((ts.hashed_bytes - s_ts0.hashed_bytes) >> 10),
+                ts.changed - s_ts0.changed);
+            s_ts0 = ts;
             const double ms = 1000.0 / SYSCLOCK_ARM11, f = P.timed_frames ? P.timed_frames : 1;
             log("pica: %zu textures (%u KB), %u dropped for memory, %u not made; %u KB linear heap free, "
                 "heap %u KB used of %u KB; at most %u immediate vertices and %u indices a frame; last frame %u draws "

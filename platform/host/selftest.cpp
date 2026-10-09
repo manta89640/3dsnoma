@@ -1133,6 +1133,152 @@ static void selftest_tex() {
         if ((!ok || a != b) && bad++ < 4) log("selftest tex: format %u %ux%u differs", f, w, h);
     }
     log("selftest tex: %u textures straight from GX tiles, %s", n, bad ? "DIFFERENT" : "ok");
+
+    // The textures as the PICA reads them, a reader of its own (Azahar's decoder: 8x8 tiles in rows
+    // of W / 8, a tile's texels in Morton order, its memory rows from the texture's top, t = 1, down,
+    // so that image row y, sampled at t = y / H, is memory row H - 1 - y; little-endian texels), not
+    // pica_tex's layout tables: every texel of W x H must be the GX decoder's texel in the precision
+    // of the format it is kept in, the image's edge texel past its right and bottom edges (GX's
+    // clamp), a repeating texture's nearest texel (from_rgba's resampling), each smaller image of a
+    // grey texture the 2x2 average of the one before inside and its border's own texels on the
+    // border (mip_down); a luminance texture with its alpha read from its red, as the combiners read
+    // it (tev::remap_luminance).
+    auto morton = [](u32 x, u32 y) {
+        static const u8 xs[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+        static const u8 ys[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+        return (u32)xs[x & 7] + ys[y & 7];
+    };
+    auto rgba_of = [](u32 r, u32 g, u32 bl, u32 al) { return r | g << 8 | bl << 16 | al << 24; };
+    auto c4 = [](u32 v) { return v * 17; };
+    auto c5 = [](u32 v) { return v << 3 | v >> 2; };
+    auto c6 = [](u32 v) { return v << 2 | v >> 4; };
+    // texel (x, image row y) of a W x H PICA texture in format f
+    auto read_pica = [&](const u8* tex, Fmt f, u32 W, u32 H, u32 x, u32 y) -> u32 {
+        const u32 my = H - 1 - y, m = morton(x, my);
+        const u8* tile = tex + ((size_t)(my / 8) * (W / 8) + x / 8) * 64 * texel_bits(f) / 8;
+        switch (f) {
+        case RGBA8: {
+            const u8* p = tile + 4 * m;
+            return rgba_of(p[3], p[2], p[1], p[0]);
+        }
+        case RGB565: {
+            const u32 v = tile[2 * m] | tile[2 * m + 1] << 8;
+            return rgba_of(c5(v >> 11), c6(v >> 5 & 63), c5(v & 31), 255);
+        }
+        case RGBA5551: {
+            const u32 v = tile[2 * m] | tile[2 * m + 1] << 8;
+            return rgba_of(c5(v >> 11), c5(v >> 6 & 31), c5(v >> 1 & 31), (v & 1) * 255);
+        }
+        case LA8: return rgba_of(tile[2 * m + 1], tile[2 * m + 1], tile[2 * m + 1], tile[2 * m]);
+        case LA4: return rgba_of(c4(tile[m] >> 4), c4(tile[m] >> 4), c4(tile[m] >> 4), c4(tile[m] & 15));
+        case L8: return rgba_of(tile[m], tile[m], tile[m], tile[m]);
+        case L4: {
+            const u32 l = c4(m & 1 ? tile[m / 2] >> 4 : tile[m / 2] & 15);
+            return rgba_of(l, l, l, l);
+        }
+        default: return 0;
+        }
+    };
+    // a GX texel (texture.cpp's RGBA8) in the precision of format f
+    auto kept_as = [&](u32 c, Fmt f) -> u32 {
+        const u32 r = c & 255, g = c >> 8 & 255, bl = c >> 16 & 255, al = c >> 24;
+        switch (f) {
+        case RGB565: return rgba_of(c5(r >> 3), c6(g >> 2), c5(bl >> 3), 255);
+        case RGBA5551: return rgba_of(c5(r >> 3), c5(g >> 3), c5(bl >> 3), al >= 128 ? 255 : 0);
+        case LA8: return rgba_of(r, r, r, al);
+        case LA4: return rgba_of(c4(r >> 4), c4(r >> 4), c4(r >> 4), c4(al >> 4));
+        case L8: return rgba_of(r, r, r, r);
+        case L4: return rgba_of(c4(r >> 4), c4(r >> 4), c4(r >> 4), c4(r >> 4));
+        default: return c;
+        }
+    };
+    static const u32 k_sizes[] = {1, 2, 3, 4, 5, 7, 8, 9, 12, 15, 16, 17, 20, 24, 31, 32, 33, 40, 50, 63, 64, 65,
+                                  74, 96, 100, 127, 128, 129, 200, 255, 256, 300, 512};
+    const u32 n_sizes = sizeof(k_sizes) / sizeof(k_sizes[0]);
+    u32 read_n = 0, read_bad = 0, texels_bad = 0;
+    std::vector<u32> lv_a, lv_b;
+    std::vector<u8> lv;
+    for (u32 fi = 0; fi < 11; fi++)
+        for (u32 si = 0; si < n_sizes; si++)
+            for (u32 pass = 0; pass < 3; pass++) {  // clamped, repeating, (POT grey ones) with smaller images
+                const u32 f = fmts[fi], w = k_sizes[si];
+                const u32 h = pass == 2 ? (fi & 1 ? w : std::max(64u, w / 2)) : k_sizes[(si * 7 + fi * 3 + pass * 11) % n_sizes];
+                const u32 W = p2(w), H = p2(h), tlut_fmt = (si + pass) % 3, tlut_addr = (next() % 1500) << 9;
+                const bool repeat = pass == 1, mips = pass == 2;
+                if (mips && (f > 3 || W != w || H != h || w < 64 || h < 64))
+                    continue;
+                for (u32 i = 0; i < 0x10000; i++) tmem[(tlut_addr + i) & ((1u << 20) - 1)] = (u8)next();
+                src.resize(gx_texture_bytes(f, w, h));
+                for (u8& c : src) c = (u8)next();
+                const Fmt pf = fmt_of(f, tlut_fmt);
+                b.assign((size_t)W * H * texel_bits(pf) / 8, 0xCD), rgba.assign((size_t)w * h, 0);
+                gx_decode_texture_tlut(src.data(), f, w, h, tlut_addr, tlut_fmt, rgba.data());
+                // (as texture_for: the GX tiles straight in, a repeating texture of another size resampled)
+                if (repeat && (W != w || H != h))
+                    from_rgba(rgba.data(), w, h, b.data(), W, H, pf, true);
+                else
+                    from_gx(src.data(), f, w, h, tmem, GX_TMEM_MASK, tlut_addr, tlut_fmt, b.data(), W, H, pf);
+                u32 wrong = 0, first_x = 0, first_y = 0, got0 = 0, want0 = 0;
+                auto compare = [&](const u8* tex, u32 lw, u32 lh, u32 LW, u32 LH, const u32* img, bool resampled) {
+                    for (u32 y = 0; y < LH; y++)
+                        for (u32 x = 0; x < LW; x++) {
+                            const u32 sx = resampled ? x * lw / LW : std::min(x, lw - 1);
+                            const u32 sy = resampled ? y * lh / LH : std::min(y, lh - 1);
+                            const u32 got = read_pica(tex, pf, LW, LH, x, y), want = kept_as(img[sy * lw + sx], pf);
+                            if (got != want && !wrong++)
+                                first_x = x, first_y = y, got0 = got, want0 = want;
+                        }
+                };
+                compare(b.data(), w, h, W, H, rgba.data(), repeat && (W != w || H != h));
+                if (mips) {  // (each level from the one before, as gx_pica.cpp's build_mips makes them)
+                    lv_a = rgba;
+                    for (u32 lw = w / 2, lh = h / 2; lw >= 8 && lh >= 8; lw /= 2, lh /= 2) {
+                        lv_b.assign((size_t)lw * lh, 0);
+                        mip_down(lv_a.data(), lw * 2, lh * 2, lv_b.data());
+                        // the reference, a channel at a time, rounded: inside the 2x2 average, on the
+                        // border the border's own texels (pairs down an edge column, across an edge
+                        // row; the corners kept), so that a clamp past the edge gives the full-size
+                        // image's edge at every size
+                        const u32 pw = lw * 2;
+                        auto at = [&](u32 x, u32 y) { return lv_a[(size_t)y * pw + x]; };
+                        auto mean = [](std::initializer_list<u32> c) {
+                            u32 v = 0;
+                            for (int k = 0; k < 32; k += 8) {
+                                u32 s = 0;
+                                for (u32 p : c) s += p >> k & 255;
+                                v |= ((s + (u32)c.size() / 2) / (u32)c.size()) << k;
+                            }
+                            return v;
+                        };
+                        for (u32 y = 0; y < lh; y++)
+                            for (u32 x = 0; x < lw; x++) {
+                                const bool ex = x == 0 || x == lw - 1, ey = y == 0 || y == lh - 1;
+                                const u32 sx0 = x == 0 ? 0 : x == lw - 1 ? pw - 1 : 2 * x;
+                                const u32 sy0 = y == 0 ? 0 : y == lh - 1 ? 2 * lh - 1 : 2 * y;
+                                const u32 want = ex && ey ? at(sx0, sy0)
+                                                 : ex     ? mean({at(sx0, 2 * y), at(sx0, 2 * y + 1)})
+                                                 : ey     ? mean({at(2 * x, sy0), at(2 * x + 1, sy0)})
+                                                          : mean({at(2 * x, 2 * y), at(2 * x + 1, 2 * y), at(2 * x, 2 * y + 1), at(2 * x + 1, 2 * y + 1)});
+                                if (lv_b[(size_t)y * lw + x] != want && !wrong++)
+                                    first_x = x, first_y = y, got0 = lv_b[(size_t)y * lw + x], want0 = want;
+                            }
+                        lv.assign((size_t)lw * lh * texel_bits(pf) / 8, 0xCD);
+                        from_rgba(lv_b.data(), lw, lh, lv.data(), lw, lh, pf, false);
+                        compare(lv.data(), lw, lh, lw, lh, lv_b.data(), false);
+                        std::swap(lv_a, lv_b);
+                    }
+                }
+                read_n++;
+                texels_bad += wrong;
+                if (wrong && read_bad++ < 8)
+                    log("selftest tex: format %u %ux%u (PICA %u, %ux%u%s) read back wrong at %u texels, the first (%u, %u): "
+                        "%08X, the GX texel %08X",
+                        f, w, h, (u32)pf, W, H, repeat ? ", repeating" : mips ? ", smaller images" : "", wrong, first_x,
+                        first_y, got0, want0);
+            }
+    log("selftest tex: %u textures read back as the PICA reads them, %u texels wrong: %s", read_n, texels_bad,
+        read_bad ? "MISMATCH" : "ok");
+
     // ETC1: texture-like CMPR (endpoints a few steps apart, now and then flat or three-color)
     static const int MODT[8][2] = {{2, 8}, {5, 17}, {9, 29}, {13, 42}, {18, 60}, {24, 80}, {33, 106}, {47, 183}};
     double se = 0;

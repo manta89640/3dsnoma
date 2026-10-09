@@ -93,6 +93,51 @@ inline void from_rgba(const u32* rgba, u32 w, u32 h, u8* out, u32 W, u32 H, Fmt 
     }
 }
 
+// A smaller image (mipmap level) of an RGBA8 one (w x h, both even, at least 4) into out (w / 2 x
+// h / 2): each texel the rounded average of a 2x2 block, a channel at a time, but the border's. GX
+// samples these textures without smaller images, and a clamped texture sampled past its edge gives
+// its edge texels: a layout places an icon in a larger pane with coordinates far outside 0..1 (the
+// room TV's table, 128x128: s -0.14..2.17, t -1.4..0.9 over 100 x 126 of the 3DS's pixels, so that
+// the PICA samples between its second and third images). A 2x2 average brings the picture's texels
+// next to the edge into the border (the table's rim, against a transparent edge column), and the
+// clamp repeats them over the rest of the pane: a band of the rim's colours across the TV. So the
+// border of every smaller image is the image before's border alone: its first and last columns the
+// averages of pairs of that border's texels down the column, its first and last rows across the
+// row, its corners the corners; past the edge every image then gives the full-size image's edge
+// (averaged along it), as GX does.
+inline void mip_down(const u32* in, u32 w, u32 h, u32* out) {
+    const u32 w2 = w / 2, h2 = h / 2;
+    auto avg4 = [](u32 a, u32 b, u32 c, u32 d) {
+        u32 v = 0;
+        for (int k = 0; k < 32; k += 8)
+            v |= ((((a >> k) & 0xFF) + ((b >> k) & 0xFF) + ((c >> k) & 0xFF) + ((d >> k) & 0xFF) + 2) >> 2) << k;
+        return v;
+    };
+    auto avg2 = [](u32 a, u32 b) {
+        u32 v = 0;
+        for (int k = 0; k < 32; k += 8)
+            v |= ((((a >> k) & 0xFF) + ((b >> k) & 0xFF) + 1) >> 1) << k;
+        return v;
+    };
+    for (u32 y = 0; y < h2; y++) {
+        const u32* r0 = in + (size_t)(2 * y) * w;
+        const u32* r1 = r0 + w;
+        u32* o = out + (size_t)y * w2;
+        for (u32 x = 0; x < w2; x++)
+            o[x] = avg4(r0[2 * x], r0[2 * x + 1], r1[2 * x], r1[2 * x + 1]);
+        o[0] = avg2(r0[0], r1[0]);  // (the columns' borders: down the column)
+        o[w2 - 1] = avg2(r0[w - 1], r1[w - 1]);
+    }
+    const u32* top = in;
+    const u32* bottom = in + (size_t)(h - 1) * w;
+    u32* otop = out;
+    u32* obottom = out + (size_t)(h2 - 1) * w2;
+    for (u32 x = 1; x + 1 < w2; x++)  // (the rows' borders: across the row)
+        otop[x] = avg2(top[2 * x], top[2 * x + 1]), obottom[x] = avg2(bottom[2 * x], bottom[2 * x + 1]);
+    otop[0] = top[0], otop[w2 - 1] = top[w - 1];
+    obottom[0] = bottom[0], obottom[w2 - 1] = bottom[w - 1];
+}
+
 namespace detail {
 
 inline u32 rgba(u32 r, u32 g, u32 b, u32 a) { return r | g << 8 | b << 16 | a << 24; }

@@ -36,19 +36,27 @@ struct KeyHash {
 };
 struct Entry {
     GxTexture tex;
-    u64 hash = 0;
+    u64 hash = 0;          // its image's bytes
+    u64 pal_hash = 0;      // its palette's (paletted formats)
     u32 checked_frame = ~0u;
     u32 used_frame = 0;
     u32 gen = 0;           // write generation of its memory when last hashed
     bool decoded = false;  // tex is up to date (its pixels may have been released since)
-    u32 hashed_frame = 0;  // the frame it was last hashed in
+    u32 hash_due = 0;      // the frame its image is hashed again even if nothing marked it written
 };
-// A texture's memory is hashed again when the guest marked it written (cache flushes, IOS and GPU
+// A texture is checked once a frame (gx_texture_frame moves the frames on: the host's XFB copy, the
+// 3DS renderer's frame end), at its first use in it, and again after an EFB copy wrote its memory.
+// Its image is hashed again when the guest marked its memory written (cache flushes, IOS and GPU
 // writes: memory.cpp's write generations), and every HASH_EVERY frames anyway (writes nothing
-// marks: uncached stores)
-const u32 HASH_EVERY = 120;
+// marks: uncached stores), each texture's turn up to HASH_SPREAD frames off its neighbours' (by its
+// address) so that the textures a screen loaded together aren't all hashed in one frame. A paletted
+// texture's palette (32 or 512 bytes of TMEM, 32 KB for C14X2) is hashed at every check: a TLUT
+// load leaves no write generation behind.
+const u32 HASH_EVERY = 120, HASH_SPREAD = 64;
+u32 hash_spread(u32 addr) { return ((addr >> 5) * 2654435761u) >> 26; }  // 0..63
 std::unordered_map<Key, Entry, KeyHash> s_cache;
 u32 s_frame;
+GxTextureStats s_stats;
 
 u32 rgba(u32 r, u32 g, u32 b, u32 a) { return r | g << 8 | b << 16 | a << 24; }
 u32 x5(u32 v) { return (v << 3) | (v >> 2); }
@@ -276,16 +284,25 @@ const GxTexture* gx_texture_regs(u32 img0, u32 img1, u32 img2, u32 img3, u32 tlu
     if (e.checked_frame != s_frame || (preloaded && e.gen != s_tmem_serial) || refill) {
         NOMA_PROF_SCOPE("(gx texture check)");
         e.checked_frame = s_frame;
-        u32 gen = preloaded ? s_tmem_serial : mem_generation(k.addr, bytes);
-        if (!paletted && e.decoded && !refill && gen == e.gen && s_frame - e.hashed_frame < HASH_EVERY)
-            return &e.tex;
-        e.gen = gen;
-        e.hashed_frame = s_frame;
-        u64 h = hash_bytes(src, bytes);
-        if (paletted)
-            h ^= hash_bytes(&s_tmem[k.tlut_addr], k.fmt == 8 ? 32 : k.fmt == 9 ? 512 : 0x8000) * 31;
-        if (h != e.hash || !e.decoded || refill) {
+        s_stats.checks++;
+        const u32 gen = preloaded ? s_tmem_serial : mem_generation(k.addr, bytes);
+        bool changed = !e.decoded || refill;
+        if (changed || gen != e.gen || (s32)(s_frame - e.hash_due) >= 0) {
+            e.gen = gen;
+            e.hash_due = s_frame + HASH_EVERY + hash_spread(k.addr);
+            const u64 h = hash_bytes(src, bytes);
+            changed |= h != e.hash;
             e.hash = h;
+            s_stats.hashes++, s_stats.hashed_bytes += bytes;
+        }
+        if (paletted) {
+            const u64 h = hash_bytes(&s_tmem[k.tlut_addr], k.fmt == 8 ? 32 : k.fmt == 9 ? 512 : 0x8000);
+            changed |= h != e.pal_hash;
+            e.pal_hash = h;
+        }
+        if (changed && e.decoded)
+            s_stats.changed++;
+        if (changed) {
             e.decoded = true;
             e.tex.width = k.w;
             e.tex.height = k.h;
@@ -360,5 +377,7 @@ void gx_texture_frame() {
             ++it;
     }
 }
+
+GxTextureStats gx_texture_stats() { return s_stats; }
 
 }  // namespace guest

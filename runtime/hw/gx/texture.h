@@ -35,8 +35,18 @@ const GxTexture* gx_texture_regs(u32 image0, u32 image1, u32 image2, u32 image3,
 const GxTexture* gx_texture_raw_regs(u32 image0, u32 image1, u32 image2, u32 image3, u32 tlut, const u8** src);
 const u8* gx_tmem();
 const u32 GX_TMEM_MASK = (1u << 20) - 2;
-// the texture cache forgets textures not used for a while; called once per frame
+// A frame has ended: textures are checked against their memory again at their next use (once a
+// frame), and those not used for a while are forgotten. Every renderer calls it once per frame (the
+// host's at its XFB copy, the 3DS's at the frame's end): without it a texture keeps the texels it was
+// first seen with, whatever the guest writes there later.
 void gx_texture_frame();
+// what the cache's checks did so far: textures checked (once a frame each), images hashed and
+// their bytes, textures found changed (decoded again: a new version); for a renderer's log line
+struct GxTextureStats {
+    u32 checks = 0, hashes = 0, changed = 0;
+    u64 hashed_bytes = 0;
+};
+GxTextureStats gx_texture_stats();
 // TMEM (palettes): BP 0x65 copies main memory into it
 void gx_load_tlut(u32 bp64, u32 bp65);
 // TMEM (preloaded textures): BP 0x63 copies main memory into it (BP 0x60-0x62: source and banks)
