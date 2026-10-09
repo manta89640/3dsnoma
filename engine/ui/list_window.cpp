@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "engine/system/host_scene.h"
+#include "engine/ui/drag_scroll.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
 
@@ -144,6 +145,9 @@ struct ListWindow::Impl {
     f32 tab_x = 0, tab_y = 0;                       // where the pointer pressed it
     int pad_dir = 0, pad_steps = 0, pad_timer = 0;  // the D-pad held
 
+    f32 win_x = 0, win_y = 0, win_w = 0;  // the window's centre and width
+    DragScroll drag;          // the touch dragging the rows
+
     int highlight = 0;       // the D-pad's highlight (an entry)
     bool pad_mode = false;   // the D-pad has been used since the pointer last moved
     f32 pointer_x = 0, pointer_y = 0;
@@ -170,6 +174,7 @@ struct ListWindow::Impl {
 ListWindow::ListWindow(u32 cursor, u32 group, f32 x, f32 y, f32 width) : impl_(new Impl) {
     Impl& m = *impl_;
     m.cursor = cursor;
+    m.win_x = x, m.win_y = y, m.win_w = width;
     m.wide = 1.0f / location_adjust_x();
     m.row_w = width - 2 * ROW_MARGIN;
     m.text_w = m.row_w - 2 * TEXT_MARGIN;
@@ -461,7 +466,7 @@ void ListWindow::Impl::place_rows() {
         move(r.root, 0, FIRST_Y - ((f32)e - pos) * PITCH);
         set_alpha(r.root, (u8)(part * fade() * 255.0f + 0.5f));
         show(r.root, part > 0);
-        set_active(r.button, state == State::OPEN && part >= 0.5f);
+        set_active(r.button, state == State::OPEN && part >= 0.5f && !drag.holding());
     }
 }
 
@@ -495,6 +500,18 @@ void ListWindow::update() {
         return;
     }
     if (m.state == Impl::State::OPEN) {
+        const screen::Region rows{m.win_x - m.win_w / 2, m.win_y + VISIBLE * PITCH / 2, m.win_w, VISIBLE * PITCH};
+        switch (m.drag.update(rows, m.pos, PITCH, m.max_top())) {
+        case DragScroll::Step::DRAG:
+            m.glide_frames = 0, m.tab_dir = 0;
+            m.top = (int)std::lround(m.pos);
+            break;
+        case DragScroll::Step::LET_GO:
+            m.top = std::min(std::max((int)std::lround(m.pos), 0), m.max_top());
+            m.glide(8, true);
+            break;
+        case DragScroll::Step::NONE: break;
+        }
         m.input();
         // the pointer on a row: the highlight is there
         for (const Impl::Row& r : m.rows)

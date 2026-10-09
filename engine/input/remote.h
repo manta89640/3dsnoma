@@ -75,6 +75,8 @@ void input_set_stick_as_dpad(bool on);
 // whether the A of the game's last read came from a tap (wiimote_take_tap), not the A button: a
 // scene that takes A for something else than pressing (a jump) leaves it out
 bool wiimote_last_read_tapped();
+// the tap just ended (or its A still waiting) is no press: a drag (engine/ui/drag_scroll.h)
+void input_cancel_tap();
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

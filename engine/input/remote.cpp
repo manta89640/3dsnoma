@@ -224,4 +224,8 @@ void nw4r_snd_detail_RemoteSpeakerManager_Setup(u32 mgr, u32) { guest::store8(mg
 
 namespace guest {
 bool wiimote_last_read_tapped() { return g::s_tap_given; }
+void input_cancel_tap() {
+    s_tap = false;
+    g::s_tap_waiting = false;
+}
 }  // namespace guest

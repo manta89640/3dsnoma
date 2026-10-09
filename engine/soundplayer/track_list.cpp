@@ -38,6 +38,7 @@
 
 #include "engine/input/remote.h"
 #include "engine/system/host_scene.h"
+#include "engine/ui/drag_scroll.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
 
@@ -235,6 +236,7 @@ struct TrackList::Impl {
 
     int chosen = -1;
     bool opened = false;  // its FadeIn has started (the rows can be used)
+    engine::ui::DragScroll drag;  // the touch dragging the rows
     int frames = 0;
 
     std::vector<std::pair<u32, u32>> recoloured;  // animation words changed, and what they were
@@ -553,7 +555,7 @@ void TrackList::Impl::place_rows() {
         move(r.panes.root, 0, FIRST_Y - ((f32)e - pos) * PITCH);
         set_alpha(r.panes.root, (u8)(part * 255.0f + 0.5f));
         show(r.panes.root, part > 0);
-        set_active(r.button, opened && !r.header && part >= 0.5f);
+        set_active(r.button, opened && !r.header && part >= 0.5f && !drag.holding());
     }
 }
 
@@ -622,8 +624,22 @@ void TrackList::update(const Music& music) {
         play(m.window, m.fade_in);
     }
     m.follow_music(music);
-    if (m.opened)
+    if (m.opened) {
+        const engine::ui::screen::Region rows{WINDOW_X - WINDOW_W / 2, WINDOW_Y + VISIBLE * PITCH / 2, WINDOW_W,
+                                              VISIBLE * PITCH};
+        switch (m.drag.update(rows, m.pos, PITCH, m.max_top())) {
+        case engine::ui::DragScroll::Step::DRAG:
+            m.glide_frames = 0, m.tab_dir = 0;
+            m.top = (int)std::lround(m.pos);
+            break;
+        case engine::ui::DragScroll::Step::LET_GO:
+            m.top = std::min(std::max((int)std::lround(m.pos), 0), m.max_top());
+            m.glide(8, true);
+            break;
+        case engine::ui::DragScroll::Step::NONE: break;
+        }
         m.input();
+    }
     // the pointer on a row: the highlight is there
     for (const Impl::Row& r : m.rows)
         if (focused(r.button) && r.entry >= 0 && !r.header)

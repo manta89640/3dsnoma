@@ -263,7 +263,8 @@ tab at the bottom left (or B) goes back to the room, whose music comes back by i
   brought to the same loudness, with a tempo found from its onsets for the dances. L and R jump
   from heading to heading.
 - On the bottom screen: the list, in the channel's list window with the message board's rows (the
-  room's cyan for focus), four rows at a time (the tabs on its edges, held, or the D-pad), the
+  room's cyan for focus), four rows at a time (dragged with the stylus, the tabs on its edges,
+  held, or the D-pad), the
   video player's own controls (previous, play/pause, next, stop) and the Home tab, worked by touch
   (a tap presses what it is on). The track playing has a cyan bar with ♪ (grey with ∥ when
   paused). On the top screen: the title over the stage.
