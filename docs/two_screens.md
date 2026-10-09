@@ -80,8 +80,8 @@ draw, and drawn on the bottom screen without its hand.
 - a touch that begins on a list's rows (`input_set_drag_area`, renewed by the list every frame)
   presses only as a tap at its release; once it is a drag (`input_mark_drag`) it presses nothing,
   the pointer held where it began and taken away when it lets go;
-- the pointer leaves half a second after a touch, 3 s after the circle pad or a touch in the
-  channel's own screens (platform/3ds/main.cpp); a D-pad move of a list's highlight sends it away at
+- the pointer leaves a second after a touch, 3 s after a touch in the channel's own screens
+  (platform/3ds/main.cpp; the circle pad is the D-pad there, no pointer); a D-pad move of a list's highlight sends it away at
   once (`input_pointer_away`), so A presses the highlight;
 - on Wuhu Island the jump is the A button's own (`wiimote_a_button_pressed/held`): a touch holds the
   game's A for the bottom screen's menus;

@@ -2,7 +2,7 @@
 """The kept flow, end to end on the host, by touch alone: the opening skipped with a tap, the room's
 bottom-screen buttons to the options (shown whole on the bottom screen) and back by their Home tab,
 to the Sound Player and back, to Wuhu Island and back through its menu and question, then the
-room's way back and its question's はい, which ends the app. The run is scripted (NOMA_INPUT, on the
+app closed from the room as the 3DS's HOME Menu closes it. The run is scripted (NOMA_INPUT, on the
 game's clock) and its log is checked for each step's line, in order.
 
     tools/flow_check.py [--host build-host/noma-host] [--data runs/data] [--timeout 900] [--keep LOG]
@@ -37,15 +37,16 @@ TOUCHES = [
     (4, 160, 120, "a tap during the opening: skipped"),
     (12, 224, 119, "the room's 設定"),
     (19, 18, 225, "the options' Home tab"),
-    (27, 173, 217, "the room's サウンド"),
+    (27, 120, 217, "the room's サウンド"),
     (36, 20, 225, "the Sound Player's Home tab"),
-    (44, 253, 217, "the room's 出発"),
+    (44, 200, 217, "the room's 出発"),
     (80, 20, 223, "the island's Home tab: its menu"),
     (85, 160, 51, "部屋にもどる"),
     (90, 233, 218, "はい"),
-    (110, 20, 217, "the room's way back: its question"),
-    (115, 233, 218, "はい: the app ends"),
 ]
+# then the app closed from the room as the 3DS's HOME Menu closes it (the Wii's power button: the
+# room's way back to the Wii Menu isn't on the 3DS)
+CLOSE_AT = 110
 
 # the log's lines, in this order
 STEPS = [
@@ -62,7 +63,7 @@ STEPS = [
     ("the island", r"wuhu: open"),
     ("the island left", r"wuhu: closed"),
     ("the room again", r"room: bottom screen panel"),
-    ("the app ended from the room", r"room: quit"),
+    ("the app closed from the room", r"stm: the power button"),
     ("the program quit", r"quit: "),
 ]
 
@@ -95,7 +96,7 @@ def main():
         if not k or not eq:
             ap.error(f"--env {kv}: not K=V")
         extra[k] = v
-    script = ",".join(f"{t}:T({x};{y})" for t, x, y, _ in TOUCHES)
+    script = ",".join(f"{t}:T({x};{y})" for t, x, y, _ in TOUCHES) + f",{CLOSE_AT}:OFF"
     env = dict(os.environ, NOMA_INPUT=script)
     for k in ("NOMA_NO_RENDER", "NOMA_TEST_CARD", "NOMA_DUMP_FRAMES", "NOMA_DUMP_FROM", "NOMA_DUMP_3DS",
               "NOMA_RENDER_ALL"):

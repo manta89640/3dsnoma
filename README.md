@@ -212,28 +212,27 @@ beside it as `NNNNN_bottom.bmp`.
 
 ## Controls on the 3DS
 
-The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom screen (or use the
-circle pad) to point, A/B as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad as the D-pad.
+The 3DS stands in for a Wii Remote pointed at the screen: touch the bottom screen to point, A/B
+as A/B, X = 1, Y = 2, START = +, SELECT = −, the D-pad and (out of the island and the Sound Player,
+where it walks and scrolls) the circle pad as the D-pad.
 A touch is the remote pointed there with A held: it presses as it comes down (its second read:
 the first puts the pointer there) and holds as long as it lasts, so held arrows repeat as on the
 Wii; on a list's rows a touch presses only as a tap, when it lets go, and a drag scrolls the list
-and presses nothing. The pointer leaves the screen half a second after a touch (3 seconds after
-the circle pad moved it, and after a touch in the channel's own screens, whose theater shows its
-controls only while it is there), as a remote put down would, so nothing stays highlighted; the
+and presses nothing. The pointer leaves the screen a second after a touch (3 seconds in the
+channel's own screens, whose theater shows its controls only while it is there), as a remote put
+down would, so nothing stays highlighted; the
 D-pad moving a list's highlight sends it away at once; the next touch brings it back.
 At the start, A or a tap skips the rest of the opening ([docs/two_screens.md](docs/two_screens.md) has how the
 two screens are put together). In the room the top screen shows the room alone (no bar, no hand) and the bottom one the room's
-buttons, the channel's own, worked by touch (`engine/room/panel.h`): the bar along the bottom edge
-as the channel has it (the way back, ホームシアター, サウンド, 出発) and the その他 column's buttons two
-by two above it (メッセージボード, メッセージを送る, 使い方, 設定). The way back asks the room's question
-(Wiiの間をおわります) on the bottom screen; B there is いいえ. The screens those buttons lead to that
+buttons, the channel's own, worked by touch (`engine/room/panel.h`), fading in from black once the
+room is up, when the Wii's bar would come in: the bar along the bottom edge (ホームシアター, サウンド,
+出発; the Wii's way back to the Wii Menu is left out: the 3DS's HOME button closes the app) and the
+その他 column's buttons two by two above it (メッセージボード, メッセージを送る, 使い方, 設定). The screens those buttons lead to that
 are still the channel's own (the message board, sending a message, 使い方, the options, the theater)
 are made for a 4:3 screen and shown whole on the bottom screen, worked by touch, the top screen
 white meanwhile, and the first start's setup the same way; the channel's dialogs (its system prompt: errors, the save erase's question)
 show on the bottom screen over any scene, and the room's wipes cover both screens. The Wii
-Remote's pointer (the hand) isn't drawn for the touch (what is touched is pointed at); the circle
-pad still moves the pointer about the bottom screen, the hand showing then, so every screen also
-works with the buttons alone (the circle pad and A).
+Remote's pointer (the hand) isn't drawn: what is touched is pointed at, and nothing else points.
 The game still reads a Wii Remote (KPAD), but nothing of one is emulated: `engine/input/remote.cpp`
 answers KPAD and WPAD with the 3DS's controls, so the Wii's Bluetooth stack never starts, and
 there's no remote speaker or rumble.

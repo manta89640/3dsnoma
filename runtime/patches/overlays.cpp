@@ -43,6 +43,8 @@ namespace g {
 void app_Application_Draw_orig(u32 r3);
 u32 layout_Cursor_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                               f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
+u32 layout_Button_OnFocus_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+                               f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 u32 app_SystemPrompt_Update_orig(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2,
                                  f64 f3, f64 f4, f64 f5, f64 f6, f64 f7, f64 f8);
 
@@ -149,7 +151,7 @@ void app_Application_Draw(u32 r3) {
 // is away: a remote's pointer settles as it comes back onto the screen). A touch is exactly where
 // it is, and its A comes at its second read (engine/input/remote.cpp): inside the wait the cursor
 // hasn't hit-tested where the touch is, the press is lost, and a held A doesn't come down again
-// while the touch lasts. So the touch's pointer is taken at once; the circle pad's keeps the wait.
+// while the touch lasts. So the touch's pointer is taken at once (a scripted pointer keeps the wait).
 u32 layout_Cursor_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                          f64 f4, f64 f5, f64 f6, f64 f7, f64 f8) {
     if (guest::input_pointer_from_touch())
@@ -158,6 +160,23 @@ u32 layout_Cursor_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9,
     const bool shown = guest::input_pointer_by_stick();
     for (u32 layout : {0x8u, 0x130u})
         lyt::show(lyt::root_pane(r3 + layout), shown);
+    return r;
+}
+
+// layout::Button::OnFocus (the pointer came onto it): its focus sound, and its layout's Focus
+// animation (layout_ButtonLayout_Focus: the button rising to meet the pointer) played from its start.
+// A remote's pointer rests on a button a while before A presses it; a touch presses at its second
+// read, so the Push would start over a Focus barely begun, and the button would come up, drop back
+// and go down. A button focused by a touch takes its focused look at once: the Focus posed at its
+// last frame, its Push to come from there.
+u32 layout_Button_OnFocus(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
+                          f64 f4, f64 f5, f64 f6, f64 f7, f64 f8) {
+    u32 r = layout_Button_OnFocus_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
+    if (guest::input_pointer_from_touch() && guest::load8(r3 + 0x5B9)) {  // (enabled: its Focus played)
+        const u32 w = lyt::button_layout(r3);
+        if (u32 focus = lyt::find_anim(w, "Focus"))
+            lyt::pose(w, focus, lyt::last_frame(focus));
+    }
     return r;
 }
 

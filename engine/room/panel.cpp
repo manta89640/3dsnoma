@@ -6,7 +6,7 @@
 #include "engine/input/remote.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
-#include "engine/ui/confirm.h"
+#include "engine/ui/drag_scroll.h"
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
 #include "engine/ui/screen.h"
@@ -23,12 +23,12 @@ namespace screen = engine::ui::screen;
 
 namespace {
 
-using engine::ui::Confirm;
-
 // The bottom screen's part of the layouts' space (engine/ui/screen.h BOTTOM: the Sound Player's
 // and the island's). The bar's places in Move_Btn_Scene (y -162, the way back at x -267 to the TV
-// programmes' end cap at 246) are inside it as they are inside the TV picture, the end cap running
-// off its right edge as it ran off the picture's.
+// programmes' end cap at 246) are inside it as they are inside the TV picture. The way back (the
+// Wii button, to the Wii Menu) is left out: the 3DS's HOME button closes the app. The bar's other
+// places move left by its width (BAR_SHIFT), so that ホームシアター starts at the screen's left edge
+// as the Wii button did, and the end cap ends at its right edge.
 const screen::Region& BOTTOM_REGION = screen::BOTTOM;
 const f32 MIDDLE_X = screen::BOTTOM_MIDDLE_X;
 
@@ -43,7 +43,7 @@ enum : u32 {
     TO_HELP = 8,  // scene::TutorialSelect, 使い方
 };
 
-enum class Action { NONE, BACK, GO };
+enum class Action { NONE, GO };
 
 // The bar, at its own locators. サウンド and 出発 take いろんな間's layout, as the room's bar made
 // them (engine/ui/bar_button.h dresses them); the TV programmes' end cap is only there for the
@@ -55,10 +55,8 @@ struct BarButton {
     u32 to;
     void (*dress)(u32 button);
 };
-void dress_back(u32 button);
 void dress_end_cap(u32 button);
 const BarButton BAR[] = {
-    {"layout/Common/Wii_Btn.lex", "Loc_Back_Btn", Action::BACK, 0, &dress_back},
     {"layout/Move_Btn/Move_Btn_Theater_Btn.lex", "Loc_Theater_Btn", Action::GO, TO_THEATER, nullptr},
     {"layout/Move_Btn/Move_Btn_Ironna_Btn.lex", "Loc_shopping_Btn", Action::GO, engine::soundplayer::TO_SOUND_PLAYER,
      &engine::soundplayer::dress_bar_button},
@@ -89,17 +87,23 @@ const f32 ITEM_H[2] = {86 * ITEM_SCALE, 64 * ITEM_SCALE}, ROW_GAP = 14;  // the 
 const f32 ITEMS_TOP = 172, ITEMS_BOTTOM = -106;       // the space for them
 // (the buttons hang from the scene's Loc_Btn, at the layouts' origin)
 const char* const ITEM_LOCATOR = "Loc_Btn";
+// the Wii button's width with the gap after it (its face from x -301.5, ホームシアター's from -214)
+const f32 BAR_SHIFT = -88;
 
-// the channel's question for the way back (the room's quit dialog: "Wiiの間をおわります。" in the
-// port's words, runtime/patches/wii_parts.cpp)
-const u32 MSG_QUIT = 145;
-
-// the Wii button goes out of the app here: its back arrow stays, the "Wii" under it goes
-void dress_back(u32 button) {
-    for (const char* logo : {"Pic_Wii", "Pic_Shadow"})
-        if (u32 pane = lyt::find_pane(lyt::button_layout(button), logo))
-            lyt::show(pane, false);
-}
+// When the panel comes in. The room shows its bar a while after it is made (its intro: the bar's
+// Move_Btn_Scene FadeIn, which slides each button up and fades it in, the way back first, over
+// 50 frames); until then the bottom screen is black. When the room's own bar (hidden, far away:
+// runtime/patches/menus.cpp) starts its FadeIn, its way back's locator going from transparent to
+// seen, the panel plays its own and the black fades away over FADE_FROM_BLACK; its buttons take
+// touches once the FadeIn has played. Should the room's bar never be seen to start (made in a way
+// not met here), the panel comes in after FADE_FALLBACK. (60ths of a second, the platform's time.)
+const f32 FADE_FROM_BLACK = 20, FADE_IN_FRAMES = 50, FADE_FALLBACK = 240;
+const char* const FADE_IN = "FadeIn";
+u32 s_bar_locator;  // the room's own bar's Loc_Back_Btn (set_bar_locator), or 0
+// app::ScreenFade (app_ScreenFade_Draw: a quad over the screen in a colour): +2 u16 its length in
+// frames (0: no fading, the colour's full), +4 u16 the frame, +6 the colour (RGBA): black here, its
+// alpha frame / length
+u32 s_black;
 
 void dress_end_cap(u32 button) {
     for (const char* part : {"Pic_Icon", "Pic_Text"})
@@ -122,13 +126,18 @@ private:
         u32 to;
     };
     void set_buttons_active(bool on);
+    void fade_in(bool with_bar);
 
+    enum class State { WAITING, FADING, READY };
     u32 cursor_;      // the room's layout::Cursor
     u32 group_ = 0;   // the panel's exclusive group: one push at a time
     u32 scene_ = 0;   // Move_Btn_Scene, the buttons' locators
     std::vector<Entry> entries_;
-    Confirm* quit_ = nullptr;
     bool going_ = false;  // a button has sent the room on its way (its wipe closing)
+    State state_ = State::WAITING;
+    bool bar_hidden_ = false;  // the room's bar's way back seen transparent (its FadeIn bound)
+    f32 waited_ = 0, faded_ = 0;
+    engine::ui::Ticker ticker_;
 };
 
 Panel::Panel(u32 scene) : cursor_(scene + 0x498) {
@@ -136,6 +145,8 @@ Panel::Panel(u32 scene) : cursor_(scene + 0x498) {
     game::group_ctor(group_);
     scene_ = lyt::layout_new(SCENE_LEX);
     for (const BarButton& b : BAR) {
+        if (u32 locator = lyt::find_pane(scene_, b.locator))
+            lyt::store_f32(locator + 0x2C, lyt::load_f32(locator + 0x2C) + BAR_SHIFT);
         u32 button = lyt::button_new(b.lex, scene_, b.locator, cursor_);
         if (b.dress)
             b.dress(button);
@@ -153,15 +164,12 @@ Panel::Panel(u32 scene) : cursor_(scene + 0x498) {
         entries_.push_back({button, Action::GO, ITEMS[i].to});
     }
     for (const Entry& e : entries_) {
-        if (e.action == Action::NONE) {
-            lyt::set_active(e.button, false);
+        lyt::set_active(e.button, false);  // (until the panel has come in)
+        if (e.action == Action::NONE)
             continue;
-        }
         engine::system::hook_button(e.button);
         game::group_add(e.button, group_);
     }
-    quit_ = new Confirm(cursor_, group_, lyt::message_string(MSG_QUIT));
-    quit_->place(MIDDLE_X, Confirm::DROP);
     engine::system::set_push_listener(this);
     screen::claim(BOTTOM_REGION);
     guest::log("room: bottom screen panel, %u buttons", (u32)entries_.size());
@@ -170,7 +178,6 @@ Panel::Panel(u32 scene) : cursor_(scene + 0x498) {
 Panel::~Panel() {
     screen::release();
     engine::system::set_push_listener(nullptr);
-    delete quit_;
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
         lyt::button_delete(it->button);
     lyt::layout_delete(scene_);
@@ -183,47 +190,59 @@ void Panel::set_buttons_active(bool on) {
             lyt::set_active(e.button, on);
 }
 
+// the panel comes in: the bar's FadeIn as the Wii played it, the black fading away over it
+void Panel::fade_in(bool with_bar) {
+    state_ = State::FADING;
+    faded_ = 0;
+    lyt::play(scene_, lyt::find_anim(scene_, FADE_IN));
+    guest::log("room: the bottom screen panel comes in %s, %.0f 60ths after it was made",
+               with_bar ? "with the room's bar" : "by itself (the room's bar not seen)", waited_);
+}
+
 void Panel::update() {
+    const f32 dt = ticker_.tick();
+    if (state_ == State::WAITING) {
+        waited_ += dt;
+        const u8 alpha = s_bar_locator ? guest::load8(s_bar_locator + 0xB8) : 0;
+        if (alpha == 0)
+            bar_hidden_ = true;
+        if (bar_hidden_ && alpha > 0)
+            fade_in(true);
+        else if (waited_ >= FADE_FALLBACK)
+            fade_in(false);
+    } else if (state_ == State::FADING) {
+        faded_ += dt;
+        if (faded_ >= FADE_IN_FRAMES) {
+            state_ = State::READY;
+            set_buttons_active(true);
+        }
+    }
     screen::squeeze(false);
-    quit_->update();
     lyt::layout_update(scene_);
     screen::squeeze(true);
-    switch (quit_->take_choice()) {
-    case Confirm::Choice::YES:
-        // as the room's dialog's はい: the app ends (its fade out, then back to the start)
-        guest::log("room: quit");
-        g::app_Exit_Request(guest::load32(GA_app_Application_sInstance) + 0x330, 4);
-        break;
-    case Confirm::Choice::NO: set_buttons_active(true); break;
-    case Confirm::Choice::NONE: break;
-    }
 }
 
 void Panel::draw() {
     screen::to_bottom(BOTTOM_REGION);
     screen::squeeze(false);
     lyt::layout_draw(scene_);
-    quit_->draw();
-    // the room's hand, when the circle pad moves it (the room's own draw leaves it out)
-    if (guest::input_pointer_by_stick()) {
-        for (u32 layout : {0x8u, 0x130u})
-            lyt::show(lyt::root_pane(cursor_ + layout), true);
-        game::cursor_draw(cursor_);
+    // black until the panel comes in, fading away as it does
+    const f32 black = state_ == State::WAITING ? 1.0f : state_ == State::FADING ? 1.0f - faded_ / FADE_FROM_BLACK : 0.0f;
+    if (black > 0 && s_black) {
+        guest::store16(s_black + 4, (u16)(black * 255.0f));
+        g::app_ScreenFade_Draw(s_black);
     }
     screen::squeeze(true);
     screen::to_top();
 }
 
 void Panel::on_pushed(u32 button) {
-    if (quit_->on_pushed(button) || going_)
+    if (going_)
         return;
     for (const Entry& e : entries_) {
         if (e.button != button)
             continue;
-        if (e.action == Action::BACK) {
-            set_buttons_active(false);
-            quit_->open();
-        } else if (e.action == Action::GO) {
+        if (e.action == Action::GO) {
             going_ = true;
             guest::log("room: to scene %u", e.to);
             g::controller_living_SceneTransit_Request(guest::load32(GA_controller_living_SceneTransit_sInstance), e.to);
@@ -234,9 +253,7 @@ void Panel::on_pushed(u32 button) {
 
 Panel* s_panel;
 bool s_away;  // (away())
-// app::ScreenFade (app_ScreenFade_Draw: a quad over the screen in a colour): +2 u16 its length in
-// frames (0: no fading, the colour's full), +4 u16 the frame, +6 the colour (RGBA)
-u32 s_white;
+u32 s_white;  // (an app::ScreenFade as s_black, held at full white)
 
 }  // namespace
 
@@ -250,6 +267,7 @@ void open(u32 scene) {
 void close() {
     delete s_panel;
     s_panel = nullptr;
+    s_bar_locator = 0;
     if (s_away)
         screen::claim(screen::FULL);
 }
@@ -293,8 +311,14 @@ void boot() {
         s_white = engine::system::lasting_alloc(12);
         for (u32 i = 0; i < 12; i++)
             guest::store8(s_white + i, i >= 6 ? 0xFF : 0);
+        s_black = engine::system::lasting_alloc(12);
+        for (u32 i = 0; i < 12; i++)
+            guest::store8(s_black + i, i == 9 ? 0xFF : 0);  // (black, opaque; its alpha is frame / length)
+        guest::store16(s_black + 2, 255);
     });
 }
+
+void set_bar_locator(u32 pane) { s_bar_locator = pane; }
 
 void draw_away_top() {
     if (s_white)

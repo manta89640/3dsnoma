@@ -3,8 +3,9 @@
 // in sdmc:/3ds/noma.
 //
 // Controls (a Wii Remote held pointing at the screen): touch the bottom screen to point and press,
-// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote. Half a second after a touch
-// (3 s after the circle pad moved it) the pointer leaves the screen, as a remote put down does.
+// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote, the circle pad as the D-pad
+// (the island's and the Sound Player's stick). A second after a touch (3 s in the channel's own
+// screens) the pointer leaves the screen, as a remote put down does.
 // The remote's HOME button has no counterpart: the Wii's HOME Button Menu isn't part of the port
 // (engine/system).
 #include <3ds.h>
@@ -871,50 +872,42 @@ static void poll_input() {
         s_in.x = ((float)t.px + 0.5f) / 160.0f - 1.0f;
         s_in.y = ((float)t.py + 0.5f) / 120.0f - 1.0f;
     }
-    // the circle pad: the stick in stick mode, else it moves the pointer (at full tilt 0.03 of the
-    // screen a frame, as before; slower from the dead zone's edge in)
+    // the circle pad: the stick in stick mode, else the D-pad (tilted more than half way): the
+    // channel is worked by touch, with no Wii Remote pointer for the circle pad to move about (and no
+    // hand on the screen); the D-pad moves the highlights of the menus and lists that have one
     circlePosition c;
     hidCircleRead(&c);
     float cx, cy;
     read_stick(c, CPAD_DEAD, &cx, &cy);
-    bool nudged = false;
     if (input_stick_mode()) {
         s_in.stick_x = cx, s_in.stick_y = cy;
     } else {
         s_in.stick_x = s_in.stick_y = 0;
-        nudged = cx != 0 || cy != 0;
+        s_in.buttons |= (cy > 0.5f ? WM_UP : 0) | (cy < -0.5f ? WM_DOWN : 0) | (cx < -0.5f ? WM_LEFT : 0) |
+                        (cx > 0.5f ? WM_RIGHT : 0);
     }
-    s_in.nudge_x = nudged ? cx * 0.03f : 0.0f;
-    s_in.nudge_y = nudged ? -cy * 0.03f : 0.0f;
-    if (nudged) {
-        s_in.x += cx * 0.03f;
-        s_in.y -= cy * 0.03f;
-        s_in.x = s_in.x < -1 ? -1 : s_in.x > 1 ? 1 : s_in.x;
-        s_in.y = s_in.y < -1 ? -1 : s_in.y > 1 ? 1 : s_in.y;
-    }
+    s_in.nudge_x = s_in.nudge_y = 0.0f;
     // the camera stick: the New 3DS's C-stick (an old 3DS reads it as centred)
     circlePosition cs;
     hidCstickRead(&cs);
     read_stick(cs, CSTICK_DEAD, &s_in.cam_x, &s_in.cam_y);
     // The pointer stays where the stylus left it, so the button last touched would keep its
     // focused look, and a menu opened under it would see it pointed at. A Wii Remote put down or
-    // pointed away has no pointer: here the pointer leaves the screen half a second after the last
-    // touch (its press made by then: a held touch's as it came down, a tap's a read or two after
-    // it, engine/input/remote.cpp; a button's push under way finishes without the pointer), 3 s
-    // after the circle pad last moved it (time to move it, then press A), 3 s after a touch too in
-    // the channel's own scenes on the bottom screen (engine::room::away(): the theater shows its
-    // movie's controls only while the pointer is there), and the next touch or
-    // move brings it back (A doesn't). The game's cursor takes a touch's pointer at once, a
-    // remote's after it settles (runtime/patches/overlays.cpp). Scripted runs keep it on the
-    // screen.
+    // pointed away has no pointer: here the pointer leaves the screen a second after the last touch
+    // (its press made by then: a held touch's as it came down, a tap's a read or two after it,
+    // engine/input/remote.cpp; the button pushed keeps its look through its push and the start of the
+    // scene's wipe, as under a remote's pointer resting on it), 3 s
+    // after a touch in the channel's own scenes on the bottom screen (engine::room::away(): the
+    // theater shows its movie's controls only while the pointer is there), and the next touch
+    // brings it back (A doesn't). The game's cursor takes a touch's pointer at once
+    // (runtime/patches/overlays.cpp). Scripted runs keep it on the screen.
     static u64 s_used;
-    static bool s_touched;  // the pointer was last moved by a touch
     u64 now = host_time_us();
-    if ((held & KEY_TOUCH) || nudged)
-        s_used = now, s_touched = (held & KEY_TOUCH) != 0;
-    s_in.pointing = now - s_used < (s_touched && !engine::room::away() ? 500000u : 3000000u) || input_script_active();
+    if (held & KEY_TOUCH)
+        s_used = now;
+    s_in.pointing = now - s_used < (engine::room::away() ? 3000000u : 1000000u) || input_script_active();
     // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator); a scripted
-    // P(x;y) moves the pointer once, and touching or the circle pad moves it on from there
+    // P(x;y) moves the pointer once, and touching moves it on from there
     if (input_script_active())
         input_script_apply(s_in);
     wiimote_set_input(s_in);

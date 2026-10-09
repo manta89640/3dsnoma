@@ -47,6 +47,9 @@ void away_for_setup();
 // The top screen meanwhile: white, the channel's menus' ground (an app::ScreenFade of the app's own
 // kind, held at full white: its block made at the start, boot()).
 void boot();
+// the room's own bar (runtime/patches/menus.cpp) as it is made: its way back's locator, whose
+// FadeIn tells the panel when to come in
+void set_bar_locator(u32 pane);
 void draw_away_top();
 
 }  // namespace engine::room

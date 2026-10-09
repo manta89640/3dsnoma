@@ -214,6 +214,9 @@ PATCHED_NAMES = {
     # decompiled walk stays as *_orig for NOMA_CHECK_LYT_DRAW (orig, ab, the state and pixel checks),
     # and the update is timed for NOMA_LYT_STATS
     "layout_LayoutWrapper_Draw", "layout_LayoutWrapper_Update",
+    # runtime/patches/overlays.cpp: a button focused by a touch takes its focused look at once (the
+    # touch presses a read later: its Push would start over a Focus barely begun)
+    "layout_Button_OnFocus",
     # engine/gx/gx_sdk.cpp: the GX library's hottest calls, native (armbench.py --gxsdk compares them
     # with the decompiled *_orig on random states)
     "__GXSetDirtyState", "__GXSetSUTexRegs", "__SetSURegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",

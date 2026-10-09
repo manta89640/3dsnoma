@@ -208,6 +208,15 @@ void layout_living_MoveBtn_ctor(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7) {
         u32 button = guest::load32(buttons + 4 * i);
         hide(button);
         engine::math::store_f32(root_pane(button) + 0x2C, AWAY);
+        // the way back hangs from Loc_Back_Btn (its ButtonLayout, a LayoutWrapper at +0x14: the locator
+        // at its +0x8), the first of the bar's places its FadeIn brings in: the panel on the bottom
+        // screen comes in with it (engine/room/panel.h)
+        const u32 locator = guest::load32(button + 0x14 + 0x8);
+        char name[17] = {};
+        for (u32 k = 0; k < 16 && locator; k++)
+            name[k] = (char)guest::load8(locator + 0xBC + k);
+        if (locator && !::strcmp(name, "Loc_Back_Btn"))
+            engine::room::set_bar_locator(locator);
     }
     u32 other = guest::load32(guest::load32(r3 + 0x68C + 0x124 + 0xC) + 0x10);
     nw4r_lyt_Pane_SetVisible(other, 0);
