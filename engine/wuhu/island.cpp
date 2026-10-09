@@ -360,6 +360,15 @@ void Island::finish_loading() {
                 world_->set_group_visible(WAKE_MODEL, false);
             }
         }
+    // (a package staged before the sea's waves, wakes and trails has none of them: the sea flat, no wake
+    // or trail behind any boat; said here as for the shadows)
+    {
+        const fmt::Sea* sea = package_->sea();
+        const bool trails = sea && sea->trail_batch != fmt::NONE16;
+        guest::log("wuhu: the sea: %s, the boats' trails %s, the driven boat's wake %s%s", sea ? "waves" : "flat",
+                   trails ? "on" : "none", wake_instance_ != NONE32 ? "there" : "missing",
+                   trails && wake_instance_ != NONE32 ? "" : " (the package was staged before them)");
+    }
     vehicles_ = std::make_unique<Vehicles>(*world_, *package_, *collision_);
     const u64 t1 = guest::host_time_us();
     // (the uploads themselves happen on the renderer's thread when it reaches the command)
@@ -851,8 +860,10 @@ void Island::draw_opaque() {
     emit(engine::g3d::Pass::OPAQUE);
     // (in a car the Mii isn't drawn: WSR's car is closed, its windows opaque, and the seated Mii
     // only a draw no one sees; at a boat's helm it shows)
-    if (!in_car())
+    if (!in_car()) {
         mii_->draw_opaque();
+        mii_->view();  // (the projection again for the sand's marks: the Mii's pass may have loaded another)
+    }
     sand_->draw(camera_->camera(), k_, frame_);
 }
 

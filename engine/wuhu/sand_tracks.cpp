@@ -123,12 +123,17 @@ void SandTracks::draw(const engine::g3d::Camera& camera, f32 k, u32 frame) {
     u32 vertices = 0;
     for (const Mark& m : marks_)
         vertices += m.n;
-    // the island's camera, in the guest's units, as the native draws and the Mii have it
-    const engine::g3d::Camera cam = engine::g3d::scaled(camera, k);
-    const Mtx34 view = engine::g3d::look_at(cam);
+    // The island's camera as the native draws and the Mii have it, its rotation alone: the marks'
+    // positions are sent from the eye, in the guest's units (k a package unit), so that the view's
+    // translation (the island's coordinates, tens of thousands of guest units) doesn't cancel against
+    // them in the 3DS GPU's 24-bit floats, which would move a mark's depth by about a guest unit, as
+    // much as it is lifted and pulled over the sand. The matrix goes into guest memory big-endian,
+    // as GXLoadPosMtxImm reads it (written as host floats it was garbage: no mark was ever seen).
+    Mtx34 view = engine::g3d::look_at(camera);
+    view.m[0][3] = view.m[1][3] = view.m[2][3] = 0;
     GFRAME(0x40);
     const u32 matrix = (u32)&GS(u32, 0x8);
-    guest::write_g(matrix, &view, sizeof(view));
+    engine::math::store(matrix, view);
     g::GXLoadPosMtxImm(matrix, GX_PNMTX0);
     g::GXSetCurrentMtx(GX_PNMTX0);
     g::GXSetNumTexGens(0);
@@ -165,13 +170,12 @@ void SandTracks::draw(const engine::g3d::Camera& camera, f32 k, u32 frame) {
         // (fading over the last half of its life)
         const u8 alpha = (u8)(std::min(1.0f, 2.0f * (1.0f - age)) * sh[3]);
         for (u32 i = 0; i < m.n; i++) {
-            // pulled toward the eye by a 1024th of its distance, at most 4 units (overlay_pull's rule)
-            Vec3 p = m.v[i];
-            const Vec3 to_eye = camera.eye - p;
-            const f32 d = length(to_eye);
-            if (d > 1e-3f)
-                p = p + to_eye * (std::min(d / 1024.0f, 4.0f) / d);
-            putf(p.x * k), putf(p.y * k), putf(p.z * k);
+            // from the eye, pulled toward it by a 1024th of its distance, at most 4 units (overlay_pull's
+            // rule), in the guest's units
+            const Vec3 from_eye = m.v[i] - camera.eye;
+            const f32 d = length(from_eye);
+            const Vec3 p = from_eye * (k * (d > 1e-3f ? 1.0f - std::min(d / 1024.0f, 4.0f) / d : 1.0f));
+            putf(p.x), putf(p.y), putf(p.z);
             guest::gather_put<1>(sh[0]), guest::gather_put<1>(sh[1]), guest::gather_put<1>(sh[2]);
             guest::gather_put<1>(alpha);
         }
