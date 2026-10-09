@@ -60,8 +60,13 @@ const MessageEdit MESSAGE_EDITS[] = {
     {140, u"似顔絵チャンネルで", u""},
     {581, u"\n\nこのMiiを『似顔絵チャンネル』で消去、\nまたは似顔絵パレードに移動させると、\n登録したMiiの情報も消去されます。\nご注意ください。", u""},
     {121, u"\n\n続いて映像の設定を行います。", u""},  // (the setup's video step: left out above)
-    {126, u"部屋にWiiリモコンを向けてみましょう！", u"下の画面にタッチしてみましょう！"},
-    {130, u"リモコンを向けると", u"ポインターを合わせると"},
+    // the room's first tips, for its buttons on the bottom screen (engine/room/panel.h)
+    {126, u"部屋にWiiリモコンを向けてみましょう！\n中央のスクリーンやまわりのメニューを選んで\n\ue042を押すと、いろいろな機能を使えます。",
+     u"下の画面にタッチしてみましょう！\n下の画面のボタンにタッチすると、\nいろいろな機能を使えます。"},
+    {128, u"下のメニューから、映画などをレンタルできる\n「ホームシアター」や、さまざまなテーマの\n「いろんな間」などへ移動できます。",
+     u"下の画面の下のボタンから、「ホームシアター」や、\n音楽を聞ける「サウンド」、ウーフー島へ\n行ける「出発」などへ移動できます。"},
+    {130, u"右上の「その他」にリモコンを向けると\n隠れたメニューが出てきて、メッセージを\n読んだりすることができます。",
+     u"下の画面の上のボタンから、メッセージを\n読んだり、設定を変えたりすることが\nできます。"},
     {134, u"\n足りない場合は「Wiiポイント」でWiiショッ\nピングチャンネルに移動して追加できます。", u""},
     // "can't connect" (what the shop, content and online parts show offline): no Wii settings to check
     {277, u"\nWii本体設定のインターネット設定を\nご確認ください。", u""},
@@ -112,12 +117,16 @@ void wii_MessageData_Load(u32 r3) {
             it = edited.end() - 1;
         }
         std::vector<u8> from = be16(e.from), to = be16(e.to), &text = it->second;
+        bool found = false;
         for (size_t i = 0; i + from.size() <= text.size(); i += 2)
             if (std::equal(from.begin(), from.end(), text.begin() + i)) {
                 text.erase(text.begin() + i, text.begin() + i + from.size());
                 text.insert(text.begin() + i, to.begin(), to.end());
+                found = true;
                 break;
             }
+        if (!found)
+            guest::log("message %u: an edit's text isn't in it (left as it was)", e.index);
     }
     u32 size = 0;
     for (auto& m : edited)
