@@ -676,11 +676,37 @@ u32 gx_tnl_slots(const GxTnlPlan& p, const GxTnlRows* rows, u32 n, GxTnlPalette&
     return n;
 }
 
+namespace {
+
+// attribute `attr`'s format (0 position, 1 normal, 2-3 colors, 4-11 texture coordinates) and the
+// bytes one of its array elements takes
+const GxAttrFormat& attr_format(const GxVertexFormat& f, u32 attr, u32* elem_bytes) {
+    static const u32 k_color_bytes[8] = {2, 3, 4, 2, 3, 4, 4, 4};
+    if (attr == 0) {
+        *elem_bytes = f.pos.n * gx_comp_bytes(f.pos.type);
+        return f.pos;
+    }
+    if (attr == 1) {
+        *elem_bytes = (f.nbt ? 9 : 3) * gx_comp_bytes(f.nrm.type);
+        return f.nrm;
+    }
+    if (attr < 4) {
+        *elem_bytes = k_color_bytes[f.color[attr - 2].type & 7];
+        return f.color[attr - 2];
+    }
+    *elem_bytes = f.tex[attr - 4].n * gx_comp_bytes(f.tex[attr - 4].type);
+    return f.tex[attr - 4];
+}
+
+}  // namespace
+
 u32 gx_tnl_array_ranges(const GxVertexFormat& f, const u8* data, u32 count, GxTnlArrayRange out[12]) {
     u32 n = 0;
-    auto range = [&](const GxAttrFormat& a, u32 attr, u32 elem_bytes) {
-        if (a.mode < 2 || !count)
-            return;
+    for (u32 attr = 0; attr < 12 && count; attr++) {
+        u32 elem_bytes;
+        const GxAttrFormat& a = attr_format(f, attr, &elem_bytes);
+        if (a.mode < 2)
+            continue;
         u32 lo = ~0u, hi = 0;
         const u8* v = data + a.offset;
         if (a.mode == 2) {
@@ -697,15 +723,36 @@ u32 gx_tnl_array_ranges(const GxVertexFormat& f, const u8* data, u32 count, GxTn
         out[n].addr = 0x80000000 | ((base + lo * stride) & 0x1FFFFFFF);
         out[n].size = (hi - lo) * stride + elem_bytes;
         n++;
-    };
-    range(f.pos, 0, f.pos.n * gx_comp_bytes(f.pos.type));
-    range(f.nrm, 1, (f.nbt ? 9 : 3) * gx_comp_bytes(f.nrm.type));
-    static const u32 k_color_bytes[8] = {2, 3, 4, 2, 3, 4, 4, 4};
-    for (u32 c = 0; c < 2; c++)
-        range(f.color[c], 2 + c, k_color_bytes[f.color[c].type & 7]);
-    for (u32 t = 0; t < 8; t++)
-        range(f.tex[t], 4 + t, f.tex[t].n * gx_comp_bytes(f.tex[t].type));
+    }
     return n;
+}
+
+u64 gx_tnl_array_hash(const GxVertexFormat& f, const u8* data, u32 count, u32 attr) {
+    u32 elem_bytes;
+    const GxAttrFormat& a = attr_format(f, attr, &elem_bytes);
+    if (a.mode < 2)
+        return 0;
+    // 64-bit FNV-1a over the elements' bytes a word at a time (the list cache's hash of a draw's
+    // own bytes, platform/3ds/gx_pica.cpp), each element as its index finds it
+    u64 h = 14695981039346656037ull ^ ((u64)count << 32 | elem_bytes);
+    const u32 base = g_gx.cp[CP_ARRAY_BASE + attr], stride = g_gx.cp[CP_ARRAY_STRIDE + attr];
+    const u8* v = data + a.offset;
+    for (u32 i = 0; i < count; i++, v += f.size) {
+        const u32 index = a.mode == 2 ? *v : gx_be16(v);
+        const u8* p = host_ptr(0x80000000 | ((base + index * stride) & 0x1FFFFFFF));
+        if (!p) {  // (no memory there: the vertex reads zeros, and so does a later frame)
+            h = (h ^ index) * 1099511628211ull;
+            continue;
+        }
+        u32 n = elem_bytes, w;
+        for (; n >= 4; p += 4, n -= 4) {
+            memcpy(&w, p, 4);
+            h = (h ^ w) * 1099511628211ull;
+        }
+        for (; n; p++, n--)
+            h = (h ^ *p) * 1099511628211ull;
+    }
+    return h ^ (h >> 29);
 }
 
 // ---------------------------------------------------------------- the shader on the host

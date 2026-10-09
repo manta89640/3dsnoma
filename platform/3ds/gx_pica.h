@@ -29,7 +29,9 @@ void pica_watchdog();
 
 // ---- For the native g3d's PICA backend (g3d_pica.cpp), on the GPU's thread. It writes the GPU's
 // registers directly, its own shader program included, between these two:
-//   * begin: the frame started if this is its first draw, the GX draws so far sent, the scissor
+//   * begin: the frame started if this is its first draw, the GX draws so far sent, room for
+//     128K command words made (with frames overlapping the GPU a frame has half of citro3d's
+//     command buffer, and goes on in the other half when its own has less left), the scissor
 //     and the clip matrix of the GX state at this point of the stream (GX clip space -> the PICA's:
 //     the viewport in the 640x456 frame, scaled to 400x240, rotated for the 240x400 target, the GX
 //     depth range already complemented for depth map scale 1, offset 1), and what citro3d still

@@ -16,6 +16,8 @@
 //   * up to three textures (decoded by runtime/hw/gx/texture.cpp, then tiled for the PICA);
 //   * alpha test, depth, blending, logic op and write masks; culling is done on the CPU.
 // A frame starts at the first draw after the GX "draw done" and ends at the next draw done.
+// The GPU draws a frame while the next one's commands are made (NOMA_PICA_OVERLAP, below): memory
+// that a frame's commands read and the next frame would write is doubled.
 // EFB copies to the frame buffer need nothing (the frame is already on screen); for a copy to
 // a texture the GPU finishes the frame so far, the render target is read back and converted
 // like the host renderer's EFB (scaled from 400x240), and the frame goes on.
@@ -64,16 +66,53 @@ namespace guest {
 namespace {
 
 const float FRAME_W = 640.0f, FRAME_H = 456.0f;  // the game's frame buffer
-// The vertex pool: one 16-bit index space. [0, IMM_VERTICES) holds the frame's immediate draws
+// The vertex pool: one 16-bit index space. [0, s_imm_vertices) holds the frame's immediate draws
 // (written again every frame), the rest the display lists' vertices, kept from frame to frame
 // (the display-list cache below). The palette slots are a buffer of their own beside it, so that
 // a list's vertices stay untouched when its matrices get other slots.
-// Sized from the room and the scenes before it, about twice what they use at most: 9K immediate
-// vertices and 23K indices in a frame, 10.6K list vertices kept (linear heap is the Old 3DS's
-// scarcest memory: textures, the guest's MEM1, the sound).
-const u32 POOL_VERTICES = 40 << 10;  // 2.5 MB + 160 KB of slots
-const u32 IMM_VERTICES = 20 << 10;
+// Sized from the scenes, about twice what they use at most: 9K immediate vertices and 23K indices
+// in a frame in the room (12.5K immediate vertices on Wuhu Island), 10.6K list vertices kept in the
+// room, 14.7K on the island (linear heap is the Old 3DS's scarcest memory: textures, the guest's
+// MEM1, the sound). With frames overlapping the GPU the immediate part is two halves, a frame's
+// each, so that it is larger: 2.5 MB + 160 KB of slots one frame after the other, 3.25 MB + 2 x
+// 208 KB overlapping.
+const u32 IMM_SERIAL = 20 << 10, IMM_OVERLAP = 32 << 10, CACHE_VERTICES = 20 << 10;
+u32 s_imm_vertices = IMM_SERIAL, s_pool_vertices = IMM_SERIAL + CACHE_VERTICES;
 const u32 IBUF_INDICES = 128 << 10;  // 256 KB
+
+// NOMA_PICA_OVERLAP (default 1; 0: one after the other, as before). citro3d starts the GPU on a
+// frame only at its end (C3D_FrameEnd runs its queue: the clears, the command list, the display
+// transfers) and C3D_FrameBegin waits for that queue to finish, so with a frame begun at its first
+// draw the GPU's drawing came after the commands' making, never beside it: on a New 3DS 12.9 ms of
+// commands and 9.9 ms of drawing, a room frame of 22.9 ms (noma.log of 2026-10-05). Overlapping, a
+// frame is made outside citro3d's frame, into its own half of citro3d's command buffer, and only
+// its end waits for the frame before (its citro3d frame then begun, its clears queued, its list
+// split off and its transfers queued and run, as C3D_FrameEnd does). What the frame before's
+// commands read is not written meanwhile: there are two of the command buffer, the immediate
+// vertices and indices and the palette slots, a frame using those of its parity; a list's vertices
+// made again while the frame before may still draw them go into a second place of their own
+// (DlRecord::alt), a texture made again into new memory; textures, packages and memory freed wait
+// until the GPU has finished every frame that may use them (s_done). A frame that needs more than
+// its half takes the other one too, once the frame before has finished (spill), and the next frame
+// then waits for it at its start. NOMA_PICA_STEP's pieces need the serial order: it turns the
+// overlap off.
+bool s_overlap = false;
+u32* s_cmd_half[2];       // the halves of citro3d's command buffer (overlapping)
+u32 s_cmd_half_words = 0;
+u32* s_cmd_base = nullptr;  // citro3d's command buffer, whole
+u32 s_cmd_words = 0;
+// Every frame before s_done has finished on the GPU (frames count from 0 as P.frame does). One
+// after the other: the frame being made has waited for all of them. Overlapping: at least the frame
+// before last, as the frame before was sent only once that one had finished.
+u32 s_done = 0;
+// a clear the frame asked for (overlapping): the memory fill goes into citro3d's queue before the
+// frame's commands, when they are sent, as one after the other it went in before them
+struct PendingClear {
+    C3D_RenderTarget* target;
+    u32 color, depth;
+};
+PendingClear s_clears[2];
+u32 s_nclears = 0;
 
 // NOMA_TOP_SSAA=1: the top screen drawn at twice its size each way (a 480x800 target) and box-
 // filtered down to the screen by the display transfer (GX_TRANSFER_SCALE_XY): smoother edges and
@@ -99,26 +138,39 @@ static_assert(sizeof(PVertex) == 64, "PVertex layout");
 
 // ---- the display-list cache: a list's draws, with their vertices in the pool, found again by
 // the list and the draw command's offset in it; valid while the draw's bytes, the vertex arrays
-// they index (by write generation), the CP registers they were decoded with and what the shader
-// wants of a vertex (the recipe) stay the same. A list the game writes again every frame (two in
-// the room: 132 draws) mostly keeps its draws' bytes: they are compared when the list changed.
+// they index, the CP registers they were decoded with and what the shader wants of a vertex (the
+// recipe) stay the same. A list the game writes again every frame (two in the room: 132 draws)
+// mostly keeps its draws' bytes: they are compared when the list changed. The arrays are watched
+// by their pages' write generations, and when those moved, by their bytes (gx_tnl_array_hash): in
+// the room ~150 list draws a frame read arrays in pages the game flushes every frame for other
+// data, and were made again every frame with the same bytes (a host census, NOMA_INPUT=4:T(160;120)).
 struct DlRange {
     u32 attr, addr, size, gen;
+    u64 hash;  // the elements the draw reads, as they were at `gen`
 };
 struct DlRecord {
     u32 offset = 0;            // the draw command's offset in the list
     u32 first = 0, count = 0;  // pool vertices
+    u32 alt = 0;               // a second place for them (overlapping: 0 none), see the cache's lookup
     u32 prim = 0, vat = 0;
     u32 regs[5] = {};          // VCD lo/hi, the VAT's A/B/C
     u32 nranges = 0;
     DlRange ranges[12];
     u32 arrays[12][2];         // base, stride
     u8 recipe[12] = {};
-    GxTnlSlots slots = {};     // the slots all its vertices were given (fixed-matrix draws)
-    u32 slots_frame = 0;       // the frame they were written in (0: never)
+    // the slots all its vertices were given (fixed-matrix draws) in each of the palette slots'
+    // buffers (one after the other only the first), where valid (bit per buffer); the buffer it
+    // was last drawn with (its slots there: the next frame's hint)
+    GxTnlSlots slots[2] = {};
+    u8 slots_valid = 0, slots_last = 0;
+    u32 slots_frame = 0;       // the frame it was last drawn in (0: never)
     u64 data_hash = 0;         // its vertex data's bytes in the list ...
     u32 list_gen = 0;          // ... as they were at this write generation of the list
 };
+// an offset's records at most, drawn with other registers or arrays: in the room a list of 9 draws
+// is drawn about 6 times a frame with other arrays (12 sets of them in a run); with 4 kept a draw,
+// ~20 draws a frame were made again every frame
+const u32 DL_VARIANTS = 16;
 struct DlEntry {
     u32 addr = 0, size = 0;  // the list (0: free)
     u32 gen = 0;             // its bytes' write generation when the records were made
@@ -170,17 +222,37 @@ struct State {
     GxTnlPalette pal;
     u32 cull = ~0u;             // the GX cull mode the GPU is set to
     PVertex* vbuf = nullptr;   // the pool
+    // the palette slots, beside the pool: the frame's buffer (overlapping, by the frame's parity:
+    // a list's vertices are drawn by the frame before with the slots it wrote)
     GxTnlSlots* slots = nullptr;
+    GxTnlSlots* slot_buf[2] = {};
+    u32 sbuf = 0;
     GxTnlRows* rows = nullptr;  // (CPU only: the lists' vertices' matrix rows)
     u16* ibuf = nullptr;
-    u32 vused = 0, iused = 0;  // immediate vertices and indices used this frame
-    u32 cache_next = IMM_VERTICES;  // the pool's first free cache vertex
+    // the frame's immediate vertices and indices: where the next go, the end of the room they have
+    // (overlapping: the frame's half, or the other's after a spill), the first not yet flushed to
+    // memory, and how many were used this frame before the cursors last moved
+    u32 vused = 0, iused = 0;
+    u32 vend = 0, iend = 0;
+    u32 vflush = 0, iflush = 0;
+    u32 vstart = 0, istart = 0;  // (where the cursors last started)
+    u32 vframe = 0, iframe = 0;
+    bool spilled = false;      // the frame took the other half too (overlapping)
+    u32 cache_next = 0;        // the pool's first free cache vertex
     bool cache_full = false;   // (lists go the immediate way until the cache starts over)
-    u32 vmax = 0, imax = 0;    // ... at most, since the last report
+    u32 vmax = 0, imax = 0;    // immediate vertices and indices a frame at most, since the last report
     u32 draws = 0, batches = 0, setups = 0;  // this frame
     u32 cached_draws = 0, cached_vertices = 0, built_vertices = 0;  // this frame
     u32 rebuilt_arrays = 0, rebuilt_regs = 0, drawn_twice = 0, no_room = 0;  // why list draws were built
+    u32 kept_by_bytes = 0;     // list draws whose arrays' pages were written, their bytes the same
     u32 cache_made = 0, lists_rewritten = 0, lists_new = 0;  // pool vertices given out; lists whose bytes changed, new
+    // the frame's times (ticks): its commands' making (from its start to its sending), the waits
+    // for the GPU (at its start one after the other, at its end overlapping); since the last report:
+    // their sums, frames, spills, the most command words a frame
+    u64 rec_t0 = 0, rec_ticks = 0, wait_ticks = 0, wait_begin = 0;
+    u64 rec_sum = 0, wait_sum = 0;
+    u32 timed_frames = 0, spills = 0, cmd_words_max = 0;
+    u32 cmd_words = 0;         // this frame's command words sent so far
     // what the GPU must see of memory the CPU wrote this frame: slot and cache vertex ranges
     u32 slots_lo = ~0u, slots_hi = 0, cache_lo = ~0u, cache_hi = 0;
     DlEntry* dl = nullptr;     // the display-list cache
@@ -189,7 +261,12 @@ struct State {
     bool resume = false;  // the frame goes on (its first part went to the GPU before an applet)
     u32 frame = 0;
     std::unordered_map<u32, TexEntry> textures;  // by GxTexture id
-    std::vector<C3D_Tex> dead;                   // freed after the GPU finished the frame
+    // textures replaced, freed once the GPU has finished the frame they were replaced in
+    struct Dead {
+        C3D_Tex tex;
+        u32 frame;
+    };
+    std::vector<Dead> dead;
     u32 warned = 0;
     u32 evicted = 0, failed = 0;                 // textures dropped for memory; not made
     // The PICA state a draw needs comes from GX registers: a part of it is worked out again only
@@ -213,9 +290,14 @@ struct State {
 State P;
 
 // linear memory to free once the GPU has finished the command lists so far (pica_free_after_frame;
-// a package is released on the GPU's thread, or on the CPU's while the GPU's waits)
+// a package is released on the GPU's thread, or on the CPU's while the GPU's waits): with the
+// frame being made then, freed once it has finished
+struct FreeLater {
+    void* p;
+    u32 frame;
+};
 LightLock s_free_lock;
-std::vector<void*> s_free_later;
+std::vector<FreeLater> s_free_later;
 __attribute__((constructor(103))) void init_free_lock() { LightLock_Init(&s_free_lock); }
 
 // the pixel pipeline's state as last set (see "The pixel pipeline's state written directly")
@@ -264,8 +346,10 @@ u32 s_buf_base = 0x18000000;
 // LYT is the native layouts' packets' own time (PicaRenderer::lyt: their vertices and indices, the
 // projection, the palette); the parts of their state are counted in their own sections (tev,
 // textures, upload, bind, pixel, consts, flush, xform), so that the sections add up to the frame.
+// WAIT is the waits for the GPU (to finish the frame before: at a frame's start one after the
+// other, at its end overlapping), out of the sections they happen in (end, readback, lyt).
 struct Timers {
-    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, LYT, N };
+    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, LYT, WAIT, N };
     u64 ticks[N] = {};
     u32 calls[N] = {};
     u64 frame_ticks[N] = {};  // the sections' ticks when the frame started (a slow frame is logged on its own)
@@ -291,16 +375,20 @@ inline bool timers_on() {
 }
 struct Timed {
     int k;
-    u64 t0;
-    explicit Timed(int which) : k(which), t0(timers_on() ? svcGetSystemTick() : 0) {}
+    u64 t0, wait0;
+    explicit Timed(int which)
+        : k(which), t0(timers_on() ? svcGetSystemTick() : 0), wait0(T.ticks[Timers::WAIT]) {}
     ~Timed() {
-        if (t0)
-            T.ticks[k] += svcGetSystemTick() - t0, T.calls[k]++;
+        if (!t0)
+            return;
+        T.ticks[k] += svcGetSystemTick() - t0, T.calls[k]++;
+        if (k != Timers::WAIT && k != Timers::LYT)  // (a wait inside is WAIT's; LYT takes off all it nests)
+            T.ticks[k] -= T.ticks[Timers::WAIT] - wait0;
     }
 };
 static const char* const k_timer_names[Timers::N] = {"plan", "consts", "vertices", "slots", "submit", "flush", "tev",
                                                      "textures", "upload", "bind", "pixel", "xform", "frame", "end", "clear",
-                                                     "readback", "copy", "lyt"};
+                                                     "readback", "copy", "lyt", "wait"};
 
 // the time in every section but LYT so far (what a packet spent in them comes off its own)
 inline u64 timers_but_lyt() {
@@ -778,7 +866,7 @@ void flush_batch() {
     P.pal.flushed();
 }
 
-// the attribute buffers: the pool (position, normal, color, texgen sources) and the slots
+// the attribute buffers: the pool (position, normal, color, texgen sources) and the frame's slots
 void bind_vertices() {
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
@@ -813,17 +901,16 @@ void dump_phys(const char* name, const void* va, u32 size) {
 void dump_open() {
     if (!s_cmd_frames || !(s_cmd_dump = fopen("sdmc:/3ds/noma/cmdlist.bin", "wb")))
         return;
-    u32* cmdbuf;
-    u32 size, off;
-    GPUCMD_GetBuffer(&cmdbuf, &size, &off);
-    dump_word(0x53594850), dump_word(7);
+    dump_word(0x53594850), dump_word(P.slot_buf[1] ? 8 : 7);
     dump_phys("linear", (void*)__ctru_linear_heap, __ctru_linear_heap_size);
     dump_phys("color", P.top->frameBuf.colorBuf, 240 * 400 * 4 * s_top_scale * s_top_scale);
     dump_phys("depth", P.top->frameBuf.depthBuf, 240 * 400 * 4 * s_top_scale * s_top_scale);
-    dump_phys("vbuf", P.vbuf, POOL_VERTICES * sizeof(PVertex));
-    dump_phys("slots", P.slots, POOL_VERTICES * sizeof(GxTnlSlots));
+    dump_phys("vbuf", P.vbuf, s_pool_vertices * sizeof(PVertex));
+    dump_phys("slots", P.slot_buf[0], s_pool_vertices * sizeof(GxTnlSlots));
+    if (P.slot_buf[1])
+        dump_phys("slots1", P.slot_buf[1], s_pool_vertices * sizeof(GxTnlSlots));
     dump_phys("ibuf", P.ibuf, IBUF_INDICES * sizeof(u16));
-    dump_phys("cmdbuf", cmdbuf, size * 4);
+    dump_phys("cmdbuf", s_cmd_base, s_cmd_words * 4);
     fflush(s_cmd_dump);
     log("pica: the first %d frames' command lists go to cmdlist.bin", s_cmd_frames);
 }
@@ -847,18 +934,36 @@ void dump_frame_list() {
 }
 
 void flush_geometry() {
-    if (P.vused)
-        GSPGPU_FlushDataCache(P.vbuf, P.vused * sizeof(PVertex));
+    if (P.vflush < P.vused)
+        GSPGPU_FlushDataCache(P.vbuf + P.vflush, (P.vused - P.vflush) * sizeof(PVertex));
     if (P.cache_lo < P.cache_hi)
         GSPGPU_FlushDataCache(P.vbuf + P.cache_lo, (P.cache_hi - P.cache_lo) * sizeof(PVertex));
     if (P.slots_lo < P.slots_hi)
         GSPGPU_FlushDataCache(P.slots + P.slots_lo, (P.slots_hi - P.slots_lo) * sizeof(GxTnlSlots));
-    if (P.iused)
-        GSPGPU_FlushDataCache(P.ibuf, P.iused * sizeof(u16));
+    if (P.iflush < P.iused)
+        GSPGPU_FlushDataCache(P.ibuf + P.iflush, (P.iused - P.iflush) * sizeof(u16));
+    P.vflush = P.vused, P.iflush = P.iused;
     P.cache_lo = P.slots_lo = ~0u, P.cache_hi = P.slots_hi = 0;
 }
 
-void end_frame() {
+// The immediate vertices and indices start again at the start of half h of their space
+// (overlapping; one after the other the whole of it), what was used so far this frame counted.
+u32 imm_half_vertices() { return s_overlap ? s_imm_vertices / 2 : s_imm_vertices; }
+u32 imm_half_indices() { return s_overlap ? IBUF_INDICES / 2 : IBUF_INDICES; }
+void imm_restart(u32 h) {
+    P.vframe += P.vused - P.vstart, P.iframe += P.iused - P.istart;
+    const u32 vh = imm_half_vertices(), ih = imm_half_indices();
+    P.vused = P.vflush = P.vstart = h * vh, P.vend = (h + 1) * vh;
+    P.iused = P.iflush = P.istart = h * ih, P.iend = (h + 1) * ih;
+}
+// the half the frame's immediate vertices, indices and commands are in now (overlapping: by the
+// frame's parity, the other after a spill; one after the other the whole space is the first)
+u32 frame_half() { return s_overlap ? (P.frame & 1) ^ (P.spilled ? 1u : 0u) : 0; }
+
+// the frame's commands since the last split are finished: the draws batched, the frame buffer's
+// cache written out after native draws, the checks and dumps that read the list, what the CPU
+// wrote for it flushed to memory
+void end_commands() {
     flush_batch();
     // a list drawn to only by native draws: citro3d doesn't know it was, so its end wouldn't write
     // the frame buffer's cache out before the display transfer reads it
@@ -871,7 +976,128 @@ void end_frame() {
         check_state_list();
     flush_geometry();
     dump_frame_list();
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    P.cmd_words += off;
+}
+
+// citro3d's frame begun: it waits for its queue, all that went to the GPU before (the time
+// counted for the frame's line and in Timers' WAIT)
+void begin_c3d_frame(const char* what) {
+    NOMA_PROF_SCOPE("(gx wait)");
+    GpuWait w(what);
+    Timed timed(Timers::WAIT);
+    const u64 t0 = svcGetSystemTick();
+    C3D_FrameBegin(0);
+    P.wait_ticks += svcGetSystemTick() - t0;
+}
+
+// the render targets citro3d transfers to the screens at its frame's end (C3D_FrameDrawOn marks
+// one; overlapping it is marked here, outside citro3d's frame)
+void draw_on(C3D_RenderTarget* t) {
+    if (!s_overlap) {
+        C3D_FrameDrawOn(t);
+        return;
+    }
+    t->used = true;
+    C3D_SetFrameBuf(&t->frameBuf);
+    C3D_SetViewport(0, 0, t->frameBuf.width, t->frameBuf.height);
+}
+
+// The display transfers' interrupts (PPF) libctru's GSP event thread has handled, and the transfers
+// sent. citro3d swaps the screens' buffers in its queue's callback, which that thread calls for the
+// queue's last interrupt after marking the queue finished: C3D_FrameBegin's wait can end before the
+// swap, and a frame sent at once would then take the buffer about to be shown for its transfer
+// (gfxGetFramebuffer) and have its swap request (needSwapTop) cleared by the frame before's
+// callback. A PPF callback of ours runs after citro3d's for the same interrupt.
+std::atomic<u32> s_ppf_done{0};
+u32 s_ppf_sent = 0;
+void on_ppf(void*) { s_ppf_done.fetch_add(1, std::memory_order_release); }
+
+// (overlapping, after citro3d's frame begun) the transfers sent so far handled, swaps included.
+// An interrupt that doesn't come in 20 ms (the swap follows the queue's end by microseconds) was lost
+// or never counted (a sleep, a transfer sent without s_ppf_sent): the count starts again from what
+// came. Eight misses in a row mean they can't be counted on: logged, and not waited for again.
+bool s_swaps_counted = true;
+u32 s_swap_misses = 0;
+void swaps_done() {
+    const u64 t0 = svcGetSystemTick();
+    while (s_swaps_counted && (s32)(s_ppf_done.load(std::memory_order_acquire) - s_ppf_sent) < 0) {
+        if (svcGetSystemTick() - t0 > 20 * (SYSCLOCK_ARM11 / 1000)) {
+            const int missing = (int)(s_ppf_sent - s_ppf_done.load());
+            s_ppf_sent = s_ppf_done.load();
+            if (++s_swap_misses >= 8) {
+                log("pica: display transfers' interrupts not seen 8 times in a row: the screens' swaps aren't "
+                    "waited for from now on");
+                s_swaps_counted = false;
+            } else if (s_swap_misses == 1) {
+                log("pica: %d display transfers' interrupts not seen in 20 ms (counted again from here)", missing);
+            }
+            return;
+        }
+        svcSleepThread(20 * 1000);
+    }
+    s_swap_misses = 0;
+}
+
+// Overlapping: the frame's commands so far to the GPU, once all that went before has finished (the
+// frame before, mostly finished by now): citro3d's frame begun, the clears the frame asked for
+// queued, the commands split off as its list, and its end (the screens' transfers when `show`,
+// the queue run). The frame's commands go on after the list in the same buffer.
+void send_commands(bool show) {
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    const bool top = P.top->used, bottom = P.bottom && P.bottom->used;
+    if (!show) {  // (a part of the frame: its screens get it at its end)
+        P.top->used = false;
+        if (P.bottom)
+            P.bottom->used = false;
+    }
+    begin_c3d_frame("for the frame before (C3D_FrameBegin)");
+    swaps_done();
+    s_done = P.frame;
+    for (u32 i = 0; i < s_nclears; i++)
+        C3D_RenderTargetClear(s_clears[i].target, C3D_CLEAR_ALL, s_clears[i].color, s_clears[i].depth);
+    s_nclears = 0;
+    GPUCMD_SetBuffer(buf, size, off);
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    s_ppf_sent += (P.top->used ? 1 : 0) + (P.bottom && P.bottom->used ? 1 : 0);
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);  // (no list left to split: the transfers, the queue's run)
+    GPUCMD_SetBuffer(buf, size, 0);
+    if (!show) {
+        P.top->used = top;
+        if (P.bottom)
+            P.bottom->used = bottom;
+    }
+}
+
+// Overlapping: the GPU has finished all that was sent to it (the frame being made isn't sent):
+// citro3d's frame begun waits for its queue, and its end has no list and transfers nothing
+void wait_gpu() {
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    const bool top = P.top->used, bottom = P.bottom && P.bottom->used;
+    P.top->used = false;
+    if (P.bottom)
+        P.bottom->used = false;
+    begin_c3d_frame("for the GPU (C3D_FrameBegin)");
+    s_done = P.frame;
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    GPUCMD_SetBuffer(buf, size, off);
+    P.top->used = top;
+    if (P.bottom)
+        P.bottom->used = bottom;
+}
+
+// the frame's commands so far to the GPU: at its end shown on the screens, else (a read-back, an
+// applet) only drawn
+void end_frame(bool show = true) {
+    end_commands();
+    if (s_overlap)
+        send_commands(show);
+    else
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
 }
 
 // ---- NOMA_PICA_STEP (see above): the pieces
@@ -1068,13 +1294,12 @@ void forget_texture(const C3D_Tex* t) {
     }
 }
 
-// drop the least recently used texture the frame hasn't drawn with (the previous frame is
-// finished: C3D_FrameBegin waited for it); false when there is none
-// (unused_before: only one last drawn with before that frame)
-bool evict_texture(u32 unused_before = ~0u) {
+// drop the least recently used texture that no frame the GPU may still be drawing drew with (last
+// drawn before s_done); false when there is none
+bool evict_texture() {
     auto victim = P.textures.end();
     for (auto it = P.textures.begin(); it != P.textures.end(); ++it)
-        if (it->second.tex.data && it->second.last_used != P.frame && it->second.last_used < unused_before &&
+        if (it->second.tex.data && it->second.last_used < s_done &&
             (victim == P.textures.end() || it->second.last_used < victim->second.last_used))
             victim = it;
     if (victim == P.textures.end())
@@ -1086,6 +1311,8 @@ bool evict_texture(u32 unused_before = ~0u) {
     return true;
 }
 
+void free_finished();
+
 // texture memory, from the linear heap: a little stays free for screenshots and read-backs;
 // older textures make room
 bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f, bool mips = false) {
@@ -1095,8 +1322,16 @@ bool tex_init(C3D_Tex* t, u32 w, u32 h, GPU_TEXCOLOR f, bool mips = false) {
     for (;;) {
         if (linearSpaceFree() >= need + MARGIN && init())
             return true;
-        if (!evict_texture())
-            return init();  // nothing left to drop: whatever fits
+        if (evict_texture())
+            continue;
+        // overlapping, the textures the frame before drew with (and those it replaced) go once the
+        // GPU has finished it
+        if (s_overlap && s_done < P.frame) {
+            wait_gpu();
+            free_finished();
+            continue;
+        }
+        return init();  // nothing left to drop: whatever fits
     }
 }
 
@@ -1185,6 +1420,7 @@ C3D_Tex* texture_for(const GxTexture* gt, const u8* raw, u32 mode, float* sx, fl
     u32 ws = bits(mode, 0, 2), wt = bits(mode, 2, 2);
     bool linear = bits(mode, 4, 1);
     TexEntry& e = P.textures[gt->id];
+    const u32 drawn = e.last_used;
     e.last_used = P.frame;
     bool repeat = ws != 0 || wt != 0;
     u32 W = next_pow2(gt->width), H = next_pow2(gt->height);
@@ -1201,8 +1437,11 @@ C3D_Tex* texture_for(const GxTexture* gt, const u8* raw, u32 mode, float* sx, fl
             fmt = pica_tex::cmpr_has_alpha(raw, gt->width, gt->height) ? GPU_ETC1A4 : GPU_ETC1;
         const bool mips = tex_mips_on() && linear && !repeat && gt->fmt <= 3 && W == gt->width &&
                           H == gt->height && W >= 64 && H >= 64;
-        if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt || e.mips != mips)) {
-            P.dead.push_back(e.tex);
+        // a new image elsewhere (the old one freed once the GPU has finished with it) when it doesn't
+        // fit the old one's place, or overlapping, when a frame the GPU may still be drawing drew it
+        if (e.tex.data && (e.tex.width != W || e.tex.height != H || e.fmt != fmt || e.mips != mips ||
+                           (s_overlap && drawn >= s_done))) {
+            P.dead.push_back({e.tex, P.frame});
             e.tex.data = nullptr;
             e.wrap = 0xFFFF;
         }
@@ -1281,15 +1520,31 @@ C3D_Tex* or_white(C3D_Tex* t, int map, float* sx, float* sy) {
     return &s_white;
 }
 
-void collect_textures() {
-    for (C3D_Tex& t : P.dead)
-        C3D_TexDelete(&t);
-    P.dead.clear();
+// what waited for the GPU to finish the frames that may use it, freed once it has
+void free_finished() {
+    size_t kept = 0;
+    for (State::Dead& d : P.dead) {
+        if (d.frame < s_done)
+            C3D_TexDelete(&d.tex);
+        else
+            P.dead[kept++] = d;
+    }
+    P.dead.resize(kept);
     LightLock_Lock(&s_free_lock);
-    for (void* p : s_free_later)
-        linearFree(p);
-    s_free_later.clear();
+    kept = 0;
+    for (const FreeLater& f : s_free_later) {
+        if (f.frame < s_done)
+            linearFree(f.p);
+        else
+            s_free_later[kept++] = f;
+    }
+    s_free_later.resize(kept);
     LightLock_Unlock(&s_free_lock);
+}
+
+// at a frame's start: what the GPU has finished with, and textures no frame drew for 2 s
+void collect_textures() {
+    free_finished();
     for (auto it = P.textures.begin(); it != P.textures.end();) {
         if (P.frame - it->second.last_used > 120) {
             forget_texture(&it->second.tex);
@@ -1620,40 +1875,66 @@ u32 piece(u32 prim, u32 n) {
     }
 }
 
+// a render target cleared at the frame's start (overlapping: when its commands are sent)
+void clear_target(C3D_RenderTarget* t, u32 color, u32 depth) {
+    if (!s_overlap) {
+        C3D_RenderTargetClear(t, C3D_CLEAR_ALL, color, depth);
+        return;
+    }
+    if (s_nclears < 2)
+        s_clears[s_nclears++] = {t, color, depth};
+}
+
+// One after the other the frame starts once the GPU has finished the frame before. Overlapping
+// it starts at once (the GPU drawing the frame before meanwhile), in its own half of the buffers,
+// unless the frame before took this half too (a spill), or an applet had the GPU (the frame's
+// first part was sent and it goes on from there): the GPU finishes first then. No wait for the
+// display's vblank (C3D_FRAME_SYNCDRAW) either way: the game paces its frames by the emulated
+// retrace already, and a slow frame shouldn't wait for the next vblank too.
 void begin_frame() {
     if (P.in_frame)
         return;
-    {
-        // no wait for the display's vblank (C3D_FRAME_SYNCDRAW): the game paces its frames by
-        // the emulated retrace already, and a slow frame shouldn't wait for the next vblank too.
-        // This only waits for the GPU to finish the previous frame.
-        NOMA_PROF_SCOPE("(gx wait)");
-        GpuWait w("for the last frame (C3D_FrameBegin)");
-        C3D_FrameBegin(0);
+    P.wait_ticks = 0;
+    if (!s_overlap) {
+        begin_c3d_frame("for the last frame (C3D_FrameBegin)");
+        s_done = P.frame;
+    } else if (P.spilled || P.resume) {
+        wait_gpu();
     }
     NOMA_PROF_SCOPE("(gx frame)");
     Timed timed(Timers::FRAME);
+    P.rec_t0 = svcGetSystemTick();
+    P.wait_begin = P.wait_ticks;
+    P.cmd_words = 0;
     collect_textures();
+    P.vmax = std::max(P.vmax, P.vframe + P.vused - P.vstart);
+    P.imax = std::max(P.imax, P.iframe + P.iused - P.istart);
+    P.spilled = false;
+    imm_restart(frame_half());
+    P.vframe = P.iframe = 0;
+    if (s_overlap) {
+        GPUCMD_SetBuffer(s_cmd_half[frame_half()], s_cmd_half_words, 0);
+        P.sbuf = frame_half();
+        P.slots = P.slot_buf[P.sbuf];
+        bind_vertices();
+    }
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB];
     u32 color = (ar & 255) << 24 | ((gb >> 8) & 255) << 16 | (gb & 255) << 8 | 0xFF;
     if (!P.resume)
-        C3D_RenderTargetClear(P.top, C3D_CLEAR_ALL, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
+        clear_target(P.top, color, bp[BP_CLEAR_Z] & 0xFFFFFF);
     P.resume = false;
     P.screen = SCREEN_TOP;
     P.bottom_drawn = false;
-    C3D_FrameDrawOn(P.top);
+    draw_on(P.top);
     frame_list_starts();
     C3D_DepthMap(true, 1.0f, 1.0f);
     P.c3d_touched = true;
     if (stepping())  // (NOMA_PICA_STEP: the clear alone, then a command list of one register write)
         step_piece(STEP_CLEAR), step_piece(STEP_LIST);
-    P.vmax = std::max(P.vmax, P.vused);
-    P.imax = std::max(P.imax, P.iused);
-    P.vused = P.iused = 0;
     P.draws = P.batches = P.setups = 0;
     P.cached_draws = P.cached_vertices = P.built_vertices = 0;
-    P.rebuilt_arrays = P.rebuilt_regs = P.drawn_twice = P.no_room = 0;
+    P.rebuilt_arrays = P.rebuilt_regs = P.drawn_twice = P.no_room = P.kept_by_bytes = 0;
     P.cache_made = P.lists_rewritten = P.lists_new = 0;
     P.batch_count = 0;
     P.all_dirty = true;
@@ -1662,15 +1943,67 @@ void begin_frame() {
     // every frame's palette starts the same: a frame drawing what the last one drew then gives its
     // matrices the same slots, and the list cache's draws keep the slots their vertices have
     P.pal = GxTnlPalette();
-    // the GPU has finished the frame before: a full cache starts over now
+    // a full cache starts over once the GPU has finished every frame that drew from it
     if (P.cache_full) {
+        if (s_done < P.frame)
+            wait_gpu();
         for (u32 i = 0; i < DL_ENTRIES; i++)
             P.dl[i] = DlEntry();
-        P.cache_next = IMM_VERTICES;
+        P.cache_next = s_imm_vertices;
         P.cache_full = false;
     }
     P.dl_offset = ~0u;
     P.in_frame = true;
+}
+
+// Overlapping, a frame that needs more than its half of the immediate vertices, the indices or the
+// command buffer goes on in the other half once the frame before, whose half it is, has finished:
+// its commands so far are sent (that waits for it; a list is one piece of memory), its state set
+// again through citro3d as after a read-back, and the next frame waits for it at its start. One
+// after the other, or a second time in a frame: false.
+bool spill() {
+    if (!s_overlap || P.spilled)
+        return false;
+    end_frame(false);
+    P.spilled = true;
+    P.spills++;
+    imm_restart(frame_half());
+    GPUCMD_SetBuffer(s_cmd_half[frame_half()], s_cmd_half_words, 0);
+    draw_on(P.screen == SCREEN_BOTTOM && P.bottom ? P.bottom : P.top);
+    frame_list_starts();
+    P.c3d_touched = true;
+    P.all_dirty = true;
+    P.env_valid = false;
+    P.cull = ~0u;
+    static u32 s_logged;
+    if (s_logged++ < 4)
+        log("pica: frame %u took the other half of the buffers too (%u immediate vertices, %u indices, %u command "
+            "words): the next frame waits for it", P.frame, P.vframe, P.iframe, P.cmd_words);
+    return true;
+}
+
+// room for `nv` immediate vertices and `ni` indices in the frame's space (a spill makes it when it can)
+bool imm_room(u32 nv, u32 ni) {
+    if (P.vused + nv <= P.vend && P.iused + ni <= P.iend)
+        return true;
+    if (nv > imm_half_vertices() || ni > imm_half_indices())
+        return false;  // (no half holds it: a spill would only cost the frame its overlap)
+    return spill() && P.vused + nv <= P.vend && P.iused + ni <= P.iend;
+}
+
+// Room for `words` more commands in the frame's half of the command buffer (overlapping; one after
+// the other a frame has the whole of it): a GX draw's take at most a few thousand words; a native
+// g3d packet stops drawing items once fewer than 67,584 words are left (ITEM_WORDS + GX_RESERVE_WORDS,
+// g3d_pica.cpp), and the island's largest measured took 62,000: its room is both and a margin for
+// what the island gains (the water's effects)
+const u32 CMD_DRAW_WORDS = 16u << 10, CMD_NATIVE_WORDS = 160u << 10;
+void cmd_room(u32 words) {
+    if (!s_overlap)
+        return;
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    if (size - off < words)
+        spill();
 }
 
 // ---------------------------------------------------------------- the display-list cache
@@ -1698,8 +2031,6 @@ void dl_recipe(const GxTnlPlan& plan, u8 out[12]) {
         out[1 + 3 * k] = plan.tc[k].src, out[2 + 3 * k] = plan.tc[k].tex, out[3 + 3 * k] = plan.tc[k].z;
 }
 
-// the record still describes the draw: registers, recipe, and the arrays unchanged (0), or
-// what changed: 1 registers or recipe, 2 the arrays
 // a draw's vertex data in its list (the indices, mostly: a few bytes), 64 bits of it
 u64 dl_data_hash(const u8* p, u32 n) {
     u64 h = 14695981039346656037ull ^ n;
@@ -1713,27 +2044,42 @@ u64 dl_data_hash(const u8* p, u32 n) {
     return h ^ (h >> 29);
 }
 
+// The record still describes the draw: registers, arrays' places, recipe, and the arrays' and the
+// draw's own bytes unchanged (0), or what changed: 1 registers, arrays' places or recipe (another
+// variant's, cheapest first: an offset may have DL_VARIANTS), 2 the bytes. An array whose pages
+// were written since is compared by the bytes the draw reads (then watched from the new
+// generation on).
 int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, const u8* data, u32 count) {
     const u32* cp = g_gx.cp;
     if (r.vat != vat || r.regs[0] != cp[CP_VCD_LO] || r.regs[1] != cp[CP_VCD_HI] || r.regs[2] != cp[CP_VAT_A + vat] ||
         r.regs[3] != cp[CP_VAT_B + vat] || r.regs[4] != cp[CP_VAT_C + vat])
         return 1;
-    u8 recipe[12];
-    dl_recipe(plan, recipe);
-    if (memcmp(recipe, r.recipe, sizeof(recipe)) != 0)
-        return 1;
     for (u32 i = 0; i < r.nranges; i++) {
         const DlRange& g = r.ranges[i];
         if (cp[CP_ARRAY_BASE + g.attr] != r.arrays[i][0] || cp[CP_ARRAY_STRIDE + g.attr] != r.arrays[i][1])
             return 1;
-        if (mem_generation(g.addr, g.size) != g.gen)
-            return 2;
     }
+    u8 recipe[12];
+    dl_recipe(plan, recipe);
+    if (memcmp(recipe, r.recipe, sizeof(recipe)) != 0)
+        return 1;
     if (r.list_gen != list_gen) {  // the list was written again: the draw's own bytes
         if (count != r.count || dl_data_hash(data, count * plan.fmt->size) != r.data_hash)
             return 2;
         r.list_gen = list_gen;
     }
+    bool rehashed = false;
+    for (u32 i = 0; i < r.nranges; i++) {
+        DlRange& g = r.ranges[i];
+        const u32 gen = mem_generation(g.addr, g.size);
+        if (gen == g.gen)
+            continue;
+        if (gx_tnl_array_hash(*plan.fmt, data, count, g.attr) != g.hash)
+            return 2;
+        g.gen = gen;
+        rehashed = true;
+    }
+    P.kept_by_bytes += rehashed;
     return 0;
 }
 
@@ -1742,6 +2088,22 @@ int dl_record_stale(DlRecord& r, u32 vat, const GxTnlPlan& plan, u32 list_gen, c
 bool PicaRenderer::init() {
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8))
         return false;
+    // citro3d's command buffer, where a frame of its starts its list (an empty frame: no list, no
+    // transfers, no targets yet)
+    {
+        u32 off;
+        C3D_FrameBegin(0);
+        GPUCMD_GetBuffer(&s_cmd_base, &s_cmd_words, &off);
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    }
+    if (const char* v = getenv("NOMA_PICA_OVERLAP"))
+        s_overlap = atoi(v) != 0;
+    else
+        s_overlap = true;
+    if (s_overlap && s_step_frames > 0) {
+        s_overlap = false;
+        log("pica: frames one after the other for NOMA_PICA_STEP");
+    }
     if (const char* v = getenv("NOMA_TOP_SSAA"); v && atoi(v) != 0) {
         s_top_scale = 2;
         if (!(P.top = C3D_RenderTargetCreate(480, 800, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8))) {
@@ -1791,22 +2153,52 @@ bool PicaRenderer::init() {
     AttrInfo_AddLoader(attr, 4, GPU_FLOAT, 3);          // texgen sources 0-2
     AttrInfo_AddLoader(attr, 5, GPU_FLOAT, 3);
     AttrInfo_AddLoader(attr, 6, GPU_FLOAT, 3);
-    P.vbuf = (PVertex*)linearAlloc(POOL_VERTICES * sizeof(PVertex));
-    P.slots = (GxTnlSlots*)linearAlloc(POOL_VERTICES * sizeof(GxTnlSlots));
-    P.rows = (GxTnlRows*)malloc(POOL_VERTICES * sizeof(GxTnlRows));
+    // the pool and its slots (overlapping: its larger immediate part, two buffers of slots, two
+    // halves of the command buffer; without the memory for them, one after the other)
+    auto alloc_pool = [&] {
+        s_imm_vertices = s_overlap ? IMM_OVERLAP : IMM_SERIAL;
+        s_pool_vertices = s_imm_vertices + CACHE_VERTICES;
+        P.vbuf = (PVertex*)linearAlloc(s_pool_vertices * sizeof(PVertex));
+        for (u32 b = 0; b < (s_overlap ? 2u : 1u); b++)
+            P.slot_buf[b] = (GxTnlSlots*)linearAlloc(s_pool_vertices * sizeof(GxTnlSlots));
+        P.rows = (GxTnlRows*)malloc(s_pool_vertices * sizeof(GxTnlRows));
+        return P.vbuf && P.slot_buf[0] && (!s_overlap || P.slot_buf[1]) && P.rows;
+    };
+    if (!alloc_pool() && s_overlap) {
+        linearFree(P.vbuf), linearFree(P.slot_buf[0]), linearFree(P.slot_buf[1]), free(P.rows);
+        P.vbuf = nullptr, P.slot_buf[0] = P.slot_buf[1] = nullptr, P.rows = nullptr;
+        s_overlap = false;
+        log("pica: no memory for the frames to overlap the GPU: one after the other");
+        alloc_pool();
+    }
     P.ibuf = (u16*)linearAlloc(IBUF_INDICES * sizeof(u16));
-    if (P.vbuf && P.slots && P.ibuf)
-        s_buf_base = std::min({osConvertVirtToPhys(P.vbuf), osConvertVirtToPhys(P.slots), osConvertVirtToPhys(P.ibuf)}) &
-                     ~0xFu;
+    P.slots = P.slot_buf[0];
+    P.sbuf = 0;
+    P.cache_next = s_imm_vertices;
+    if (P.vbuf && P.slots && P.ibuf) {
+        s_buf_base = std::min({osConvertVirtToPhys(P.vbuf), osConvertVirtToPhys(P.slots), osConvertVirtToPhys(P.ibuf)});
+        if (P.slot_buf[1])
+            s_buf_base = std::min(s_buf_base, osConvertVirtToPhys(P.slot_buf[1]));
+        s_buf_base &= ~0xFu;
+    }
     log("pica: vertex and index buffers from physical %08lX", (unsigned long)s_buf_base);
     P.dl = new DlEntry[DL_ENTRIES];
     if (!P.vbuf || !P.slots || !P.rows || !P.ibuf)
         return false;
+    s_cmd_half_words = (s_cmd_words / 2) & ~3u;  // (a list starts 16-byte aligned)
+    s_cmd_half[0] = s_cmd_base, s_cmd_half[1] = s_cmd_base + s_cmd_half_words;
+    if (s_overlap)
+        log("pica: frames overlap the GPU: a frame's commands are made while the GPU draws the frame before "
+            "(NOMA_PICA_OVERLAP=0: one after the other); %u immediate vertices and %u KB of commands a frame",
+            s_imm_vertices / 2, s_cmd_half_words >> 8);
+    else
+        log("pica: frames one after the other: a frame's commands are made once the GPU has drawn the frame before");
     if (!white_init())
         log("pica: no memory for the white texture: a texture that can't be made leaves its unit as it was");
     bind_vertices();
     C3D_CullFace(GPU_CULL_NONE);
     aptHook(&s_apt_cookie, apt_hook, nullptr);
+    gspSetEventCallback(GSPGPU_EVENT_PPF, on_ppf, nullptr, false);
     P.ready = true;
     log("pica: renderer ready%s", s_c3d_only ? " (everything through citro3d: NOMA_PICA_C3D)" : "");
     dump_open();
@@ -1827,7 +2219,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     default: return;
     }
     const u32 cull = bits(g_gx.bp[BP_GENMODE], 14, 2);
-    if (!max_indices || count >= IMM_VERTICES || cull == 3)  // (3: all culled)
+    if (!max_indices || count >= imm_half_vertices() || cull == 3)  // (3: all culled)
         return;
     begin_frame();
     if (stepping() && P.batch_count) {  // (NOMA_PICA_STEP: the draw before this one, alone)
@@ -1836,7 +2228,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
     }
     // (a strip drawn in pieces builds two vertices more per piece: some room beyond count)
     const u32 room = count + 2 * (count / 4 + 1);
-    if (P.vused + room > IMM_VERTICES || P.iused + max_indices > IBUF_INDICES) {
+    cmd_room(CMD_DRAW_WORDS);
+    if (!imm_room(room, max_indices)) {
         if (P.warned++ < 4)
             log("pica: vertex buffer full");
         return;
@@ -1995,13 +2388,30 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         }
         P.dl_offset = offset;
         e->last_frame = P.frame;
-        // the draw's record: the one for this command with these registers and this recipe (a
-        // list drawn with other registers in the same frame, a second pass, has a record of its
-        // own); one whose arrays changed is made again in its own pool vertices, unless the GPU
-        // still has to read them for a draw earlier this frame
+        // The draw's record: the one for this command with these registers, arrays and recipe (a
+        // list drawn with others in the same frame, a second pass or another model's arrays, has a
+        // record of its own, up to DL_VARIANTS; past them the least recently drawn is taken over).
+        // A record made again (its arrays' bytes changed, or taken over) puts its vertices back in
+        // their place when no frame the GPU may still be drawing drew them; else, overlapping, into
+        // its second place (DlRecord::alt), whose last frame was before the frame that moved it
+        // away from there, so finished; else into new pool vertices (drawn earlier this frame, or
+        // the first time it moves while in flight: its old place becomes its second).
         DlRecord* r = nullptr;
         DlRecord* oldest = nullptr;
         u32 variants = 0;
+        auto remake = [&](DlRecord& x) {
+            const u32 keep_first = x.first, keep_count = x.count, keep_alt = x.alt, drawn = x.slots_frame;
+            x = DlRecord();
+            x.offset = offset;
+            if (keep_count != count || drawn == P.frame)
+                return;
+            if (drawn < s_done)
+                x.first = keep_first, x.alt = keep_alt, x.count = ~0u;
+            else if (keep_alt)
+                x.first = keep_alt, x.alt = keep_first, x.count = ~0u;
+            else
+                x.alt = keep_first;
+        };
         for (DlRecord& x : e->recs) {
             if (x.offset != offset)
                 continue;
@@ -2014,31 +2424,31 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
             r = &x;
             if (stale == 2) {
                 P.rebuilt_arrays++;
-                u32 keep_first = x.first, keep_count = x.count, drawn = x.slots_frame;
-                x = DlRecord();
-                x.offset = offset;
-                if (keep_count == count && drawn != P.frame)
-                    x.first = keep_first, x.count = ~0u;  // (its vertices are made again in place below)
+                remake(x);
             }
             break;
+        }
+        if (!r && variants >= DL_VARIANTS) {
+            // registers or arrays that keep changing (arrays written anew each frame): the oldest
+            // record taken over when no frame the GPU may still be drawing drew it, else not kept
+            P.rebuilt_regs++;
+            if (!oldest || oldest->slots_frame >= s_done)
+                goto immediate;
+            r = oldest;
+            remake(*r);
+        } else if (!r && variants) {
+            P.rebuilt_regs++;  // (a new pass of a list: counted once, when its record is made)
         }
         u32 reuse_first = 0, reuse_count = 0;
         if (r && r->count == ~0u)
             reuse_first = r->first, reuse_count = count, r->count = 0;
-        if (!r && variants >= 4) {
-            // registers that keep changing (arrays written anew each frame): not worth keeping
-            P.rebuilt_regs++;
-            r = nullptr;
-            goto immediate;
-        }
-        if (!r && variants)
-            P.rebuilt_regs++;  // (a new pass of a list: counted once, when its record is made)
         if (r && r->count == count && r->slots_frame == P.frame)
             P.drawn_twice++;
         if (r && r->count == count && r->slots_frame != P.frame) {
-            // the vertices are there: only the slots
+            // the vertices are there: only the slots, in the frame's buffer of them
             NOMA_PROF_SCOPE("(gx slots)");
             Timed timed(Timers::SLOTS);
+            const u32 b = P.sbuf;
             if (gx_tnl_rows_vary(plan)) {
                 T.vary_draws++;
                 for (u32 done = 0; done < count;) {
@@ -2062,22 +2472,24 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 }
             } else {
                 GxTnlSlots fs;
-                const GxTnlSlots* hint = r->slots_frame ? &r->slots : nullptr;
+                const GxTnlSlots* hint = r->slots_frame ? &r->slots[r->slots_last] : nullptr;
                 if (!gx_tnl_fixed_slots(plan, P.pal, hint, &fs)) {
                     flush_batch();
                     if (!gx_tnl_fixed_slots(plan, P.pal, hint, &fs))
                         return;
                 }
-                if (!r->slots_frame || memcmp(&fs, &r->slots, sizeof(fs)) != 0) {
+                if (!(r->slots_valid >> b & 1) || memcmp(&fs, &r->slots[b], sizeof(fs)) != 0) {
                     T.slot_rewrites++, T.slot_vertices += count;
                     GxTnlSlots* dst = P.slots + r->first;
                     for (u32 i = 0; i < count; i++)
                         dst[i] = fs;
-                    r->slots = fs;
+                    r->slots[b] = fs;
+                    r->slots_valid |= (u8)(1u << b);
                     slots_written(r->first, count);
                 }
                 submit(r->first, count);
             }
+            r->slots_last = (u8)b;
             r->slots_frame = P.frame;
             P.cached_draws++;
             P.cached_vertices += count;
@@ -2094,7 +2506,7 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 pushed = true;
             }
             const bool in_place = reuse_count == count;
-            if (!in_place && P.cache_next + count > POOL_VERTICES) {
+            if (!in_place && P.cache_next + count > s_pool_vertices) {
                 P.cache_full = true;
                 P.no_room++;
                 if (pushed)
@@ -2121,13 +2533,16 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                     GxTnlArrayRange ranges[12];
                     r->nranges = gx_tnl_array_ranges(*plan.fmt, data, count, ranges);
                     for (u32 i = 0; i < r->nranges; i++) {
-                        r->ranges[i] = {ranges[i].attr, ranges[i].addr, ranges[i].size, mem_generation(ranges[i].addr, ranges[i].size)};
-                        r->arrays[i][0] = cp[CP_ARRAY_BASE + ranges[i].attr], r->arrays[i][1] = cp[CP_ARRAY_STRIDE + ranges[i].attr];
+                        const GxTnlArrayRange& g = ranges[i];
+                        r->ranges[i] = {g.attr, g.addr, g.size, mem_generation(g.addr, g.size),
+                                        gx_tnl_array_hash(*plan.fmt, data, count, g.attr)};
+                        r->arrays[i][0] = cp[CP_ARRAY_BASE + g.attr], r->arrays[i][1] = cp[CP_ARRAY_STRIDE + g.attr];
                     }
                     dl_recipe(plan, r->recipe);
                     r->data_hash = dl_data_hash(data, count * plan.fmt->size), r->list_gen = e->gen;
+                    r->slots_valid = (u8)(1u << P.sbuf), r->slots_last = (u8)P.sbuf;
                     if (!gx_tnl_rows_vary(plan))
-                        r->slots = P.slots[first];
+                        r->slots[P.sbuf] = P.slots[first];
                     r->slots_frame = P.frame;
                     submit(first, count);
                     P.cached_draws++;
@@ -2183,6 +2598,7 @@ static void save_shot(C3D_RenderTarget* t, u32 n) {
         return;
     // (scaling, the transfer engine halves the output dimensions it is given, as citro3d gives it
     // the target's own for both)
+    s_ppf_sent++;
     C3D_SyncDisplayTransfer((u32*)t->frameBuf.colorBuf, GX_BUFFER_DIM(W * S, H * S), buf, GX_BUFFER_DIM(W * S, H * S),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -2236,30 +2652,40 @@ bool read_back() {
         return false;
     bool in_frame = P.in_frame;
     if (in_frame) {
-        C3D_RenderTargetDetachOutput(P.top);
-        end_frame();
+        if (!s_overlap)
+            C3D_RenderTargetDetachOutput(P.top);
+        end_frame(false);
         P.all_dirty = true;  // (the new frame starts without state)
         P.env_valid = false;
         P.cull = ~0u;
     }
-    // outside a frame this waits for the GPU's queue, then for the transfer
-    GpuWait w("for a read-back (C3D_SyncDisplayTransfer)");
-    C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(RW, RH), s_readback,
-                            GX_BUFFER_DIM(RW, RH),
-                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    // outside citro3d's frame this waits for its queue, then for the transfer: the GPU has then
+    // finished everything sent to it
+    {
+        GpuWait w("for a read-back (C3D_SyncDisplayTransfer)");
+        s_ppf_sent++;
+        C3D_SyncDisplayTransfer((u32*)P.top->frameBuf.colorBuf, GX_BUFFER_DIM(RW, RH), s_readback,
+                                GX_BUFFER_DIM(RW, RH),
+                                GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    }
+    s_done = P.frame;
     GSPGPU_InvalidateDataCache(s_readback, RW * RH * 4);
     if (in_frame) {
-        C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-        C3D_FrameBegin(0);
-        C3D_FrameDrawOn(P.top);
+        if (s_overlap) {
+            GPUCMD_SetBuffer(s_cmd_half[frame_half()], s_cmd_half_words, 0);
+        } else {
+            C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+            C3D_FrameBegin(0);
+        }
+        draw_on(P.top);
         frame_list_starts();
         P.c3d_touched = true;
-        // the frame's immediate vertices and indices are reused from the start (the GPU
-        // finished with them; the lists' vertices stay)
-        P.vused = P.iused = 0;
+        // the frame's immediate vertices, indices and commands are reused from the start of their
+        // space (the GPU finished with them; the lists' vertices stay)
+        imm_restart(frame_half());
     }
     return true;
 }
@@ -2298,7 +2724,8 @@ void readback_rgba(u32 x, u32 y, s32* out) {
 // the clear that goes with a copy: a rectangle in the clear color and depth (the copy's
 // source; color, alpha and depth as their update flags allow)
 void clear_rect(u32 sx, u32 sy, u32 w, u32 h) {
-    if (P.vused + 6 > IMM_VERTICES)
+    cmd_room(CMD_DRAW_WORDS);
+    if (!imm_room(6, 0))
         return;
     const u32* bp = g_gx.bp;
     u32 ar = bp[BP_CLEAR_AR], gb = bp[BP_CLEAR_GB], cm = bp[BP_CMODE0];
@@ -2382,6 +2809,10 @@ void PicaRenderer::draw_done() {
             Timed timed(Timers::END);
             end_frame();
         }
+        // the frame's times: its commands' making (the waits for the GPU in it left out), its waits
+        P.rec_ticks = svcGetSystemTick() - P.rec_t0 - (P.wait_ticks - P.wait_begin);
+        P.rec_sum += P.rec_ticks, P.wait_sum += P.wait_ticks, P.timed_frames++;
+        P.cmd_words_max = std::max(P.cmd_words_max, P.cmd_words);
         if (step)
             step_transfer();
         timers_frame_end();
@@ -2393,8 +2824,10 @@ void PicaRenderer::draw_done() {
         }
         P.frame++;
         static int s_shot_every = getenv("NOMA_SHOT_EVERY") ? atoi(getenv("NOMA_SHOT_EVERY")) : 0;
-        if (s_shot_every > 0 && P.frame % (u32)s_shot_every == 0)
-            save_shot(P.top, P.frame);
+        if (s_shot_every > 0 && P.frame % (u32)s_shot_every == 0) {
+            save_shot(P.top, P.frame);  // (its transfer waits for the GPU to finish the frame)
+            s_done = P.frame;
+        }
         if ((s_unsupported || gx_tnl_approximated()) && P.frame % 600 == 1)
             log("pica: %u TEV configurations and %u draws' lighting or texgens approximated", s_unsupported,
                 gx_tnl_approximated());
@@ -2405,18 +2838,26 @@ void PicaRenderer::draw_done() {
             log("pica: texture KB by format: RGBA8 %u, RGB565 %u, RGBA5551 %u (CMPR), LA8 %u, LA4 %u, L8 %u, L4 %u, ETC1 %u, "
                 "ETC1A4 %u", kb_fmt[GPU_RGBA8], kb_fmt[GPU_RGB565], kb_fmt[GPU_RGBA5551], kb_fmt[GPU_LA8], kb_fmt[GPU_LA4],
                 kb_fmt[GPU_L8], kb_fmt[GPU_L4], kb_fmt[GPU_ETC1], kb_fmt[GPU_ETC1A4]);
+            const double ms = 1000.0 / SYSCLOCK_ARM11, f = P.timed_frames ? P.timed_frames : 1;
             log("pica: %zu textures (%u KB), %u dropped for memory, %u not made; %u KB linear heap free, "
                 "heap %u KB used of %u KB; at most %u immediate vertices and %u indices a frame; last frame %u draws "
                 "in %u batches, %u state setups, %u draws (%u vertices) from the list cache, %u vertices built "
-                "(%u list draws made again for their arrays, %u for registers, %u drawn twice, %u without room), "
-                "cache at %u of %u (%u vertices given out; %u lists new, %u rewritten); the GPU %.2f ms drawing "
-                "the last frame (%.2f ms for its command list)", P.textures.size(), kb, P.evicted, P.failed,
-                (u32)(linearSpaceFree() >> 10), (u32)(mallinfo().uordblks >> 10), __ctru_heap_size >> 10, P.vmax,
-                P.imax, P.draws, P.batches, P.setups, P.cached_draws, P.cached_vertices, P.built_vertices,
-                P.rebuilt_arrays, P.rebuilt_regs, P.drawn_twice, P.no_room, P.cache_next - IMM_VERTICES,
-                POOL_VERTICES - IMM_VERTICES, P.cache_made, P.lists_new, P.lists_rewritten,
-                (double)C3D_GetDrawingTime(), (double)C3D_GetProcessingTime());
+                "(%u list draws made again for their arrays, %u for registers, %u drawn twice, %u without room; %u "
+                "kept by their arrays' bytes), cache at %u of %u (%u vertices given out; %u lists new, %u "
+                "rewritten); the GPU %.2f ms drawing the last frame (%.2f ms for its command list, %.2f ms waiting "
+                "for the GPU); %s, over %u frames %.2f ms a frame making commands and %.2f ms waiting for the GPU, "
+                "%u KB of commands a frame at most, %u frames taking the other half too",
+                P.textures.size(), kb, P.evicted, P.failed, (u32)(linearSpaceFree() >> 10),
+                (u32)(mallinfo().uordblks >> 10), __ctru_heap_size >> 10, P.vmax, P.imax, P.draws, P.batches,
+                P.setups, P.cached_draws, P.cached_vertices, P.built_vertices, P.rebuilt_arrays, P.rebuilt_regs,
+                P.drawn_twice, P.no_room, P.kept_by_bytes, P.cache_next - s_imm_vertices,
+                s_pool_vertices - s_imm_vertices, P.cache_made, P.lists_new, P.lists_rewritten,
+                (double)C3D_GetDrawingTime(), (double)P.rec_ticks * ms, (double)P.wait_ticks * ms,
+                s_overlap ? "overlapping the GPU" : "one after the other", P.timed_frames, (double)P.rec_sum * ms / f,
+                (double)P.wait_sum * ms / f, P.cmd_words_max >> 8, P.spills);
             P.vmax = P.imax = 0;
+            P.rec_sum = P.wait_sum = 0;
+            P.timed_frames = P.spills = P.cmd_words_max = 0;
         }
     }
 }
@@ -2442,9 +2883,13 @@ void pica_watchdog() {
 void PicaRenderer::suspend() {
     if (!P.ready || !P.in_frame)
         return;
-    C3D_RenderTargetDetachOutput(P.top);
-    end_frame();
-    C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    if (s_overlap) {
+        end_frame(false);
+    } else {
+        C3D_RenderTargetDetachOutput(P.top);
+        end_frame();
+        C3D_RenderTargetSetOutput(P.top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    }
     P.in_frame = false;
     P.resume = true;
 }
@@ -2495,7 +2940,7 @@ void PicaRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
     const bool bottom = screen == SCREEN_BOTTOM && P.bottom;
     if (bottom) {
         if (!P.bottom_drawn) {
-            C3D_RenderTargetClear(P.bottom, C3D_CLEAR_ALL, 0xFFFFFFFFu, g_gx.bp[BP_CLEAR_Z] & 0xFFFFFF);
+            clear_target(P.bottom, 0xFFFFFFFFu, g_gx.bp[BP_CLEAR_Z] & 0xFFFFFF);
             P.bottom_drawn = true;
         }
         P.region[0] = (f32)x, P.region[1] = (f32)y;
@@ -2504,7 +2949,7 @@ void PicaRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
     if (bottom == (P.screen == SCREEN_BOTTOM) && !bottom)
         return;
     P.screen = bottom ? SCREEN_BOTTOM : SCREEN_TOP;
-    C3D_FrameDrawOn(bottom ? P.bottom : P.top);
+    draw_on(bottom ? P.bottom : P.top);
     C3Di_UpdateContext();
     set_xform();
     C3Di_UpdateContext();
@@ -2514,6 +2959,7 @@ void PicaRenderer::screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {
 void pica_native_begin(f32 clip[4][4]) {
     begin_frame();
     flush_batch();
+    cmd_room(CMD_NATIVE_WORDS);
     set_xform();
     C3Di_UpdateContext();
     memcpy(clip, P.clip, sizeof(P.clip));
@@ -2530,7 +2976,7 @@ void pica_native_target(C3D_FrameBuf* fb) {
     }
     // the frame's target (the screen being drawn on), its whole viewport, then the GX state's scissor
     // (set_xform; a direct write after citro3d's, or citro3d's own)
-    C3D_FrameDrawOn(P.screen == SCREEN_BOTTOM && P.bottom ? P.bottom : P.top);
+    draw_on(P.screen == SCREEN_BOTTOM && P.bottom ? P.bottom : P.top);
     C3Di_UpdateContext();
     set_xform();
     C3Di_UpdateContext();
@@ -2574,9 +3020,9 @@ void pica_make_room(u32 bytes) {
     const u32 MARGIN = 512 << 10;  // (as tex_init keeps for screenshots and read-backs)
     const u32 free0 = (u32)linearSpaceFree();
     u32 n = 0;
-    // a texture last drawn two frames ago or before: that frame's command list has finished (the
-    // one after it began only once it had), whether a frame is open now or the last one still draws
-    while (linearSpaceFree() < bytes + MARGIN && P.frame >= 2 && evict_texture(P.frame - 1))
+    // a texture last drawn in a frame the GPU has finished (s_done), whether a frame is being made
+    // now or the last one still draws
+    while (linearSpaceFree() < bytes + MARGIN && evict_texture())
         n++;
     if (n)
         log("pica: %u textures dropped for %u KB (%u KB of the linear heap free, %u KB before)", (unsigned)n,
@@ -2587,7 +3033,7 @@ void pica_free_after_frame(void* linear) {
     if (!linear)
         return;
     LightLock_Lock(&s_free_lock);
-    s_free_later.push_back(linear);
+    s_free_later.push_back({linear, P.frame});
     LightLock_Unlock(&s_free_lock);
 }
 
@@ -2726,6 +3172,13 @@ void PicaRenderer::lyt(const engine::lyt::LytPacket& p) {
     };
     step();
     flush_batch();
+    // room for the packet's quads and its states' commands (a spill makes it when it can; before
+    // the GX state at the command is set, which a spill would set again through citro3d)
+    u32 packet_quads = 0;
+    for (const engine::lyt::LytRun *r = p.runs(), *end = r + p.n_runs; r < end; r++)
+        packet_quads += r->count / 4;
+    cmd_room(CMD_DRAW_WORDS + 512 * p.n_states);
+    imm_room(4 * packet_quads, 6 * packet_quads);
     const u32 batches0 = P.batches;
     T.lyt_packets++;
 
@@ -2758,7 +3211,7 @@ void PicaRenderer::lyt(const engine::lyt::LytPacket& p) {
         // the quads the immediate vertices and the indices have room for (a GX draw that doesn't
         // fit isn't drawn either)
         u32 quads = r->count / 4;
-        const u32 room = std::min((IMM_VERTICES - P.vused) / 4, (IBUF_INDICES - P.iused) / 6);
+        const u32 room = std::min((P.vend - P.vused) / 4, (P.iend - P.iused) / 6);
         if (quads > room) {
             T.lyt_dropped += quads - room;
             if (P.warned++ < 4)

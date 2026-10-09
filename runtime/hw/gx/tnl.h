@@ -137,6 +137,11 @@ struct GxTnlArrayRange {
     u32 attr, addr, size;
 };
 u32 gx_tnl_array_ranges(const GxVertexFormat& f, const u8* data, u32 count, GxTnlArrayRange out[12]);
+// 64 bits of the bytes of attribute `attr`'s array elements that the draw's vertices index, in
+// their order (0 for an attribute the format doesn't index): a range's write generation says only
+// that something in its pages was written (in the room, ~150 list draws a frame read arrays that
+// share pages with data the game flushes every frame, their own bytes unchanged)
+u64 gx_tnl_array_hash(const GxVertexFormat& f, const u8* data, u32 count, u32 attr);
 
 // the number of draws planned with something the shader doesn't do (specular attenuation, a
 // differently lit alpha channel, emboss/color/binormal texgens), for a log line
