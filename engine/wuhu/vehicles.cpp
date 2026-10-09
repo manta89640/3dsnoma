@@ -18,7 +18,11 @@ constexpr f32 DEG = 3.14159265f / 180.0f;
 constexpr u16 CLASS_CAR = 15, CLASS_CRUISER = 7, CLASS_YACHT = 8;
 // island units a second (a car is about 55 long, a cruiser 160), and a second's
 constexpr f32 CAR_MAX_SPEED = 180.0f, CAR_REVERSE_SPEED = 55.0f;
-constexpr f32 BOAT_MAX_SPEED = 85.0f, BOAT_REVERSE_SPEED = 30.0f;
+// A boat's top is twice what it first was (the user's), reached as fast (its acceleration doubled);
+// held going ahead it keeps gathering speed, its top rising to BOAT_SURGE_TOP times that, three times
+// the first, BOAT_SURGE_SECONDS after it set off, and falling back as fast once it no longer goes ahead
+constexpr f32 BOAT_MAX_SPEED = 170.0f, BOAT_REVERSE_SPEED = 60.0f, BOAT_ACCEL_SCALE = 2.0f;
+constexpr f32 BOAT_SURGE_TOP = 1.5f, BOAT_SURGE_SECONDS = 6.0f;
 constexpr f32 ACCEL = 115.0f, BRAKE = 190.0f, STEER = 115.0f;  // (degrees a second at full speed)
 constexpr f32 STICK_DEAD = 0.12f;
 constexpr f32 CAR_STEP = 0.3f;      // of its height: the most its corners climb or drop at once
@@ -386,12 +390,18 @@ void Vehicles::drive(f32 throttle, f32 steer, f32 dt, f32 time) {
         return;
     const Vehicle& v = list_[driven_];
     const f32 top = v.boat ? BOAT_MAX_SPEED : CAR_MAX_SPEED, back = v.boat ? BOAT_REVERSE_SPEED : CAR_REVERSE_SPEED;
+    const f32 accel = v.boat ? ACCEL * BOAT_ACCEL_SCALE : ACCEL;
     throttle = std::fabs(throttle) < STICK_DEAD ? 0.0f : throttle;
     steer = std::fabs(steer) < STICK_DEAD ? 0.0f : steer;
+    // (a boat's top now: surging while it goes ahead; above it, it eases down as it does unpowered)
+    if (v.boat)
+        surge_ = throttle > 0 ? std::min(surge_ + dt, BOAT_SURGE_SECONDS) : std::max(surge_ - dt, 0.0f);
+    const f32 top_now = v.boat ? top * (1 + (BOAT_SURGE_TOP - 1) * surge_ / BOAT_SURGE_SECONDS) : top;
     if (throttle > 0)
-        speed_ = std::min(top, speed_ + throttle * (speed_ < 0 ? BRAKE : ACCEL) * dt);
+        speed_ = speed_ > top_now ? std::max(top_now, speed_ - BRAKE * 0.5f * dt)
+                                  : std::min(top_now, speed_ + throttle * (speed_ < 0 ? BRAKE : accel) * dt);
     else if (throttle < 0)
-        speed_ = std::max(-back, speed_ + throttle * (speed_ > 0 ? BRAKE : ACCEL) * dt);
+        speed_ = std::max(-back, speed_ + throttle * (speed_ > 0 ? BRAKE : accel) * dt);
     else
         speed_ = speed_ > 0 ? std::max(0.0f, speed_ - BRAKE * 0.5f * dt) : std::min(0.0f, speed_ + BRAKE * 0.5f * dt);
     const f32 yaw_was = yaw_;

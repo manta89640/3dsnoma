@@ -50,7 +50,7 @@ public:
 
     // into vehicle v (NONE: none); out again (it stays where it is)
     void enter(u32 v);
-    void leave() { driven_ = NONE, speed_ = 0, wake_ = 0; }
+    void leave() { driven_ = NONE, speed_ = 0, wake_ = 0, surge_ = 0; }
     u32 driven() const { return driven_; }
     bool boat() const { return driven_ != NONE && list_[driven_].boat; }
     // the vehicle driven: throttle and steer -1..1 (the stick), dt seconds, `time` the World's clock
@@ -101,6 +101,7 @@ private:
     std::vector<Vehicle> list_;
     u32 driven_ = NONE;
     f32 speed_ = 0, yaw_ = 0;
+    f32 surge_ = 0;  // a boat's seconds ahead toward its fastest (vehicles.cpp BOAT_SURGE_SECONDS)
     f32 slope_f_ = 0, slope_s_ = 0;  // a car's tilt (rise a unit forward, a unit to its x side)
     f32 roll_ = 0, steer_ = 0;       // its wheels' turn about their axle and the front pair's steer (degrees)
     f32 wake_ = 0;                   // the driven boat's wake's strength (eased toward its speed fraction)

@@ -203,7 +203,7 @@ not objects anyone sees.
 | conifer | 159 | baked, three levels | `WS2_common_tree_H` / `_M` / `_L` (levels 0 / 1 / 2; 32 / 27 / 5 triangles) |
 | broadleaf tree | 179 | baked, three levels | `WS2_common_tree2_H` / `_M` / `_L` (levels 0 / 1 / 2; 54 / 30 / 6 triangles) |
 | palm | 141 | baked, levels 0-1 | `WS2_common_tree3` (it has one model) |
-| cruiser at anchor | 28 | static instances | enter nearby with 3DS X (Wii Remote 1); steer on water with the circle pad |
+| cruiser at anchor | 28 | static instances | enter nearby with 3DS X (Wii Remote 1); steer on water with the circle pad: 170 units a second, and held ahead it gathers speed to 255 over 6 s (`engine/wuhu/vehicles.cpp`, the yachts alike) |
 | yacht | 19 | static instances | enter nearby with 3DS X (Wii Remote 1); steer on water with the circle pad |
 | fountain | 1 | baked, level 0 | its water's SRT0 in the world animation |
 | jet-ski start gate, wakeboard goal gate | 1 + 1 | baked, levels 0-1 | 168 and 400 units wide |
