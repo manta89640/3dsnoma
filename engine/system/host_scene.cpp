@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "noma_decomp.h"
@@ -152,13 +153,29 @@ u32 scene_cursor(u32 scene) { return scene_of(scene)->cursor(); }
 
 // layout::Button's push hooks (vtable slots 19 and 20: ButtonPushTask calls them when the push
 // starts and when its animation has ended)
-const u32 SLOT_PUSH_START = 19, SLOT_PUSHED = 20;
+// (and its focus hooks, slots 5 and 6: the cursor's, held off for a held button)
+const u32 SLOT_ON_FOCUS = 5, SLOT_ON_UNFOCUS = 6, SLOT_PUSH_START = 19, SLOT_PUSHED = 20;
 std::unordered_map<u32, u32> s_hooked_vtables;  // copy -> the class's own vtable
+std::unordered_set<u32> s_held;                  // (hold_button_look)
+
+u32 original(u32 button, u32 slot) {
+    auto it = s_hooked_vtables.find(guest::load32(button));
+    return it != s_hooked_vtables.end() ? guest::load32(it->second + 8 + 4 * slot) : 0;
+}
 
 void call_original(u32 button, u32 slot) {
-    auto it = s_hooked_vtables.find(guest::load32(button));
-    if (it != s_hooked_vtables.end())
-        gcall<u32>(guest::load32(it->second + 8 + 4 * slot), button);
+    if (u32 fn = original(button, slot))
+        gcall<u32>(fn, button);
+}
+
+// OnFocus / OnUnfocus (button, the cursor's arguments): passed on unless the button is held
+u32 button_on_focus(u32 b, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10) {
+    const u32 fn = original(b, SLOT_ON_FOCUS);
+    return fn && !s_held.count(b) ? gcall<u32>(fn, b, r4, r5, r6, r7, r8, r9, r10) : 0;
+}
+u32 button_on_unfocus(u32 b, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10) {
+    const u32 fn = original(b, SLOT_ON_UNFOCUS);
+    return fn && !s_held.count(b) ? gcall<u32>(fn, b, r4, r5, r6, r7, r8, r9, r10) : 0;
 }
 
 PushListener* s_listener;  // (set_push_listener)
@@ -212,12 +229,22 @@ void hookable_button_class(u32 vtable, u32 n_slots) {
     u32 copy = alloc_lasting(size);
     for (u32 i = 0; i < size; i += 4)
         guest::store32(copy + i, guest::load32(vtable + i));
+    guest::store32(copy + 8 + 4 * SLOT_ON_FOCUS, guest::host_fn(&button_on_focus));
+    guest::store32(copy + 8 + 4 * SLOT_ON_UNFOCUS, guest::host_fn(&button_on_unfocus));
     guest::store32(copy + 8 + 4 * SLOT_PUSH_START, guest::host_fn(&button_push_start));
     guest::store32(copy + 8 + 4 * SLOT_PUSHED, guest::host_fn(&button_pushed));
     s_hooked_vtables[copy] = vtable;
 }
 
+void hold_button_look(u32 button, bool hold) {
+    if (hold)
+        s_held.insert(button);
+    else
+        s_held.erase(button);
+}
+
 void hook_button(u32 button) {
+    s_held.erase(button);  // (a button made where a held one was)
     u32 vt = guest::load32(button);
     if (s_hooked_vtables.count(vt))
         return;

@@ -80,16 +80,21 @@ draw, and drawn on the bottom screen without its hand.
 - a touch that begins on a list's rows (`input_set_drag_area`, renewed by the list every frame)
   presses only as a tap at its release; once it is a drag (`input_mark_drag`) it presses nothing,
   the pointer held where it began and taken away when it lets go;
-- the pointer leaves a second after a touch, 3 s after a touch in the channel's own screens
-  (platform/3ds/main.cpp; the circle pad is the D-pad there, no pointer); a D-pad move of a list's highlight sends it away at
-  once (`input_pointer_away`), so A presses the highlight;
+- there is no pointer but the touch's (`pointer_on`): the remote points while a finger is down, for
+  the read after it lifts (`LIFT_READS`: a press made at A's release lands where the finger was) and
+  while a tap's A is to come, never otherwise; a new region (`input_set_touch_region`) has none; a
+  D-pad move of a list's highlight sends it away (`input_pointer_away`), so A presses the highlight;
+  a script's own pointer (`P(x;y)`, nudges) is the one exception (`input_script_pointer`);
 - on Wuhu Island the jump is the A button's own (`wiimote_a_button_pressed/held`): a touch holds the
   game's A for the bottom screen's menus;
-- the circle pad moves the pointer (out of stick mode), inside the claimed region too
-  (`WiimoteInput::nudge_x/y`);
-- the Wii hand (each `layout::Cursor`'s layouts) shows only while the circle pad moves the pointer
-  (`input_pointer_by_stick`, `layout_Cursor_Update`); the room's hand is drawn by its panel on the
-  bottom screen;
+- the circle pad is the D-pad out of stick mode (platform/3ds/main.cpp); only a script's `S(x;y)`
+  still nudges a pointer (`WiimoteInput::nudge_x/y`), inside the claimed region too;
+- the Wii hand (each `layout::Cursor`'s layouts) shows only for a script's nudged pointer
+  (`input_pointer_by_stick`, `layout_Cursor_Update`): never in play on the 3DS;
+- a hooked button whose push sends its scene away keeps its pushed look
+  (`engine::system::hold_button_look`: the cursor's unfocus and refocus held off; the room's panel
+  poses it again after the button's own end of its push), and the room's panel asks for the scene as
+  the push starts (`on_push_start`), not after its 11 frames;
 - presses between two of the game's reads are kept for the next (`wiimote_take_pressed`);
 - a drag on a list scrolls it and coasts when flicked (`engine/ui/drag_scroll.h`).
 

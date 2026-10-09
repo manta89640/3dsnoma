@@ -108,6 +108,12 @@ void input_cancel_tap();
 // Remote pointed away, until the next touch or circle-pad nudge, so that the game's cursor drops the
 // focus it had and A presses the highlight.
 void input_pointer_away();
+// There is no pointer on the 3DS but the touch's: the game's remote points while a finger is down,
+// for the read after it lifts and while a tap's A is to come, never otherwise (remote.cpp
+// pointer_on). A script (NOMA_INPUT) has a pointer of its own besides (P(x;y), and its nudges in a
+// region); false: none, as without a script (NOMA_SELFTEST=input, which loads a script, checks the
+// 3DS's rule so).
+void input_script_pointer(bool on);
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();

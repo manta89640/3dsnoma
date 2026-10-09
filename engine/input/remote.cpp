@@ -55,6 +55,22 @@ bool s_region;
 f32 s_region_box[4], s_region_x, s_region_y, s_down_x, s_down_y;
 bool s_pointer_by_stick;  // (input_pointer_by_stick)
 bool s_away;              // input_pointer_away, until the next touch or nudge
+// There is no pointer but the touch's: the game's remote points while a finger is down and for the
+// LIFT_READS reads after it lifts (a press the game makes at A's release lands where the finger
+// was), and while a tap's A is to come; never otherwise, so nothing is highlighted by a pointer
+// nobody sees (the button the last touch was on, or what a new screen has where it was). A
+// script's pointer (NOMA_INPUT's P(x;y), and its circle-pad nudges in a region) apart.
+const u32 LIFT_READS = 1;
+u32 s_lift_reads;            // reads left that show the lifted touch's pointer
+bool s_script_pointer = true;  // (input_script_pointer)
+
+bool pointer_on() {
+    if (s_away)
+        return false;
+    if (s_in.touching || s_tap || s_tap_waiting || s_lift_reads)
+        return true;
+    return s_script_pointer && input_script_active() && s_in.pointing && (!s_region || s_pointer_by_stick);
+}
 
 bool in_drag_area(u16 x, u16 y) {
     return s_drag_area_reads < DRAG_AREA_READS && x >= s_drag_area[0] && y >= s_drag_area[1] && x < s_drag_area[2] &&
@@ -134,6 +150,8 @@ void wiimote_set_input(const WiimoteInput& in) {
     }
     if (s_was_touching && !s_in.touching && touch_taps())
         s_tap = true;
+    if (s_was_touching && !s_in.touching)
+        s_lift_reads = LIFT_READS;
     // a drag let go takes the pointer with it, as a remote pointed away: held where the drag began,
     // it would give the focus to whatever row scrolls under it once the rows take presses again
     if (s_was_touching && !s_in.touching && s_touch_drag)
@@ -158,11 +176,13 @@ void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height) {
         touch_to_region();
     s_down_x = s_region_x, s_down_y = s_region_y;
     // what was on the bottom screen has gone: a touch on it (going on, or its tap still to come)
-    // presses nothing in what comes now, and its drag area goes with it
+    // presses nothing in what comes now, and its drag area goes with it; nor does the place a
+    // touch left point at anything there
     input_cancel_tap();
     s_touch_void = s_was_touching;
     s_touch_drag = false;
     s_drag_area_reads = DRAG_AREA_READS;
+    s_lift_reads = 0;
 }
 
 void input_set_drag_area(u16 x0, u16 y0, u16 x1, u16 y1) {
@@ -191,6 +211,8 @@ void input_pointer_away() {
 }
 
 bool input_pointer_from_touch() { return s_in.touching || s_tap || s_tap_waiting; }
+
+void input_script_pointer(bool on) { s_script_pointer = on; }
 
 // the game's read takes the latched presses and the tap (KPADReadEx)
 u16 wiimote_take_pressed() {
@@ -276,14 +298,17 @@ u32 KPADReadEx(u32 chan, u32 samples, u32 length, u32 result) {
         err = KPAD_READ_ERR_NO_CONTROLLER;
     } else if (samples && length) {
         const guest::WiimoteInput& in = guest::s_in;
-        float x = s_x, y = s_y;
-        if (in.pointing)
-            x = in.x, y = in.y;
         if (guest::s_drag_area_reads < guest::DRAG_AREA_READS)
             guest::s_drag_area_reads++;
         if (guest::wiimote_take_tap())
             guest::s_tap_waiting = true;
-        if (!in.pointing || (s_hold & guest::WM_A))
+        const bool pointing = guest::pointer_on();
+        if (!in.touching && guest::s_lift_reads)
+            guest::s_lift_reads--;
+        float x = s_x, y = s_y;
+        if (pointing)
+            x = in.x, y = in.y;
+        if (!pointing || (s_hold & guest::WM_A))
             guest::s_tap_waiting = false;  // (the pointer gone, or A held anyway: no press later on)
         if (in.touching || guest::s_tap_waiting) {
             if (s_touch_seen != guest::s_touches)
@@ -328,7 +353,7 @@ u32 KPADReadEx(u32 chan, u32 samples, u32 length, u32 result) {
         store_f32(st + KS_DIST, 1.3f);
         store_f32(st + KS_ACC_VERTICAL, 1.0f);
         guest::store8(st + KS_DEV_TYPE, WPAD_DEV_CORE);
-        guest::store8(st + KS_DPD_VALID, in.pointing ? DPD_TWO_POINTS : 0);
+        guest::store8(st + KS_DPD_VALID, pointing ? DPD_TWO_POINTS : 0);
         guest::store8(st + KS_DATA_FORMAT, WPAD_FMT_CORE_ACC_DPD);
         s_hold = held, s_x = x, s_y = y;
         n = 1;

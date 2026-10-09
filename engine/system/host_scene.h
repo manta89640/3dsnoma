@@ -68,6 +68,11 @@ void change_scene(u32 factory);
 // layout::Button has 21) is made hookable at the start.
 void hookable_button_class(u32 vtable, u32 n_slots);
 void hook_button(u32 button);
+// A hooked button whose push sends its scene away keeps the look it was pushed with: the game's
+// cursor neither unfocuses it nor focuses it again while it is held (its OnUnfocus and OnFocus,
+// slots 6 and 5, do nothing), so it doesn't fade out and light up again under the wipe. (The
+// button's own end of a push unfocuses its layout directly: its scene poses it again then.)
+void hold_button_look(u32 button, bool hold);
 // Who hears the hooked buttons' pushes when the current scene isn't a HostScene (a native part of
 // one of the channel's own scenes: the room's bottom-screen panel, engine/room); nullptr: none.
 struct PushListener {

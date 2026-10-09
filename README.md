@@ -221,10 +221,10 @@ where it walks and scrolls) the circle pad as the D-pad.
 A touch is the remote pointed there with A held: it presses as it comes down (its second read:
 the first puts the pointer there) and holds as long as it lasts, so held arrows repeat as on the
 Wii; on a list's rows a touch presses only as a tap, when it lets go, and a drag scrolls the list
-and presses nothing. The pointer leaves the screen a second after a touch (3 seconds in the
-channel's own screens, whose theater shows its controls only while it is there), as a remote put
-down would, so nothing stays highlighted; the
-D-pad moving a list's highlight sends it away at once; the next touch brings it back.
+and presses nothing. There is no pointer apart from the touch: the game sees one only while a finger
+is down (and for its read after the finger lifts), so nothing is highlighted by a pointer nobody
+sees, not after a touch nor on a screen that has just come up. A room button pushed sends the room on
+its way as its push starts, and keeps its pushed look under the wipe.
 At the start, A or a tap skips the rest of the opening ([docs/two_screens.md](docs/two_screens.md) has how the
 two screens are put together). In the room the top screen shows the room alone (no bar, no hand) and the bottom one the room's
 buttons, the channel's own, worked by touch (`engine/room/panel.h`), fading in from black once the

@@ -2,10 +2,9 @@
 // content/, nand/ as tools/stage_data.py makes them from the user's own WAD) lives on the SD card
 // in sdmc:/3ds/noma.
 //
-// Controls (a Wii Remote held pointing at the screen): touch the bottom screen to point and press,
-// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote, the circle pad as the D-pad
-// (the island's and the Sound Player's stick). A second after a touch (3 s in the channel's own
-// screens) the pointer leaves the screen, as a remote put down does.
+// Controls (the game reads a Wii Remote, engine/input/remote.cpp): touch the bottom screen to press
+// what is there, A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote, the circle pad
+// as the D-pad (the island's and the Sound Player's stick). There is no pointer but the touch's.
 // The remote's HOME button has no counterpart: the Wii's HOME Button Menu isn't part of the port
 // (engine/system).
 #include <3ds.h>
@@ -28,7 +27,6 @@
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
-#include "engine/room/panel.h"
 #include "runtime/hw/ios/ios.h"
 #include "runtime/runtime.h"
 
@@ -891,21 +889,9 @@ static void poll_input() {
     circlePosition cs;
     hidCstickRead(&cs);
     read_stick(cs, CSTICK_DEAD, &s_in.cam_x, &s_in.cam_y);
-    // The pointer stays where the stylus left it, so the button last touched would keep its
-    // focused look, and a menu opened under it would see it pointed at. A Wii Remote put down or
-    // pointed away has no pointer: here the pointer leaves the screen a second after the last touch
-    // (its press made by then: a held touch's as it came down, a tap's a read or two after it,
-    // engine/input/remote.cpp; the button pushed keeps its look through its push and the start of the
-    // scene's wipe, as under a remote's pointer resting on it), 3 s
-    // after a touch in the channel's own scenes on the bottom screen (engine::room::away(): the
-    // theater shows its movie's controls only while the pointer is there), and the next touch
-    // brings it back (A doesn't). The game's cursor takes a touch's pointer at once
-    // (runtime/patches/overlays.cpp). Scripted runs keep it on the screen.
-    static u64 s_used;
-    u64 now = host_time_us();
-    if (held & KEY_TOUCH)
-        s_used = now;
-    s_in.pointing = now - s_used < (engine::room::away() ? 3000000u : 1000000u) || input_script_active();
+    // No pointer: the game's remote points only where a finger is (engine/input/remote.cpp
+    // pointer_on), so nothing is highlighted once it lifts. Scripted runs have their own.
+    s_in.pointing = input_script_active();
     // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator); a scripted
     // P(x;y) moves the pointer once, and touching moves it on from there
     if (input_script_active())

@@ -117,6 +117,7 @@ public:
     ~Panel() override;
     void update();
     void draw();
+    void on_push_start(u32 button) override;
     void on_pushed(u32 button) override;
 
 private:
@@ -134,6 +135,7 @@ private:
     u32 scene_ = 0;   // Move_Btn_Scene, the buttons' locators
     std::vector<Entry> entries_;
     bool going_ = false;  // a button has sent the room on its way (its wipe closing)
+    u32 pushed_ = 0;      // ... that button (its look held)
     State state_ = State::WAITING;
     bool bar_hidden_ = false;  // the room's bar's way back seen transparent (its FadeIn bound)
     f32 waited_ = 0, faded_ = 0;
@@ -178,6 +180,8 @@ Panel::Panel(u32 scene) : cursor_(scene + 0x498) {
 Panel::~Panel() {
     screen::release();
     engine::system::set_push_listener(nullptr);
+    if (pushed_)
+        engine::system::hold_button_look(pushed_, false);
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
         lyt::button_delete(it->button);
     lyt::layout_delete(scene_);
@@ -236,7 +240,12 @@ void Panel::draw() {
     screen::to_top();
 }
 
-void Panel::on_pushed(u32 button) {
+// A push sends the room on its way as it starts: the wipe closes over the button's Push (the
+// room's own bar waited for the Push's end, 11 frames, before it asked). The button keeps its
+// pushed look from then on (engine/system/host_scene.h hold_button_look): no pointer stays on it
+// after the finger lifts (engine/input/remote.cpp), and the cursor's unfocus would fade it out
+// under the wipe.
+void Panel::on_push_start(u32 button) {
     if (going_)
         return;
     for (const Entry& e : entries_) {
@@ -244,11 +253,24 @@ void Panel::on_pushed(u32 button) {
             continue;
         if (e.action == Action::GO) {
             going_ = true;
+            pushed_ = button;
+            engine::system::hold_button_look(button, true);
             guest::log("room: to scene %u", e.to);
             g::controller_living_SceneTransit_Request(guest::load32(GA_controller_living_SceneTransit_sInstance), e.to);
         }
         return;
     }
+}
+
+// The Push has ended: the button's own end of a push has just put its layout back unfocused (its
+// Focus played backwards from the start: grey); posed focused again before the frame is drawn
+// (Push ends on the focused look)
+void Panel::on_pushed(u32 button) {
+    if (button != pushed_)
+        return;
+    const u32 w = lyt::button_layout(button);
+    if (u32 focus = lyt::find_anim(w, "Focus"))
+        lyt::pose(w, focus, lyt::last_frame(focus));
 }
 
 Panel* s_panel;

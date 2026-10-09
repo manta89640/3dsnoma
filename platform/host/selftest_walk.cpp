@@ -675,11 +675,14 @@ void selftest_input() {
 // until the next touch; a drag area not renewed forgotten; nothing from a touch the region changed
 // under. The game's cursor takes the touch's pointer at once (input_pointer_from_touch: touching,
 // or its tap's A to come; the hold-off it skips, runtime/patches/overlays.cpp, would lose a held
-// touch's press), a nudge's after it settles; input_pointer_away takes the pointer off until a
-// touch or a nudge; the stick as the D-pad gives only the directions asked for.
+// touch's press). No pointer but the touch's (the 3DS's: input_script_pointer(false) puts aside the
+// script selftest_input loaded): it stays for the read after the finger lifts, then goes; a new
+// region has none; input_pointer_away takes it off until a touch, which a nudge doesn't bring back;
+// the stick as the D-pad gives only the directions asked for.
 void selftest_kpad() {
     const u32 st = 0x81600000;  // (a KPADStatus in guest memory nothing else uses here)
     g::KPADInitEx(0, 0);
+    input_script_pointer(false);  // (the 3DS's pointer: the touch's alone, selftest_input's script aside)
     struct Read {
         u32 hold, trig;
         f32 x, y;
@@ -776,6 +779,7 @@ void selftest_kpad() {
     lift();
     const Read h7 = read(), h8 = read();
     check(h7.hold == 0 && h7.trig == 0 && h8.hold == 0, "a held touch let go: A let go, no tap after");
+    check(h7.valid && h7.x == h1.x && !h8.valid, "a touch let go: its pointer for the read after, then none");
     // the A button pressed while the touch holds A: not the touch's alone
     touch(160, 177), reads(2);
     in.buttons = WM_A, set();
@@ -853,7 +857,8 @@ void selftest_kpad() {
     reads(2);
     check(c1 && c2 && c3.trig == WM_A && !c4 && !c5, "the cursor taking the touch's pointer at once");
 
-    // input_pointer_away: off the screen until a touch or a nudge
+    // input_pointer_away: off the screen until a touch (a nudge brings no pointer: there is none but
+    // the touch's)
     input_pointer_away();
     const Read a1 = read();
     set();
@@ -864,7 +869,11 @@ void selftest_kpad() {
     touch(200, 100);
     const Read a4 = read();
     lift(), reads(2);
-    check(!a1.valid && !a2.valid && a3.valid && a4.valid, "the pointer away until a touch or a nudge");
+    check(!a1.valid && !a2.valid && !a3.valid && a4.valid, "the pointer away until a touch");
+    // a new region (another screen on the bottom one) has no pointer until a touch
+    input_set_touch_region(true, -304, 228, 608, 456);
+    const Read n1 = read();
+    check(!n1.valid && n1.hold == 0, "a new region: no pointer");
 
     // stick mode in a region (the island's): a touch is A held, the touch's (no jump); the stick as
     // the D-pad gives only the directions asked for
@@ -883,6 +892,7 @@ void selftest_kpad() {
     input_set_stick_mode(false);
     input_set_touch_region(false, 0, 0, 0, 0);
     check(k1.hold == WM_UP && k2.hold == WM_DOWN, "the stick as the D-pad: up and down only");
+    input_script_pointer(true);
 
     log("selftest input: KPAD reads, %d checks: %s%s", checks, failed.empty() ? "ok" : "MISMATCH: ", failed.c_str());
 }
