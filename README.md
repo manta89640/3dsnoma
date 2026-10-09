@@ -75,11 +75,13 @@ decompiled sources, assembly, extracted files) stays out of git.
   while the main thread runs the guest. On a real New 3DS the AX frames are also mixed on a core
   of their own (the system core; given up for mixing on the game's thread when the game waits for
   it longer than the mixing takes, and tried again 30 s later), and Wuhu Island's World makes its frame on the third core beside
-  the GPU's thread (`platform/3ds/main.cpp` has the layout; `NOMA_CORES` below). The bottom screen's
-  status area shows, once a second, the game's frames a second, then milliseconds a frame: the
+  the GPU's thread (`platform/3ds/main.cpp` has the layout; `NOMA_CORES` below). With `NOMA_DEBUG_CONSOLE=1`
+  the bottom screen, while no screen of the channel's uses it, shows the log under a status area
+  that shows, once a second, the game's frames a second, then milliseconds a frame: the
   game's CPU time (its thread, less its waits), its waits, the GPU's drawing time; below it the AX
   mixing's milliseconds a frame and its core (`c0`: the game's own; on a thread, `w`: the game's
-  waits for it) and the heap in use of its size in MB; the log gets the same every 10 s
+  waits for it) and the heap in use of its size in MB (without it the bottom screen is white then,
+  and only a fatal error is written there); the log gets the same every 10 s
   (`NOMA_STATUS_LOG`), as `status:` lines. A profiling build (`-DNOMA_PROFILE_CALLS=ON`) logs
   where the time goes every `NOMA_PROFILE=seconds`: per guest thread, and per function (self
   and total), with the runtime's own work as `(gx)`, `(ax)`, `(ios)`, `(devices)`, `(idle)`.
@@ -189,7 +191,8 @@ Useful environment variables:
 | `NOMA_CORES=single`, `=multi` | 3DS: where the work beside the game runs. Unset, on a real New 3DS the AX mixing has a thread on the system core (a `.3dsx`: on the third core) and Wuhu Island's World makes its frame on the third core (`NOMA_JOB_INLINE=1`: not that); in an emulator (Azahar, Citra: recognised) and on an Old 3DS both stay on the game's thread, as Azahar runs the cores one after another. `single`: on the game's thread anywhere; `multi`: on their threads on any New 3DS, an emulator's too (an Old 3DS has no third core for them), and on the host (to test those paths). The GPU's thread is the same in all |
 | `NOMA_AX_THREAD=0`, `=1`, `=2` | 3DS: the AX mixing on the game's thread, or on a thread of its own on core 1 (the system core) or 2, whatever `NOMA_CORES` says; with a thread the program doesn't give it up for mixing on the game's thread when the game waits for it longer than the mixing takes (unset, it does) (host: any value but 0 gives it a thread) |
 | `NOMA_LOAD_STATS=ms` | log every frame longer than `ms` with what it did (threads, reads by file, decompression, file system, allocations; profile builds: its top functions), each loading burst, and the frame-time distribution every 10 s (`NOMA_LOAD_STATS_READS=1`: every content read; `NOMA_LOAD_STATS_JOBS=1`: every I/O job of 5 ms or more) |
-| `NOMA_STATUS_LOG=s` | 3DS: the bottom screen's status numbers written to the log every `s` seconds (default 10; `0`: never), averaged over them: `status:` lines with frames a second, the CPU's and the waits' milliseconds a frame, the GPU's last frame, the AX mixing and its core, the heap |
+| `NOMA_DEBUG_CONSOLE=1` | 3DS: the log and the status area on the bottom screen while no screen of the channel's uses it (otherwise it is white, and only a fatal error is written there) |
+| `NOMA_STATUS_LOG=s` | 3DS: the status area's numbers written to the log every `s` seconds (default 10; `0`: never), averaged over them: `status:` lines with frames a second, the CPU's and the waits' milliseconds a frame, the GPU's last frame, the AX mixing and its core, the heap |
 | `NOMA_OLD3DS=1` | an Old 3DS's controls anywhere (no ZL, ZR or C-stick, also for host scripts) and, on a New 3DS, its layout and clock: the GPU's thread on the system core, nothing on the third core, 268 MHz without the L2 cache, CMPR textures as ETC1 (as near as a New 3DS comes to an Old one; not its memory) |
 | `NOMA_DUMP_3DS=1` | host, with `NOMA_DUMP_FRAMES`: each saved frame also as the 3DS's two screens, `frames/NNNNN_3ds.png` (400x480): the frame on the top screen as the 3DS maps it, and the bottom screen with the touch (a filled square) and the pointer (crosses, on both screens) |
 

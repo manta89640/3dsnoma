@@ -97,6 +97,11 @@ static const int STATUS_ROWS = 2;
 static bool s_status_on;
 // a native UI has the bottom screen (platform_bottom_claim): the console draws nothing there
 static std::atomic<bool> s_bottom_claimed;
+// NOMA_DEBUG_CONSOLE=1: the log and the status rows on the bottom screen while no scene has it.
+// Otherwise the bottom screen is white then (the channel's ground; noma.log has every line), and
+// only a fatal error is written there.
+static bool s_console;
+static void bottom_white();
 static void status_update(u64 now);
 
 static void log_flush_due(u64 now) {  // (with s_log_lock)
@@ -134,7 +139,7 @@ void log(const char* fmt, ...) {
         log_flush_due(now);
     }
     svcOutputDebugString(buf, (s32)strlen(buf));  // emulators show it in their log
-    if (!s_bottom_claimed.load(std::memory_order_relaxed))
+    if (s_console && !s_bottom_claimed.load(std::memory_order_relaxed))
         printf("%.79s\n", buf);
     LightLock_Unlock(&s_log_lock);
 }
@@ -429,6 +434,8 @@ static void suspend_hook(APT_HookType type, void*) {
 void hook_suspend() { aptHook(&s_suspend_cookie, suspend_hook, nullptr); }
 
 void platform_fatal(const char* msg) {
+    s_bottom_claimed.store(false, std::memory_order_relaxed);  // (the error over whatever is there)
+    s_console = true;
     printf("\x1b[31mfatal: %s\x1b[0m\n", msg);
     if (s_log)
         fflush(s_log);
@@ -955,7 +962,7 @@ static void status_update(u64 now) {
     if (!s_status_on || (s_t0 && now - s_t0 < SYSCLOCK_ARM11))
         return;
     const u32 frames = vi_game_frames(), idle = idle_time_us();
-    if (s_bottom_claimed.load(std::memory_order_relaxed)) {  // (the log still gets its lines)
+    if (!s_console || s_bottom_claimed.load(std::memory_order_relaxed)) {  // (the log still gets its lines)
         status_log(now, frames, idle, ax_load());
         return;
     }
@@ -1004,6 +1011,14 @@ static void status_update(u64 now) {
     GSPGPU_FlushDataCache(fb, (u32)w * h * 2);  // (the console draws with the CPU: RGB565)
 }
 
+// the bottom screen all white (the console's frame buffer, RGB565)
+static void bottom_white() {
+    u16 w = 0, h = 0;
+    u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    memset(fb, 0xFF, (size_t)w * h * 2);
+    GSPGPU_FlushDataCache(fb, (u32)w * h * 2);
+}
+
 // NOMA_SHOT_EVERY (gx_pica.cpp's save_shot, after the top screen's NNNNN.bmp): the bottom screen as
 // NNNNN_bottom.bmp, 320x240 (the console's frame buffer: RGB565, 240x320, column-major, rows bottom
 // up). A picture of it as it is: the console writes it from other threads meanwhile.
@@ -1047,7 +1062,9 @@ void platform_save_bottom_shot(u32 n) {
 void platform_bottom_claim(bool on) {
     LightLock_Lock(&s_log_lock);
     s_bottom_claimed.store(on, std::memory_order_relaxed);
-    if (!on) {
+    if (!on && !s_console) {
+        bottom_white();
+    } else if (!on) {
         PrintConsole* prev = consoleSelect(&s_status_con);
         consoleClear();
         consoleSelect(&s_log_con);
@@ -1151,6 +1168,10 @@ int main(int argc, char** argv) {
     consoleSetWindow(&guest::s_log_con, 1, guest::STATUS_ROWS + 1, 40, 30 - guest::STATUS_ROWS);
     consoleSelect(&guest::s_log_con);
     guest::s_status_on = true;
+    if (const char* e = getenv("NOMA_DEBUG_CONSOLE"))
+        guest::s_console = *e && strcmp(e, "0");
+    if (!guest::s_console)
+        guest::bottom_white();
     guest::s_tick0 = svcGetSystemTick();
     std::string data = guest::DATA_DIR;
     // the last run's log kept (a crash's, or the run before the app started itself again: erasing
@@ -1160,7 +1181,8 @@ int main(int argc, char** argv) {
     guest::s_log = fopen((data + "/noma.log").c_str(), "w");
     if (guest::s_log)
         setvbuf(guest::s_log, nullptr, _IOFBF, 16 << 10);
-    printf("Wii no Ma 3DS\n");
+    if (guest::s_console)
+        printf("Wii no Ma 3DS\n");
     guest::cores_init();
     std::vector<u8> dol = read_file(data + "/main.dol");
     if (dol.empty()) {
