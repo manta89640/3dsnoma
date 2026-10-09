@@ -132,7 +132,7 @@ struct Gx {
             coord = 0, w32(0x5E8, r32(0x5E8) & ~slw(1, stage));
         else
             w32(0x5E8, r32(0x5E8) | slw(1, stage));
-        const u32 chan = color == 0xFF ? 7 : guest::load32(GA_lbl_80833688 + color * 4);
+        const u32 chan = color == 0xFF ? 7 : guest::load32(GA_GXTevChannelToRas + color * 4);
         const u32 enable = map != 0xFF && !(map & 0x100);
         u32 v = r32(o);
         if (stage & 1)
@@ -414,22 +414,22 @@ u32 material_setup_gx(u32 m, u32 modulate, u32 alpha) {
                     gx.tev_order(1, 1, 1, 0xFF);
                     gx.tev_color_in(1, 8, 0, 0xE, 0xF);
                     gx.tev_alpha_in(1, 4, 0, 6, 7);
-                    gx.tev_kcolor_sel(1, guest::load32(GA_lbl_8085A4B8));
-                    gx.tev_kalpha_sel(1, guest::load32(GA_lbl_8085A4D8));
+                    gx.tev_kcolor_sel(1, guest::load32(GA_nw4r_lyt_Material_kColSels));
+                    gx.tev_kalpha_sel(1, guest::load32(GA_nw4r_lyt_Material_kAlpSels));
                     s = 2;
                 } else {
                     for (u32 i = 0; i < maps; i++, s++) {
                         gx.tev_order(s & 0xFF, i, i, 0xFF);
                         gx.tev_color_in(s & 0xFF, 0xF, 8, 0xE, i == 0 ? 0xF : 0);
                         gx.tev_alpha_in(s & 0xFF, 7, 4, 6, i == 0 ? 7 : 0);
-                        gx.tev_kcolor_sel(s & 0xFF, guest::load32(GA_lbl_8085A4B8 + i * 4));
-                        gx.tev_kalpha_sel(s & 0xFF, guest::load32(GA_lbl_8085A4D8 + i * 4));
+                        gx.tev_kcolor_sel(s & 0xFF, guest::load32(GA_nw4r_lyt_Material_kColSels + i * 4));
+                        gx.tev_kalpha_sel(s & 0xFF, guest::load32(GA_nw4r_lyt_Material_kAlpSels + i * 4));
                     }
                 }
                 // the TEV colors 0 and 1 (black, white) blend the result unless they're the defaults
                 bool plain = true;
                 for (u32 k = 0; k < 4; k++)
-                    plain = plain && (s16)guest::load16(m + 0x10 + k * 2) == (s16)guest::load16(GA_lbl_80888480 + k * 2);
+                    plain = plain && (s16)guest::load16(m + 0x10 + k * 2) == (s16)guest::load16(GA_nw4r_lyt_Material_DefaultBlackColor + k * 2);
                 for (u32 k = 0; plain && k < 4; k++)
                     plain = (s16)guest::load16(m + 0x18 + k * 2) == 0xFF;
                 if (!plain) {

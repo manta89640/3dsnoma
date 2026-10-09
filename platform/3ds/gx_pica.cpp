@@ -19,6 +19,9 @@
 // EFB copies to the frame buffer need nothing (the frame is already on screen); for a copy to
 // a texture the GPU finishes the frame so far, the render target is read back and converted
 // like the host renderer's EFB (scaled from 400x240), and the frame goes on.
+// A layout drawn natively (engine/lyt/draw.h) comes as one packet of quads, each run of them with
+// the GX state it would have been drawn with as register values: drawn through the same state
+// machine, caches and batches as the GX draws (PicaRenderer::lyt).
 #include <3ds.h>
 #include <citro3d.h>
 #include <malloc.h>
@@ -37,6 +40,7 @@
 #include "engine/g3d/native_draw.h"
 #include "engine/input/remote.h"
 #include "engine/gx/tev_combiner.h"
+#include "engine/lyt/draw.h"
 #include "runtime/hw/gx/raster.h"
 #include "runtime/hw/gx/regs.h"
 #include "runtime/hw/gx/texture.h"
@@ -256,9 +260,11 @@ u32 s_buf_base = 0x18000000;
 
 // ---- NOMA_GX_TIMERS=N (env.txt): the GPU thread's time in each part of the draw path, as
 // milliseconds per frame over N frames, with counts (svcGetSystemTick around every part costs
-// something itself, so only when asked); the profiler's scopes cover the same parts for free
+// something itself, so only when asked); the profiler's scopes cover the same parts for free.
+// LYT is the whole of the native layouts' packets (PicaRenderer::lyt), the parts of their state
+// (tev, textures, upload, bind, pixel, consts, flush, xform) counted in those sections as well.
 struct Timers {
-    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, N };
+    enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, LYT, N };
     u64 ticks[N] = {};
     u32 calls[N] = {};
     u64 frame_ticks[N] = {};  // the sections' ticks when the frame started (a slow frame is logged on its own)
@@ -270,6 +276,9 @@ struct Timers {
     GxDecodeCounts dec0 = {};
     GxTnlPalStats pal0 = {};
     u32 cache_made = 0, vary_draws = 0, slot_rewrites = 0, slot_vertices = 0;
+    // the native layouts: packets, their runs of quads, the quads drawn, the batches they went to
+    // the GPU in, quads left out (no room in the vertex pool)
+    u32 lyt_packets = 0, lyt_runs = 0, lyt_quads = 0, lyt_batches = 0, lyt_dropped = 0;
     int every = -2;
 } T;
 inline bool timers_on() {
@@ -290,7 +299,7 @@ struct Timed {
 };
 static const char* const k_timer_names[Timers::N] = {"plan", "consts", "vertices", "slots", "submit", "flush", "tev",
                                                      "textures", "upload", "bind", "pixel", "xform", "frame", "end", "clear",
-                                                     "readback", "copy"};
+                                                     "readback", "copy", "lyt"};
 
 // at a frame's end: the frame's wall time; every N frames the averages
 void timers_frame_end() {
@@ -320,7 +329,7 @@ void timers_frame_end() {
     if (T.frames < (u32)T.every)
         return;
     const double ms = 1000.0 / SYSCLOCK_ARM11 / T.frames;
-    char line[1024];
+    char line[1536];
     int n = snprintf(line, sizeof(line), "gx timers: %u frames, %.1f ms each:", T.frames, (double)T.wall * ms);
     u64 sum = 0;
     for (int k = 0; k < Timers::N; k++) {
@@ -337,14 +346,18 @@ void timers_frame_end() {
              (d.cp - T.dec0.cp) / T.frames, (d.dl - T.dec0.dl) / T.frames, T.consts_vectors / T.frames,
              T.pal_slots / T.frames, T.pieces / T.frames, T.tev_misses / T.frames,
              (gx_tnl_plan_misses() - T.plan_misses0) / T.frames);
-    snprintf(line + n, sizeof(line) - n, "; palette %u fills %u checks (%u stale) %u searches %u reused; %u list vertices made; "
-             "cached draws: %u with matrices per vertex, %u fixed with slots rewritten (%u vertices)",
-             (ps.fills - T.pal0.fills) / T.frames, (ps.checks - T.pal0.checks) / T.frames,
-             (ps.stale - T.pal0.stale) / T.frames, (ps.scans - T.pal0.scans) / T.frames,
-             (ps.reused - T.pal0.reused) / T.frames, T.cache_made / T.frames,
-             T.vary_draws / T.frames, T.slot_rewrites / T.frames, T.slot_vertices / T.frames);
+    n += snprintf(line + n, sizeof(line) - n, "; palette %u fills %u checks (%u stale) %u searches %u reused; %u list vertices made; "
+                  "cached draws: %u with matrices per vertex, %u fixed with slots rewritten (%u vertices)",
+                  (ps.fills - T.pal0.fills) / T.frames, (ps.checks - T.pal0.checks) / T.frames,
+                  (ps.stale - T.pal0.stale) / T.frames, (ps.scans - T.pal0.scans) / T.frames,
+                  (ps.reused - T.pal0.reused) / T.frames, T.cache_made / T.frames,
+                  T.vary_draws / T.frames, T.slot_rewrites / T.frames, T.slot_vertices / T.frames);
+    snprintf(line + n, sizeof(line) - n, "; layouts: %u packets, %u runs, %u quads in %u batches (%u quads in all left out for room)",
+             T.lyt_packets / T.frames, T.lyt_runs / T.frames, T.lyt_quads / T.frames, T.lyt_batches / T.frames,
+             T.lyt_dropped);
     T.pal0 = ps;
     T.cache_made = T.vary_draws = T.slot_rewrites = T.slot_vertices = 0;
+    T.lyt_packets = T.lyt_runs = T.lyt_quads = T.lyt_batches = T.lyt_dropped = 0;
     log("%s", line);
     memset(T.ticks, 0, sizeof(T.ticks));
     memset(T.calls, 0, sizeof(T.calls));
@@ -1154,13 +1167,11 @@ pica_tex::Fmt tex_fmt(GPU_TEXCOLOR f) {
     }
 }
 
-// the PICA texture for texture map `map`; scale: what to multiply its coordinates with
-C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
-    const u8* raw = nullptr;
-    const GxTexture* gt = gx_texture_raw(map, &raw);
+// the PICA texture for a GX texture (raw: its bytes in GX format, gx_texture_raw) sampled as the
+// SETMODE0 value `mode` says; scale: what to multiply its coordinates with
+C3D_Tex* texture_for(const GxTexture* gt, const u8* raw, u32 mode, float* sx, float* sy) {
     if (!gt || !gt->width)
         return nullptr;
-    u32 mode = g_gx.bp[bp_tex(BP_TX_SETMODE0, map)];
     u32 ws = bits(mode, 0, 2), wt = bits(mode, 2, 2);
     bool linear = bits(mode, 4, 1);
     TexEntry& e = P.textures[gt->id];
@@ -1229,6 +1240,13 @@ C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
     return &e.tex;
 }
 
+// ... for texture map `map` as the BP registers describe it
+C3D_Tex* texture_for(u32 map, float* sx, float* sy) {
+    const u8* raw = nullptr;
+    const GxTexture* gt = gx_texture_raw(map, &raw);
+    return texture_for(gt, raw, g_gx.bp[bp_tex(BP_TX_SETMODE0, map)], sx, sy);
+}
+
 // what a unit the combiners read samples when its texture couldn't be made (no memory, no image):
 // white, so the draw shows its other inputs, not the unit's previous texture or freed memory
 C3D_Tex s_white;
@@ -1240,6 +1258,17 @@ bool white_init() {
     C3D_TexSetFilter(&s_white, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&s_white, GPU_REPEAT, GPU_REPEAT);
     return true;
+}
+
+// a unit's texture `t` for map `map`, or white (scale 1) when it couldn't be made
+C3D_Tex* or_white(C3D_Tex* t, int map, float* sx, float* sy) {
+    if (t || !s_white.data)
+        return t;
+    static u32 s_logged;
+    if (s_logged++ < 4)
+        log("pica: texture map %d of a draw couldn't be made: white instead", map);
+    *sx = *sy = 1.0f;
+    return &s_white;
 }
 
 void collect_textures() {
@@ -1298,10 +1327,10 @@ void to_texenv(const tev::CombinerStage& s, C3D_TexEnv* e) {
     e->scaleRgb = s.scale_rgb, e->scaleAlpha = s.scale_a;
 }
 
-// The PICA texture combiners for the current TEV configuration: the stages (both forms), the
-// combiner buffer masks and the (map, coord) pair each texture unit samples.
-void translate_tev(tev::Combiners* comb, C3D_TexEnv env[6]) {
-    tev::tev_to_combiners(tev_regs_now(), *comb);
+// The PICA texture combiners for a TEV configuration: the stages (both forms), the combiner
+// buffer masks and the (map, coord) pair each texture unit samples.
+void translate_tev(const tev::TevRegs& regs, tev::Combiners* comb, C3D_TexEnv env[6]) {
+    tev::tev_to_combiners(regs, *comb);
     s_unsupported += comb->unsupported;
     for (int i = 0; i < 6; i++)
         to_texenv(comb->stage[i], &env[i]);
@@ -1337,6 +1366,24 @@ struct TevSetup {
 };
 TevSetup s_tev_setups[256];  // by a hash of the key
 
+// the setup kept for the key words [key, key + n), or made now from the TEV registers regs()
+// gives (gathered only then)
+template <typename Regs>
+const TevSetup& tev_find(const u32* key, u32 n, Regs regs) {
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < n; i++)
+        h = (h ^ key[i]) * 16777619u;
+    TevSetup& e = s_tev_setups[(h ^ h >> 16) & 255];
+    if (e.nkey == n && memcmp(e.key, key, n * 4) == 0)
+        return e;
+    T.tev_misses++;
+    translate_tev(regs(), &e.comb, e.env);
+    memcpy(e.key, key, n * 4);
+    e.nkey = n;
+    return e;
+}
+
+// the setup for the TEV registers as the command stream set them
 const TevSetup& tev_setup() {
     Timed timed(Timers::TEV);
     const u32* bp = g_gx.bp;
@@ -1351,17 +1398,65 @@ const TevSetup& tev_setup() {
     n += 16;
     memcpy(key + n, g_gx.tev_konst, sizeof(g_gx.tev_konst));
     n += 16;
-    u32 h = 2166136261u;
-    for (u32 i = 0; i < n; i++)
-        h = (h ^ key[i]) * 16777619u;
-    TevSetup& e = s_tev_setups[(h ^ h >> 16) & 255];
-    if (e.nkey == n && memcmp(e.key, key, n * 4) == 0)
-        return e;
-    T.tev_misses++;
-    translate_tev(&e.comb, e.env);
-    memcpy(e.key, key, n * 4);
-    e.nkey = n;
-    return e;
+    return tev_find(key, n, tev_regs_now);
+}
+
+// ... for TEV registers given as values (a native layout's run): the same key words in the same
+// order as the registers holding them would give, so that either path finds what the other made
+const TevSetup& tev_setup(const tev::TevRegs& r) {
+    Timed timed(Timers::TEV);
+    u32 key[sizeof(TevSetup::key) / 4];
+    u32 n = 0, num = r.n_stages < 1 ? 1 : r.n_stages > 16 ? 16 : r.n_stages;  // (as the translation takes it)
+    key[n++] = num;
+    for (u32 i = 0; i < num; i++)
+        key[n++] = r.color_env[i], key[n++] = r.alpha_env[i];
+    for (u32 i = 0; i < (num + 1) / 2; i++)
+        key[n++] = r.tref[i], key[n++] = r.ksel[i];
+    memcpy(key + n, r.reg, sizeof(r.reg));
+    n += 16;
+    memcpy(key + n, r.konst, sizeof(r.konst));
+    n += 16;
+    return tev_find(key, n, [&]() -> const tev::TevRegs& { return r; });
+}
+
+// the combiners `env` (comb's, as the units' textures need them) and the textures `tex` are what
+// the PICA has: nothing to bind (units the combiners don't read don't matter)
+bool combiners_bound(const tev::Combiners& comb, const C3D_TexEnv env[6], C3D_Tex* const tex[3]) {
+    bool same = P.env_valid && memcmp(P.env, env, sizeof(P.env)) == 0 && P.buf_rgb == comb.buf_rgb &&
+                P.buf_a == comb.buf_a;
+    for (int u = 0; u < 3 && same; u++)
+        same = comb.unit[u].map < 0 ||
+               (tex[u] == P.tex[u] && (!tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) == 0));
+    return same;
+}
+
+// ... bound: the draws so far go to the GPU first, then the stages, buffer masks and units that
+// changed
+void bind_combiners(const tev::Combiners& comb, const C3D_TexEnv env[6], C3D_Tex* const tex[3]) {
+    flush_batch();
+    NOMA_PROF_SCOPE("(gx bind)");
+    Timed timed(Timers::BIND);
+    P.setups++;
+    for (int i = 0; i < 6; i++)
+        if (!P.env_valid || memcmp(&P.env[i], &env[i], sizeof(C3D_TexEnv)) != 0) {
+            P.env[i] = env[i];
+            st_texenv(i, &P.env[i]);
+        }
+    if (!P.env_valid || P.buf_rgb != comb.buf_rgb || P.buf_a != comb.buf_a)
+        st_texenv_buf(comb.buf_rgb, comb.buf_a);
+    P.buf_rgb = comb.buf_rgb, P.buf_a = comb.buf_a;
+    bool bound = false;
+    for (int u = 0; u < 3; u++) {
+        if (comb.unit[u].map >= 0 && tex[u] &&
+            (!P.env_valid || tex[u] != P.tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) != 0))
+            st_tex(u, tex[u]), bound = true;
+        P.tex[u] = tex[u];
+        if (tex[u])
+            P.tex_was[u] = *tex[u];
+    }
+    if (bound)
+        st_tex_done();
+    P.env_valid = true;
 }
 // ---------------------------------------------------------------- pixel state
 GPU_TESTFUNC test_func(u32 f) {
@@ -1383,11 +1478,21 @@ GPU_BLENDFACTOR blend_factor(u32 f, bool src) {
     }
 }
 
-void pixel_state() {
-    Timed timed(Timers::PIXEL);
-    const u32* bp = g_gx.bp;
-    u32 zmode = bp[BP_ZMODE], cm = bp[BP_CMODE0];
-    u32 pixfmt = bits(bp[BP_ZCONTROL], 0, 3);
+// The pixel pipeline's state as the GX registers ZMODE, CMODE0, ZCONTROL and ALPHACOMPARE ask for
+// it, in the PICA's terms (pixel_setup; zeroed first, so that two compare with memcmp), and set
+// (pixel_state)
+struct PixelSetup {
+    u32 depth_func, mask;          // GPU_TESTFUNC (the test is always on: the PICA writes depth only
+                                   // with it), GPU_WRITEMASK
+    u32 logic;                     // a logic op (logic_op) instead of blending (eq, src, dst)
+    u32 eq, src, dst, logic_op;    // GPU_BLENDEQUATION, GPU_BLENDFACTOR (colour and alpha alike), GPU_LOGICOP
+    u32 alpha_test, alpha_func, alpha_ref;
+};
+
+PixelSetup pixel_setup(u32 zmode, u32 cm, u32 zcontrol, u32 ac) {
+    PixelSetup s;
+    memset(&s, 0, sizeof(s));
+    u32 pixfmt = bits(zcontrol, 0, 3);
     int mask = 0;
     if (cm & 0x08)
         mask |= GPU_WRITE_RED | GPU_WRITE_GREEN | GPU_WRITE_BLUE;  // GPU_WRITE_COLOR has alpha too
@@ -1396,15 +1501,14 @@ void pixel_state() {
     bool ztest = zmode & 1;
     if (ztest && (zmode & 0x10))
         mask |= GPU_WRITE_DEPTH;
-    st_depth(true, ztest ? test_func(bits(zmode, 1, 3)) : GPU_ALWAYS, (GPU_WRITEMASK)mask);
+    s.depth_func = ztest ? test_func(bits(zmode, 1, 3)) : GPU_ALWAYS;
+    s.mask = (u32)mask;
 
     if (cm & 1) {
         if (cm & 0x800)
-            st_blend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ONE);
-        else {
-            GPU_BLENDFACTOR s = blend_factor(bits(cm, 8, 3), true), d = blend_factor(bits(cm, 5, 3), false);
-            st_blend(GPU_BLEND_ADD, GPU_BLEND_ADD, s, d, s, d);
-        }
+            s.eq = GPU_BLEND_REVERSE_SUBTRACT, s.src = s.dst = GPU_ONE;
+        else
+            s.eq = GPU_BLEND_ADD, s.src = blend_factor(bits(cm, 8, 3), true), s.dst = blend_factor(bits(cm, 5, 3), false);
     } else if (cm & 2) {
         static const GPU_LOGICOP ops[16] = {GPU_LOGICOP_CLEAR, GPU_LOGICOP_AND, GPU_LOGICOP_AND_REVERSE,
                                            GPU_LOGICOP_COPY, GPU_LOGICOP_AND_INVERTED, GPU_LOGICOP_NOOP,
@@ -1412,27 +1516,39 @@ void pixel_state() {
                                            GPU_LOGICOP_EQUIV, GPU_LOGICOP_INVERT, GPU_LOGICOP_OR_REVERSE,
                                            GPU_LOGICOP_COPY_INVERTED, GPU_LOGICOP_OR_INVERTED,
                                            GPU_LOGICOP_NAND, GPU_LOGICOP_SET};
-        st_logic_op(ops[bits(cm, 12, 4)]);
+        s.logic = 1, s.logic_op = ops[bits(cm, 12, 4)];
     } else {
-        st_blend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        s.eq = GPU_BLEND_ADD, s.src = GPU_ONE, s.dst = GPU_ZERO;
     }
 
     // alpha test: the PICA has one comparison; keep the one that isn't "always"
-    u32 ac = bp[BP_ALPHACOMPARE];
     u32 c0 = bits(ac, 16, 3), c1 = bits(ac, 19, 3), op = bits(ac, 22, 2);
     u32 r0 = bits(ac, 0, 8), r1 = bits(ac, 8, 8);
+    s.alpha_test = 1;
     if (c0 == 7 && c1 == 7)
-        st_alpha_test(false, GPU_ALWAYS, 0);
+        s.alpha_test = 0, s.alpha_func = GPU_ALWAYS, s.alpha_ref = 0;
     else if (op == 0 && c1 == 7)
-        st_alpha_test(true, test_func(c0), r0);
+        s.alpha_func = test_func(c0), s.alpha_ref = r0;
     else if (op == 0 && c0 == 7)
-        st_alpha_test(true, test_func(c1), r1);
+        s.alpha_func = test_func(c1), s.alpha_ref = r1;
     else if (op == 1 && c1 == 0)
-        st_alpha_test(true, test_func(c0), r0);
+        s.alpha_func = test_func(c0), s.alpha_ref = r0;
     else if (op == 1 && c0 == 0)
-        st_alpha_test(true, test_func(c1), r1);
+        s.alpha_func = test_func(c1), s.alpha_ref = r1;
     else
-        st_alpha_test(true, test_func(c0), r0);
+        s.alpha_func = test_func(c0), s.alpha_ref = r0;
+    return s;
+}
+
+void pixel_state(const PixelSetup& s) {
+    Timed timed(Timers::PIXEL);
+    st_depth(true, (GPU_TESTFUNC)s.depth_func, (GPU_WRITEMASK)s.mask);
+    if (s.logic)
+        st_logic_op((GPU_LOGICOP)s.logic_op);
+    else
+        st_blend((GPU_BLENDEQUATION)s.eq, (GPU_BLENDEQUATION)s.eq, (GPU_BLENDFACTOR)s.src, (GPU_BLENDFACTOR)s.dst,
+                 (GPU_BLENDFACTOR)s.src, (GPU_BLENDFACTOR)s.dst);
+    st_alpha_test(s.alpha_test != 0, (GPU_TESTFUNC)s.alpha_func, (int)s.alpha_ref);
 }
 
 // ---------------------------------------------------------------- geometry
@@ -1734,51 +1850,21 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
                 NOMA_PROF_SCOPE("(gx textures)");
                 Timed timed(Timers::TEXTURES);
                 for (int u = 0; u < 3; u++) {
-                    if (e.comb.unit[u].map < 0)
+                    const int map = e.comb.unit[u].map;
+                    if (map < 0)
                         continue;
-                    tex[u] = texture_for(e.comb.unit[u].map, &su.sx[u], &su.sy[u]);
-                    if (!tex[u] && s_white.data) {
-                        tex[u] = &s_white, su.sx[u] = su.sy[u] = 1.0f;
-                        static u32 s_logged;
-                        if (s_logged++ < 4)
-                            log("pica: texture map %d of a draw couldn't be made: white instead", e.comb.unit[u].map);
-                    }
+                    tex[u] = or_white(texture_for((u32)map, &su.sx[u], &su.sy[u]), map, &su.sx[u], &su.sy[u]);
                     su.texgen[u] = (s8)e.comb.unit[u].coord;
                 }
             }
             C3D_TexEnv env[6];
             combiners_for(e.comb, e.env, tex, env);
-            bool same = P.env_valid && memcmp(P.env, env, sizeof(P.env)) == 0 && P.buf_rgb == e.comb.buf_rgb &&
-                        P.buf_a == e.comb.buf_a;
-            for (int u = 0; u < 3 && same; u++)  // (units the combiners don't read don't matter)
+            bool same = combiners_bound(e.comb, env, tex);
+            for (int u = 0; u < 3 && same; u++)  // (and the texture coordinates the constants were planned for)
                 same = e.comb.unit[u].map < 0 ||
-                       (tex[u] == P.tex[u] && (!tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) == 0) &&
-                        su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u]);
+                       (su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u]);
             if (!same) {
-                flush_batch();
-                NOMA_PROF_SCOPE("(gx bind)");
-                Timed timed(Timers::BIND);
-                P.setups++;
-                for (int i = 0; i < 6; i++)
-                    if (!P.env_valid || memcmp(&P.env[i], &env[i], sizeof(C3D_TexEnv)) != 0) {
-                        P.env[i] = env[i];
-                        st_texenv(i, &P.env[i]);
-                    }
-                if (!P.env_valid || P.buf_rgb != e.comb.buf_rgb || P.buf_a != e.comb.buf_a)
-                    st_texenv_buf(e.comb.buf_rgb, e.comb.buf_a);
-                P.buf_rgb = e.comb.buf_rgb, P.buf_a = e.comb.buf_a;
-                bool bound = false;
-                for (int u = 0; u < 3; u++) {
-                    if (e.comb.unit[u].map >= 0 && tex[u] &&
-                        (!P.env_valid || tex[u] != P.tex[u] || memcmp(tex[u], &P.tex_was[u], sizeof(C3D_Tex)) != 0))
-                        st_tex(u, tex[u]), bound = true;
-                    P.tex[u] = tex[u];
-                    if (tex[u])
-                        P.tex_was[u] = *tex[u];
-                }
-                if (bound)
-                    st_tex_done();
-                P.env_valid = true;
+                bind_combiners(e.comb, env, tex);
                 bool same_setup = true;
                 for (int u = 0; u < 3; u++)
                     same_setup &= su.texgen[u] == P.setup.texgen[u] && su.sx[u] == P.setup.sx[u] && su.sy[u] == P.setup.sy[u];
@@ -1790,7 +1876,8 @@ void PicaRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
         }
         if (d & GX_BP_PIXEL) {
             flush_batch();
-            pixel_state();
+            const u32* bp = g_gx.bp;
+            pixel_state(pixel_setup(bp[BP_ZMODE], bp[BP_CMODE0], bp[BP_ZCONTROL], bp[BP_ALPHACOMPARE]));
         }
         if (d & GX_BP_SCISSOR) {
             flush_batch();
@@ -2492,6 +2579,227 @@ void pica_free_after_frame(void* linear) {
     LightLock_Lock(&s_free_lock);
     s_free_later.push_back(linear);
     LightLock_Unlock(&s_free_lock);
+}
+
+// ---------------------------------------------------------------- layouts drawn natively
+// A layout's packet (engine/lyt/draw.h) lands where its command is in the stream and is drawn by
+// the GX path's own machinery: the shader gx.v.pica, the kept TEV translations, the texture cache,
+// the setters and the batches. Its vertices are in view space with their final colours and
+// texture coordinates: the shader takes them through an identity matrix (palette slots 0-2) and
+// the projection of the GX state at the command, as clear_rect takes its corners, and its texture
+// units read the coordinates as they are, times their texture's scale. A run's combiners,
+// textures and pixel state are worked out from its register values as a GX draw's are from the
+// registers, and a run whose PICA state comes out as the last one's goes on in its batch. The GX
+// draws after the packet work their state out again in full, and find what it left bound where
+// it is what they need.
+namespace {
+
+// what the runs of a packet are drawn with, as the PICA has it now
+struct LytNow {
+    GxTnlConsts consts;      // the shader's constants: the projection and the vertex colour (the
+                             // whole packet's), the texture units' scales (the run's)
+    PixelSetup pixel;
+    bool pixel_set = false;  // pixel: set by this packet (before its first run the PICA's is unknown here)
+    s8 coord[3];             // per texture unit: the vertices' texture coordinate it takes (-1: none)
+};
+
+// the shader's projection for vertices in view space: the GX projection at this point of the
+// stream (XF 0x1020-0x1026, as tnl.cpp's plans read it), then set_xform's mapping into the PICA's
+// clip space
+void view_projection(f32 out[4][4]) {
+    const u32* xf = g_gx.xf;
+    f32 pr[6];
+    for (int i = 0; i < 6; i++)
+        pr[i] = xf_f32(XF_PROJECTION + i);
+    f32 m[4][4] = {};
+    if (xf[XF_PROJECTION + 6]) {  // orthographic
+        m[0][0] = pr[0], m[0][3] = pr[1];
+        m[1][1] = pr[2], m[1][3] = pr[3];
+        m[2][2] = pr[4], m[2][3] = pr[5];
+        m[3][3] = 1.0f;
+    } else {
+        m[0][0] = pr[0], m[0][2] = pr[1];
+        m[1][1] = pr[2], m[1][2] = pr[3];
+        m[2][2] = pr[4], m[2][3] = pr[5];
+        m[3][2] = -1.0f;
+    }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            out[i][j] = P.clip[i][0] * m[0][j] + P.clip[i][1] * m[1][j] + P.clip[i][2] * m[2][j] + P.clip[i][3] * m[3][j];
+}
+
+// a run's texture map as GXLoadTexObj would have loaded it: the GX path's texture for the same
+// register values
+C3D_Tex* lyt_texture(const engine::lyt::LytTex& t, float* sx, float* sy) {
+    const u8* raw = nullptr;
+    const GxTexture* gt = gx_texture_raw_regs(t.image0, t.image1, t.image2, t.image3, t.tlut, &raw);
+    return texture_for(gt, raw, t.mode0, sx, sy);
+}
+
+// A run's state onto the PICA: the combiners and the textures they sample, the units' texture
+// coordinates and scales (the constants), the pixel pipeline. Each part that differs from what
+// the PICA has ends the batch first, as a GX draw's do.
+void lyt_state(const engine::lyt::LytState& s, LytNow& now) {
+    const TevSetup& e = tev_setup(s.tev);
+    const u32 maps = std::min(s.n_maps, engine::lyt::LYT_MAX_MAPS);
+    C3D_Tex* tex[3] = {};
+    f32 sx[3] = {1, 1, 1}, sy[3] = {1, 1, 1};
+    {
+        NOMA_PROF_SCOPE("(gx textures)");
+        Timed timed(Timers::TEXTURES);
+        // the palettes first, every map's, as the decoder would have loaded them before the draw
+        for (u32 m = 0; m < maps; m++)
+            if (s.tex[m].tlut_load[1])
+                gx_load_tlut(s.tex[m].tlut_load[0], s.tex[m].tlut_load[1]);
+        for (int u = 0; u < 3; u++) {
+            const int map = e.comb.unit[u].map;
+            if (map < 0)
+                continue;
+            // (a map the run loaded no texture into samples white)
+            tex[u] = or_white((u32)map < maps ? lyt_texture(s.tex[map], &sx[u], &sy[u]) : nullptr, map, &sx[u],
+                              &sy[u]);
+        }
+    }
+    C3D_TexEnv env[6];
+    combiners_for(e.comb, e.env, tex, env);
+    if (!combiners_bound(e.comb, env, tex))
+        bind_combiners(e.comb, env, tex);
+
+    // Unit u samples at the texture coordinate its stage names, times its texture's scale; a unit
+    // the combiners don't read, or one whose coordinate the vertices don't carry, as a GX draw has
+    // it: at 0 (units 1 and 2 not computed by the shader).
+    GxTnlConsts& c = now.consts;
+    const u32 coords = std::min(s.n_texgens, engine::lyt::LYT_MAX_COORDS);
+    c.bools = 0;
+    for (int u = 0; u < 3; u++) {
+        const int k = e.comb.unit[u].coord;
+        const bool on = e.comb.unit[u].map >= 0 && k >= 0 && (u32)k < coords;
+        f32* scale = &c.tcscale[u >> 1][(u & 1) * 2];
+        scale[0] = on ? sx[u] : 0.0f, scale[1] = on ? sy[u] : 0.0f;
+        now.coord[u] = on ? (s8)k : -1;
+        if (on && u > 0)
+            c.bools |= u == 1 ? TNL_TG1 : TNL_TG2;
+    }
+    if (!P.consts_valid || memcmp(&c, &P.consts, sizeof(c)) != 0) {
+        flush_batch();
+        set_consts(c);
+    }
+
+    // (ZCONTROL's pixel format is the stream's: a layout doesn't set it)
+    const PixelSetup px = pixel_setup(s.zmode, s.cmode0, g_gx.bp[BP_ZCONTROL], s.alpha_compare);
+    if (!now.pixel_set || memcmp(&px, &now.pixel, sizeof(px)) != 0) {
+        flush_batch();
+        pixel_state(px);
+        now.pixel = px;
+        now.pixel_set = true;
+    }
+}
+
+}  // namespace
+
+void PicaRenderer::lyt(const engine::lyt::LytPacket& p) {
+    if (!P.ready || !p.n_runs)
+        return;
+    begin_frame();
+    Timed timed(Timers::LYT);
+    // (NOMA_PICA_STEP: each run goes to the GPU alone, as each GX draw does; the GX draws before the
+    // packet first)
+    auto step = [] {
+        if (stepping() && P.batch_count) {
+            flush_batch();
+            step_piece(STEP_DRAW);
+        }
+    };
+    step();
+    flush_batch();
+    const u32 batches0 = P.batches;
+    T.lyt_packets++;
+
+    // The GX state at the command: the viewport, the scissor and the screen (set_xform) and the
+    // projection. The vertex colour is the rasterized colour as it is; the palette holds an identity
+    // matrix in slots 0-2 for every vertex (the GX draws after the packet fill it again as they
+    // need: nothing of it is taken as theirs). No culling: GX's cull mode 0, as P.cull keeps it.
+    set_xform();
+    LytNow now;
+    memset(&now.consts, 0, sizeof(now.consts));
+    view_projection(now.consts.proj);
+    for (int i = 0; i < 4; i++)
+        now.consts.selmat[i] = 1.0f;
+    P.pal = GxTnlPalette();
+    for (int i = 0; i < 3; i++)
+        P.pal.rows[i][i] = 1.0f;
+    P.pal.dirty = 7;
+    upload_palette();
+    if (P.cull != 0) {
+        st_cull(GPU_CULL_NONE);
+        P.cull = 0;
+    }
+
+    const engine::lyt::LytState* states = p.states();
+    const engine::lyt::LytVertex* vertices = p.vertices();
+    u32 state = ~0u;
+    for (const engine::lyt::LytRun *r = p.runs(), *end = r + p.n_runs; r < end; r++) {
+        if (r->state >= p.n_states || r->first > p.n_vertices || r->count > p.n_vertices - r->first)
+            continue;
+        // the quads the immediate vertices and the indices have room for (a GX draw that doesn't
+        // fit isn't drawn either)
+        u32 quads = r->count / 4;
+        const u32 room = std::min((IMM_VERTICES - P.vused) / 4, (IBUF_INDICES - P.iused) / 6);
+        if (quads > room) {
+            T.lyt_dropped += quads - room;
+            if (P.warned++ < 4)
+                log("pica: vertex buffer full: %u of a layout's quads left out", quads - room);
+            quads = room;
+        }
+        if (!quads)
+            continue;
+        step();
+        if (r->state != state) {
+            NOMA_PROF_SCOPE("(lyt pica state)");
+            lyt_state(states[r->state], now);
+            state = r->state;
+        }
+        NOMA_PROF_SCOPE("(lyt pica quads)");
+        T.lyt_runs++, T.lyt_quads += quads;
+        // the vertices as the shader takes them (slots 0: the identity), each quad's corners (top
+        // left, top right, bottom right, bottom left) as two triangles
+        const engine::lyt::LytVertex* v = vertices + r->first;
+        const u32 nv = 4 * quads;
+        PVertex* o = P.vbuf + P.vused;
+        for (u32 i = 0; i < nv; i++, v++, o++) {
+            o->pos[0] = v->pos[0], o->pos[1] = v->pos[1], o->pos[2] = v->pos[2];
+            o->nrm[0] = o->nrm[1] = o->nrm[2] = 0.0f;
+            memcpy(o->color, v->color, 4);
+            for (int u = 0; u < 3; u++) {
+                const int k = now.coord[u];
+                o->tc[u][0] = k >= 0 ? v->tc[k][0] : 0.0f;
+                o->tc[u][1] = k >= 0 ? v->tc[k][1] : 0.0f;
+                o->tc[u][2] = k >= 0 ? 1.0f : 0.0f;
+            }
+        }
+        memset(P.slots + P.vused, 0, nv * sizeof(GxTnlSlots));
+        slots_written(P.vused, nv);
+        u16* idx = P.ibuf + P.iused;
+        for (u32 q = 0, b = P.vused; q < quads; q++, b += 4, idx += 6) {
+            idx[0] = (u16)b, idx[1] = (u16)(b + 1), idx[2] = (u16)(b + 2);
+            idx[3] = (u16)b, idx[4] = (u16)(b + 2), idx[5] = (u16)(b + 3);
+        }
+        if (!P.batch_count)
+            P.batch_first = P.iused;
+        P.batch_count += 6 * quads;
+        P.iused += 6 * quads;
+        P.vused += nv;
+    }
+    // the last batch now: the palette's slots are the GX draws' again
+    flush_batch();
+    T.lyt_batches += P.batches - batches0;
+
+    // The GX draws after the packet work their state out again in full (all_dirty) and their
+    // constants from their plans (consts_plan); what the packet left bound, set and uploaded
+    // (P.env, P.tex, P.cull, P.consts, D) is what the PICA has, so what they find the same isn't
+    // sent again. P.setup stays theirs.
+    P.all_dirty = true;
+    P.consts_plan = 0;
 }
 
 }  // namespace guest

@@ -27,6 +27,12 @@ const GxTexture* gx_texture_pixels(u32 map);
 // decoded to RGBA8; *src gets its bytes in GX format (valid until the next call), gx_tmem() has the
 // palettes (TMEM_MASK: a 2-byte entry's offset)
 const GxTexture* gx_texture_raw(u32 map, const u8** src);
+// gx_texture and gx_texture_raw from a map's register values themselves (SETIMAGE0-3 and SETTLUT,
+// 24-bit, as GXLoadTexObj would have sent them), for a draw whose textures never went through the
+// registers (a layout drawn natively: engine/lyt/draw.h): the same cache entries and versions as
+// the registers holding those values would give.
+const GxTexture* gx_texture_regs(u32 image0, u32 image1, u32 image2, u32 image3, u32 tlut);
+const GxTexture* gx_texture_raw_regs(u32 image0, u32 image1, u32 image2, u32 image3, u32 tlut, const u8** src);
 const u8* gx_tmem();
 const u32 GX_TMEM_MASK = (1u << 20) - 2;
 // the texture cache forgets textures not used for a while; called once per frame

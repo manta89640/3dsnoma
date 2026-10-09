@@ -27,6 +27,7 @@
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/soft_backend.h"
 #include "engine/input/remote.h"
+#include "engine/lyt/draw.h"
 #include "runtime/runtime.h"
 
 bool write_png(const std::string& path, const u32* rgba, u32 w, u32 h);
@@ -333,6 +334,7 @@ struct HostRenderer : SoftRenderer {
     bool drawing = true;
     bool texture_copies = false;  // seen one: draw every frame
     void draw(u32 prim, u32 vat, u32 count, const u8* data) override {
+        engine::lyt::check_gx_draw(prim, vat, count, data);
         engine::g3d::live::check_gx_draw(prim, vat, count, data);
         if (drawing)
             SoftRenderer::draw(prim, vat, count, data);
@@ -341,6 +343,13 @@ struct HostRenderer : SoftRenderer {
     void native(u32 id) override {
         if (!engine::g3d::live::check_marker(id))
             engine::g3d::native_draw_execute(id, drawing);
+    }
+    // a layout drawn natively: NOMA_CHECK_LYT_DRAW=pixels sees it first; in a frame not drawn
+    // nothing more (the decoder frees its space either way)
+    void lyt(const engine::lyt::LytPacket& p) override {
+        engine::lyt::check_packet(p);
+        if (drawing)
+            SoftRenderer::lyt(p);
     }
     void efb_copy(u32 value) override {
         if (!(value & 0x4000) && !texture_copies) {  // (bit 14: a copy to the frame buffer)
@@ -427,6 +436,7 @@ void platform_present(u32 xfb) {
     static u32 n;
     n++;
     s_renderer.drawing = n + 4 >= from && (all || s_renderer.texture_copies || (n + 4) % (u32)every < 5);
+    engine::lyt::check_host_drawing(s_renderer.drawing);
     if (every <= 0 || n < from || n % (u32)every || !xfb)
         return;
     const XfbCopy* r = gx_xfb_region(xfb);

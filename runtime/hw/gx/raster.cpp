@@ -20,6 +20,7 @@
 #include "texture.h"
 #include "vertex.h"
 #include "engine/g3d/native_draw.h"
+#include "engine/lyt/draw.h"
 
 namespace guest {
 
@@ -1128,6 +1129,132 @@ void SoftRenderer::draw(u32 prim, u32 vat, u32 count, const u8* data) {
 
 void SoftRenderer::native(u32 id) { engine::g3d::native_draw_execute(id); }
 
+// A layout drawn natively: what the decompiled draw would have told the GPU for each run of quads,
+// given to the same pipeline as a GX draw. The run's state goes into the registers load_state reads:
+// GENMODE's texgen, channel and stage counts (no culling, no indirect stages, its other bits as the
+// stream left them), the TEV stages, TREF, KSEL with the swap tables, the stages' indirect commands
+// (off), the texture maps it names, alpha compare, depth and blend modes, the TEV colour registers
+// and konst colours; a palette goes into TMEM first, as GXLoadTlut's commands would have put it there.
+// The vertices become what gx_transform would have made of them: the projection the stream set
+// applied to the view-space positions (its expressions, so that the host's floats come out the
+// same), colour channel 0 the vertex's colour and channel 1 nothing (past the channel count, as
+// GXSetNumChans sets it in XF too), texgen k (s, t, 1) and the ones past the count (0, 0, 1); the
+// quads split into triangles as draw() splits GX_QUADS. The viewport, the scissor, the screen (the
+// bottom screen's mapping), the pixel format, CMODE1 and the TEV's PREV are the stream's, as for a
+// GX draw there. Every register written is put back afterwards: what follows sees the GX state as
+// the stream left it (the palettes stay in TMEM, as GXLoadTlut's would have).
+void SoftRenderer::lyt(const engine::lyt::LytPacket& p) {
+    NOMA_PROF_SCOPE("(gx lyt raster)");
+    using engine::lyt::LYT_MAX_COORDS;
+    using engine::lyt::LYT_MAX_MAPS;
+    u32 saved_bp[256];
+    s32 saved_reg[4][4], saved_konst[4][4];
+    memcpy(saved_bp, g_gx.bp, sizeof(saved_bp));
+    memcpy(saved_reg, g_gx.tev_reg, sizeof(saved_reg));
+    memcpy(saved_konst, g_gx.tev_konst, sizeof(saved_konst));
+    f32 proj[6];
+    for (int i = 0; i < 6; i++)
+        proj[i] = xf_f32(XF_PROJECTION + i);
+    const bool ortho = g_gx.xf[XF_PROJECTION + 6] != 0;
+    // GENMODE: texgens 0-3, colour channels 4-6, TEV stages less one 10-13, cull 14-15, indirect stages 16-18
+    const u32 gen_counts = 0xF | 0x70 | 0x3C00 | 0xC000 | 0x70000;
+    const engine::lyt::LytState* states = p.states();
+    const engine::lyt::LytRun* runs = p.runs();
+    const engine::lyt::LytVertex* vertices = p.vertices();
+    static std::vector<GxOutVertex> out;
+    for (u32 r = 0; r < p.n_runs; r++) {
+        const engine::lyt::LytRun& run = runs[r];
+        const engine::lyt::LytState& s = states[run.state];
+        const u32 n_maps = std::min(s.n_maps, LYT_MAX_MAPS);
+        for (u32 m = 0; m < n_maps; m++)
+            if (s.tex[m].tlut_load[1])
+                gx_load_tlut(s.tex[m].tlut_load[0], s.tex[m].tlut_load[1]);
+        u32* bp = g_gx.bp;
+        const u32 n_stages = std::min<u32>(std::max<u32>(s.tev.n_stages, 1), 16);
+        bp[BP_GENMODE] = (bp[BP_GENMODE] & ~gen_counts) | (s.n_texgens & 0xF) | (s.n_chans & 7) << 4 | (n_stages - 1) << 10;
+        for (u32 i = 0; i < 16; i++) {
+            bp[BP_TEV_COLOR_ENV + 2 * i] = s.tev.color_env[i];
+            bp[BP_TEV_COLOR_ENV + 2 * i + 1] = s.tev.alpha_env[i];
+        }
+        for (u32 i = 0; i < 8; i++) {
+            bp[BP_TREF + i] = s.tev.tref[i];
+            bp[BP_TEV_KSEL + i] = s.tev.ksel[i];
+        }
+        for (u32 i = 0; i < n_stages; i++)
+            bp[BP_IND_CMD + i] = 0;
+        for (u32 m = 0; m < n_maps; m++) {
+            const engine::lyt::LytTex& t = s.tex[m];
+            bp[bp_tex(BP_TX_SETMODE0, m)] = t.mode0;
+            bp[bp_tex(BP_TX_SETMODE1, m)] = t.mode1;
+            bp[bp_tex(BP_TX_SETIMAGE0, m)] = t.image0;
+            bp[bp_tex(BP_TX_SETIMAGE1, m)] = t.image1;
+            bp[bp_tex(BP_TX_SETIMAGE2, m)] = t.image2;
+            bp[bp_tex(BP_TX_SETIMAGE3, m)] = t.image3;
+            bp[bp_tex(BP_TX_SETTLUT, m)] = t.tlut;
+        }
+        bp[BP_ALPHACOMPARE] = s.alpha_compare;
+        bp[BP_ZMODE] = s.zmode;
+        bp[BP_CMODE0] = s.cmode0;
+        memcpy(g_gx.tev_reg[1], s.tev.reg[1], 3 * sizeof(g_gx.tev_reg[0]));
+        memcpy(g_gx.tev_konst, s.tev.konst, sizeof(g_gx.tev_konst));
+        load_state();
+
+        out.resize(run.count);
+        const u32 n_coords = std::min<u32>(s.n_texgens, LYT_MAX_COORDS);
+        for (u32 k = 0; k < run.count; k++) {
+            const engine::lyt::LytVertex& v = vertices[run.first + k];
+            GxOutVertex& o = out[k];
+            // (as gx_transform, epos being the view-space position)
+            const f32* epos = v.pos;
+            if (ortho) {
+                o.clip[0] = proj[0] * epos[0] + proj[1];
+                o.clip[1] = proj[2] * epos[1] + proj[3];
+                o.clip[2] = proj[4] * epos[2] + proj[5];
+                o.clip[3] = 1.0f;
+            } else {
+                o.clip[0] = proj[0] * epos[0] + proj[1] * epos[2];
+                o.clip[1] = proj[2] * epos[1] + proj[3] * epos[2];
+                o.clip[2] = proj[4] * epos[2] + proj[5];
+                o.clip[3] = -epos[2];
+            }
+            for (int i = 0; i < 4; i++) {
+                o.color[0][i] = s.n_chans ? (f32)v.color[i] : 0.0f;
+                o.color[1][i] = 0.0f;
+            }
+            for (u32 t = 0; t < 8; t++) {
+                if (t < n_coords)
+                    o.tex[t][0] = v.tc[t][0], o.tex[t][1] = v.tc[t][1];
+                else
+                    o.tex[t][0] = o.tex[t][1] = 0;
+                o.tex[t][2] = 1.0f;
+            }
+        }
+        if (debug_draws_now(out.data(), run.count)) {
+            f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            for (u32 k = 0; k < run.count; k++) {
+                RV rv;
+                to_screen(out[k], rv);
+                x0 = std::min(x0, rv.x), x1 = std::max(x1, rv.x), y0 = std::min(y0, rv.y), y1 = std::max(y1, rv.y);
+            }
+            const engine::lyt::LytVertex& v0 = vertices[run.first];
+            log("lyt x%u (packet %u, layout %08X, run %u): screen (%.0f,%.0f)-(%.0f,%.0f) scissor (%d,%d)-(%d,%d) "
+                "stages %u tex %u z %03X blend %04X tev %06X/%06X tex0 %ux%u fmt %u c0 %02X%02X%02X%02X",
+                run.count, p.serial, p.wrapper, r, x0, y0, x1, y1, S.sc_l, S.sc_t, S.sc_r, S.sc_b, S.num_stages,
+                S.num_tex, S.zmode, S.cmode0, bp[BP_TEV_COLOR_ENV], bp[BP_TEV_COLOR_ENV + 1],
+                bits(bp[BP_TX_SETIMAGE0], 0, 10) + 1, bits(bp[BP_TX_SETIMAGE0], 10, 10) + 1,
+                bits(bp[BP_TX_SETIMAGE0], 20, 4), v0.color[0], v0.color[1], v0.color[2], v0.color[3]);
+        }
+        // (the quads split as draw() splits GX_QUADS)
+        for (u32 i = 0; i + 3 < run.count; i += 4) {
+            triangle(out[i], out[i + 1], out[i + 2]);
+            triangle(out[i], out[i + 2], out[i + 3]);
+        }
+    }
+    memcpy(g_gx.bp, saved_bp, sizeof(saved_bp));
+    memcpy(g_gx.tev_reg, saved_reg, sizeof(saved_reg));
+    memcpy(g_gx.tev_konst, saved_konst, sizeof(saved_konst));
+}
+
 // The bottom screen's buffers (see State::map), swapped in while it is drawn on.
 namespace {
 std::vector<u32> s_bottom_color(EFB_W * EFB_H, 0xFFFFFFFFu), s_bottom_depth(EFB_W * EFB_H, 0xFFFFFF);
@@ -1179,6 +1306,8 @@ bool gx_host_bottom_screen(u32* out) {
     }
     return true;
 }
+
+bool gx_host_on_bottom() { return s_on_bottom; }
 
 HostEfb gx_host_efb() {
     const u32* bp = g_gx.bp;
@@ -1261,6 +1390,10 @@ void SoftRenderer::efb_copy(u32 v) {
         copy_to_xfb(sx, sy, w, h, dst, stride);
     } else {
         EfbCopy c = gx_efb_copy_params(v);
+        static int s_bottom_copies;
+        if (s_on_bottom && s_bottom_copies++ < 8)
+            log("gx: EFB copy to a texture while the bottom screen is drawn: (%u,%u) %ux%u -> %08X (game frame %u)",
+                c.sx, c.sy, c.w, c.h, c.dst, vi_game_frames());
         if (c.depth) {
             if (!s_warned_zcopy) {
                 s_warned_zcopy = true;

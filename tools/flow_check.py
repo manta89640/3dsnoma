@@ -6,10 +6,24 @@ room's way back and its question's はい, which ends the app. The run is script
 game's clock) and its log is checked for each step's line, in order.
 
     tools/flow_check.py [--host build-host/noma-host] [--data runs/data] [--timeout 900] [--keep LOG]
+                        [--hooks] [--env K=V ...]
 
-Exit status 0 when every step was seen. The touches are in bottom-screen pixels (0..319, 0..239);
-the places are those of docs/two_screens.md's regions (the room's panel and the native scenes in
-BOTTOM, the room's other screens in FULL).
+Exit status 0 when every step was seen (and the layout draw check, when it ran, found nothing). The
+touches are in bottom-screen pixels (0..319, 0..239); the places are those of docs/two_screens.md's
+regions (the room's panel and the native scenes in BOTTOM, the room's other screens in FULL).
+
+The run draws nothing (NOMA_NO_RENDER=1). --hooks installs the host's renderer without letting it
+rasterise a frame (NOMA_DUMP_FRAMES=100000 NOMA_DUMP_FROM=100000000), so that what hangs on its
+hooks runs, at the game's speed: the GX decoder's checks. --env K=V (repeatable) sets an environment
+variable for the run, after the script's own. A last step checks the layout draw check
+(NOMA_CHECK_LYT_DRAW, engine/lyt/draw_check.cpp) when it is on: it fails when the log shows a
+difference, or no summary of the check at all, e.g.
+
+    tools/flow_check.py --hooks --env NOMA_CHECK_LYT_DRAW=1
+
+(NOMA_CHECK_LYT_DRAW=1 or pixels implies --hooks: the check sees the GX draws through the renderer.
+The pixel check compares only the frames the renderer draws, none with --hooks alone: --env
+NOMA_DUMP_FROM=0 --env NOMA_RENDER_ALL=1 draws them all, several times slower than the game.)
 """
 import argparse
 import os
@@ -52,6 +66,15 @@ STEPS = [
     ("the program quit", r"quit: "),
 ]
 
+# NOMA_CHECK_LYT_DRAW's reports of a difference: the state check's ("<field>: layout ...: GX ...,
+# native ...", the first 40 and then each field's first; markers out of order: "order: GX ..., native
+# ..."), the pixel check's layout draws that differ (the first 400) and what came out of order (the
+# first 40); and the two checks' summaries every 10 s, with what they counted
+LYT_MISMATCH = re.compile(r"lyt draw check: [a-z0-9 ]+: (layout [0-9A-F]{8} .*|GX .*), native |"
+                          r"lyt pixels: (layout [0-9A-F]{8} |order: )")
+LYT_STATE_SUMMARY = re.compile(r"lyt draw check: \d+ layout draws, .*: (\d+) mismatches")
+LYT_PIXEL_SUMMARY = re.compile(r"lyt pixels: \d+ layout draws: \d+ compared, (\d+) differ, .*, (\d+) out of order")
+
 
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,12 +83,33 @@ def main():
     ap.add_argument("--data", default=os.path.join(root, "runs", "data"))
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--keep", help="write the run's log here")
+    ap.add_argument("--hooks", action="store_true",
+                    help="install the renderer (its hooks run) but rasterise nothing, instead of NOMA_NO_RENDER=1")
+    ap.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="an environment variable for the run (repeatable)")
     a = ap.parse_args()
 
+    extra = {}
+    for kv in a.env:
+        k, eq, v = kv.partition("=")
+        if not k or not eq:
+            ap.error(f"--env {kv}: not K=V")
+        extra[k] = v
     script = ",".join(f"{t}:T({x};{y})" for t, x, y, _ in TOUCHES)
-    env = dict(os.environ, NOMA_NO_RENDER="1", NOMA_INPUT=script)
-    for k in ("NOMA_TEST_CARD", "NOMA_DUMP_FRAMES", "NOMA_DUMP_FROM", "NOMA_DUMP_3DS"):
+    env = dict(os.environ, NOMA_INPUT=script)
+    for k in ("NOMA_NO_RENDER", "NOMA_TEST_CARD", "NOMA_DUMP_FRAMES", "NOMA_DUMP_FROM", "NOMA_DUMP_3DS",
+              "NOMA_RENDER_ALL"):
         env.pop(k, None)
+    check = extra.get("NOMA_CHECK_LYT_DRAW", env.get("NOMA_CHECK_LYT_DRAW"))
+    checked = check in ("1", "pixels")
+    if checked and not a.hooks:
+        print(f"note     NOMA_CHECK_LYT_DRAW={check} sees the GX draws through the renderer: --hooks")
+        a.hooks = True
+    if a.hooks:
+        env.update(NOMA_DUMP_FRAMES="100000", NOMA_DUMP_FROM="100000000")
+    else:
+        env["NOMA_NO_RENDER"] = "1"
+    env.update(extra)
     with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
         log_path = a.keep or f.name
     with open(log_path, "w") as out:
@@ -92,6 +136,27 @@ def main():
     if fatal:
         print("FATAL    " + fatal[0])
         ok = False
+    # the layout draw check, when it ran: no difference reported, none counted in its last summaries,
+    # and a summary at all when it was asked for (it writes one at its first layout draw after 10 s)
+    mismatches = [l for l in lines if LYT_MISMATCH.search(l)]
+    summaries = []
+    for rx in (LYT_STATE_SUMMARY, LYT_PIXEL_SUMMARY):
+        found = [(l, rx.search(l)) for l in lines if rx.search(l)]
+        if found:
+            summaries.append(found[-1])
+    counted = any(int(n) for _, m in summaries for n in m.groups())
+    if mismatches or counted:
+        print(f"MISMATCH lyt draw check: {len(mismatches)} lines of differences"
+              + (f", the first: {mismatches[0]}" if mismatches else ""))
+        for l, _ in summaries:
+            print(f"         the last summary: {l}")
+        ok = False
+    elif checked and not summaries:
+        print(f"MISSING  lyt draw check: NOMA_CHECK_LYT_DRAW={check} was asked for, the log has no summary of it")
+        ok = False
+    else:
+        for l, _ in summaries:
+            print(f"ok       lyt draw check: {l.split('] ', 1)[-1]}")
     print("flow: " + ("all steps seen" if ok else "FAILED") + f" (log: {log_path})")
     return 0 if ok else 1
 

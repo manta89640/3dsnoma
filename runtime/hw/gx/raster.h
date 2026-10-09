@@ -15,10 +15,16 @@ public:
     // which the host's two-screen pictures take their bottom screen from (gx_host_bottom_screen)
     void screen(u32 screen, u32 x, u32 y, u32 w, u32 h) override;
     void draw_done() override;
+    // a layout drawn natively (engine/lyt/draw.h): each run's state goes into the registers the
+    // per-pixel pipeline reads (put back afterwards), its quads go through it as the transform unit
+    // would have handed them on, so the pixels are those of the decompiled draw's GX draws
+    void lyt(const engine::lyt::LytPacket& p) override;
 };
 // the bottom screen as the last frame left it: 320x240 (R in bits 0-7 ... A in 24-31), the rectangle
 // of the bottom EFB the frame's 0x51 command named, scaled; false if no frame drew on it
 bool gx_host_bottom_screen(u32* out);
+// whether what is drawn now goes onto the bottom screen (gx_host_efb then gives its buffers)
+bool gx_host_on_bottom();
 
 // The EFB for native draws (engine/g3d's software backend) drawing beside GX's, into the same
 // pixels and depth: colour (R in bits 0-7 ... A in 24-31), depth (24 bits, 0 near ... 0xFFFFFF far,

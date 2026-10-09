@@ -5,11 +5,16 @@
 // command processor executes them; otherwise they are a display list being recorded, executed
 // later by a CALL_DL command. fifo.cpp moves the bytes, cp.cpp decodes the command stream and
 // keeps the GPU's register state, a renderer (GxRenderer below) draws. One command is ours, not
-// GX's: 0x50 + a big-endian u32, a native draw (engine/g3d/native_draw.h).
+// GX's: 0x50 + a big-endian u32, a native draw (engine/g3d/native_draw.h); 0x51, the 3DS screen
+// (engine/ui/screen.h); 0x52 + a big-endian u32, a layout drawn natively (engine/lyt/draw.h).
 #pragma once
 #include <algorithm>
 
 #include "../hw.h"
+
+namespace engine::lyt {
+struct LytPacket;
+}
 
 namespace guest {
 
@@ -111,6 +116,11 @@ struct GxRenderer {
     // screen, the frame's rectangle x, y, w, h (EFB pixels) is what fills it, scaled to its 320x240
     // (engine/ui/screen.h). Each frame starts on the top screen.
     virtual void screen(u32 screen, u32 x, u32 y, u32 w, u32 h) {}
+    // our own command 0x52 (not GX's): a layout drawn natively (engine/lyt/draw.h), at its place in
+    // the stream: its quads, drawn with the GX state at this point (projection, viewport, scissor,
+    // screen) and each run's own; the renderer takes nothing it cached about the GPU's state as still
+    // true afterwards. The packet is only valid during the call.
+    virtual void lyt(const engine::lyt::LytPacket& p) {}
 };
 enum : u32 { SCREEN_TOP = 0, SCREEN_BOTTOM = 1 };
 constexpr u8 SCREEN_OPCODE = 0x51;

@@ -234,10 +234,13 @@ bool s_raw;          // gx_texture_raw: no decode
 const u8* s_raw_src;
 
 const GxTexture* gx_texture(u32 map) {
-    u32 img0 = g_gx.bp[bp_tex(BP_TX_SETIMAGE0, map)];
-    u32 img1 = g_gx.bp[bp_tex(BP_TX_SETIMAGE1, map)];
-    u32 img3 = g_gx.bp[bp_tex(BP_TX_SETIMAGE3, map)];
-    u32 tlut = g_gx.bp[bp_tex(BP_TX_SETTLUT, map)];
+    const u32* bp = g_gx.bp;
+    return gx_texture_regs(bp[bp_tex(BP_TX_SETIMAGE0, map)], bp[bp_tex(BP_TX_SETIMAGE1, map)],
+                           bp[bp_tex(BP_TX_SETIMAGE2, map)], bp[bp_tex(BP_TX_SETIMAGE3, map)],
+                           bp[bp_tex(BP_TX_SETTLUT, map)]);
+}
+
+const GxTexture* gx_texture_regs(u32 img0, u32 img1, u32 img2, u32 img3, u32 tlut) {
     Key k;
     k.w = bits(img0, 0, 10) + 1;
     k.h = bits(img0, 10, 10) + 1;
@@ -250,7 +253,7 @@ const GxTexture* gx_texture(u32 map) {
     const u8* src;
     if (preloaded) {
         // from TMEM, gathered into the layout it has in memory (keyed by a TMEM pseudo-address)
-        u32 even = bits(img1, 0, 15) * 32, odd = bits(g_gx.bp[bp_tex(BP_TX_SETIMAGE2, map)], 0, 15) * 32;
+        u32 even = bits(img1, 0, 15) * 32, odd = bits(img2, 0, 15) * 32;
         k.addr = 0xF0000000 | even;
         static std::vector<u8> s_buf;
         s_buf.assign(bytes, 0);
@@ -321,13 +324,20 @@ void gx_decode_texture_tlut(const u8* src, u32 fmt, u32 w, u32 h, u32 tlut_addr,
 u8* gx_tmem_for_tests() { return s_tmem; }
 const u8* gx_tmem() { return s_tmem; }
 
-const GxTexture* gx_texture_raw(u32 map, const u8** src) {
+const GxTexture* gx_texture_raw_regs(u32 img0, u32 img1, u32 img2, u32 img3, u32 tlut, const u8** src) {
     s_raw = true;
     s_raw_src = nullptr;
-    const GxTexture* t = gx_texture(map);
+    const GxTexture* t = gx_texture_regs(img0, img1, img2, img3, tlut);
     s_raw = false;
     *src = s_raw_src;
     return t;
+}
+
+const GxTexture* gx_texture_raw(u32 map, const u8** src) {
+    const u32* bp = g_gx.bp;
+    return gx_texture_raw_regs(bp[bp_tex(BP_TX_SETIMAGE0, map)], bp[bp_tex(BP_TX_SETIMAGE1, map)],
+                               bp[bp_tex(BP_TX_SETIMAGE2, map)], bp[bp_tex(BP_TX_SETIMAGE3, map)],
+                               bp[bp_tex(BP_TX_SETTLUT, map)], src);
 }
 
 void gx_texture_release(const GxTexture* t) {

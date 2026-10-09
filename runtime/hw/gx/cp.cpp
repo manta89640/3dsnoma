@@ -19,6 +19,7 @@
 #include "regs.h"
 #include "texture.h"
 #include "vertex.h"
+#include "engine/lyt/draw.h"
 
 namespace guest {
 
@@ -314,6 +315,15 @@ u32 gx_decode(const u8* p, u32 n, bool in_display_list) {
             s_renderer->screen(q[1], (u32)q[2] << 8 | q[3], (u32)q[4] << 8 | q[5], (u32)q[6] << 8 | q[7],
                                (u32)q[8] << 8 | q[9]);
             len = 10;
+            break;
+        case 0x52:  // a layout drawn natively (ours)
+            if (left < 5)
+                return done;
+            {
+                NOMA_PROF_SCOPE("(gx lyt)");
+                engine::lyt::decode(be32(q + 1), *s_renderer);
+            }
+            len = 5;
             break;
         case 0x61: {
             if (left < 5)

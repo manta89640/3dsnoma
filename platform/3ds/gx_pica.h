@@ -18,6 +18,10 @@ public:
     // native g3d's PICA backend (g3d_pica.cpp) then draws between pica_native_begin and _end
     void native(u32 id) override;
     void screen(u32 screen, u32 x, u32 y, u32 w, u32 h) override;
+    // a layout drawn natively (engine/lyt/draw.h): its quads through the GX path's own shader,
+    // state caches and batches, each run with its own GX state and the stream's at the command for
+    // the rest (projection, viewport, scissor, screen)
+    void lyt(const engine::lyt::LytPacket& p) override;
 };
 
 // a wait for the GPU that hasn't ended in 3 s, logged (the I/O thread, every 100 ms)

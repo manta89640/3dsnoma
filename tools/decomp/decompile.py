@@ -210,6 +210,10 @@ PATCHED_NAMES = {
     # engine/lyt/quad.cpp: nw4r::lyt's quads, native; the decompiled ones stay as *_orig for
     # tools/armbench/armbench.py --lyt to compare against
     "nw4r_lyt_detail_DrawQuad", "nw4r_lyt_detail_DrawQuad_Alpha", "nw4r_lyt_Material_SetupGX",
+    # engine/lyt/draw.cpp: the layouts drawn natively (FIFO packets the renderers draw); the
+    # decompiled walk stays as *_orig for NOMA_CHECK_LYT_DRAW (orig, ab, the state and pixel checks),
+    # and the update is timed for NOMA_LYT_STATS
+    "layout_LayoutWrapper_Draw", "layout_LayoutWrapper_Update",
     # engine/gx/gx_sdk.cpp: the GX library's hottest calls, native (armbench.py --gxsdk compares them
     # with the decompiled *_orig on random states)
     "__GXSetDirtyState", "__GXSetSUTexRegs", "__SetSURegs", "__GXSetVCD", "__GXSetVAT", "__GXCalculateVLim",
