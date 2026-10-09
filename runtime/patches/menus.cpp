@@ -16,6 +16,7 @@
 
 #include "engine/math/vecmath.h"
 #include "engine/room/panel.h"
+#include "engine/ui/test_card.h"
 #include "engine/ui/lyt.h"
 #include "engine/soundplayer/sound_player.h"
 #include "engine/system/host_scene.h"
@@ -221,6 +222,7 @@ void app_SceneFactories_ctor(u32 r3) {
     app_SceneFactories_ctor_orig(r3);
     engine::soundplayer::boot();
     engine::room::boot();
+    engine::ui::test_card::boot();
     engine::wuhu::boot();
     engine::wuhu::music_boot();
 }

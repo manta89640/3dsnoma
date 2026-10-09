@@ -10,6 +10,7 @@
 #include "engine/ui/game.h"
 #include "engine/ui/lyt.h"
 #include "engine/ui/screen.h"
+#include "engine/ui/test_card.h"
 #include "engine/wuhu/bar_button.h"
 #include "engine/wuhu/wuhu.h"
 #include "noma_decomp.h"
@@ -303,6 +304,9 @@ void draw_away_top() {
 void update() {
     if (s_panel)
         s_panel->update();
+    // NOMA_TEST_CARD: the screens' calibration card, once, over the room just made
+    if (engine::ui::test_card::take_request())
+        engine::system::change_scene(engine::ui::test_card::scene_factory());
 }
 
 void draw() {
