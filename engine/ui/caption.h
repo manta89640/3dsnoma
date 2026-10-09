@@ -1,16 +1,16 @@
 // A caption at the top of the screen in the channel's own heading (Common/Top_Message.lex, the
 // screens' titles: a line of grey text over a thin rule): a title, and under the rule a second,
-// smaller line (a second Top_Message, its rule hidden, its text moved down), on a band of the
-// channel's white (Common/Common_White_Bg.lex, its Pic_Bg cut to a band): its headings sit on
-// white, and over a 3D scene (the island's place names) the band keeps them standing out. The title
-// is at the font's own size (30 x 36, its glyph cells: sharpest). Shown for a while: it fades in
-// (Top_Message's FadeIn_All, 11 frames; the second line a few frames later; the band with the
-// title), stays, and fades out (FadeOut_All). Its texts can change between showings (in text boxes made big enough
-// at the start: nothing guest-side is made then). Its guest objects are made with it and deleted
-// with it.
+// smaller line (a second Top_Message, its rule hidden, its text moved down). Each line is outlined
+// in white (the line drawn white, a little to each of eight sides, under the grey one): over a 3D
+// scene (the island's place names) the grey keeps standing out. The title is at the font's own
+// size (30 x 36, its glyph cells: sharpest). Shown for a while: it fades in (Top_Message's
+// FadeIn_All, 11 frames; the second line a few frames later), stays, and fades out (FadeOut_All).
+// Its texts can change between showings (in text boxes made big enough at the start: nothing
+// guest-side is made then). Its guest objects are made with it and deleted with it.
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/runtime.h"
 
@@ -39,13 +39,18 @@ public:
     void place(f32 x, f32 y);
 
 private:
-    struct Line {
+    // a Top_Message drawn for a line: the grey one, or one of its white outline's, moved by dx, dy
+    struct Copy {
         u32 layout = 0, fade_in = 0, fade_out = 0;
+        f32 dx = 0, dy = 0;
     };
-    void fit_band();
+    struct Line {
+        std::vector<Copy> copies;  // the outline's, then the grey line
+    };
+    Copy make_copy(const std::u16string& text, bool subtitle, f32 dx, f32 dy, bool white) const;
+    static void play(const Line& line, bool in);
+    static bool animating(const Line& line);
     Line title_, subtitle_;
-    u32 band_ = 0, band_pic_ = 0;  // Common_White_Bg, its Pic_Bg
-    bool has_subtitle_ = false;
     u32 chars_ = 0;  // the text boxes' room, the NUL included
     int frame_ = -1;  // frames since show() (-1: hidden)
     int hide_at_ = 0;
