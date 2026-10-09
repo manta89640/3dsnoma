@@ -38,8 +38,9 @@ u32 movie_Manager_ctor(u32 r3, u32) {
 }
 
 // A movie opened on it (r4 the movie's player, r5 a heap for it): none is made, as MobiClip isn't
-// there to play it (the help's videos, 使い方: the channel's own files, not the server's), and the
-// movie's methods leave the manager alone (no movie at +0x0).
+// there to play it, nor the movie: the help's videos (使い方) were the server's, streamed through
+// the content requests (fn_80276A40 makes them), as its other movies; the movie's methods leave the
+// manager alone (no movie at +0x0).
 u32 movie_Manager_Open(u32 r3, u32 r4, u32 r5) {
     (void)r4, (void)r5;
     M2C_FIELD(r3, gp<u32>, 0x0) = 0;
