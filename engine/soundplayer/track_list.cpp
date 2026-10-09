@@ -11,10 +11,13 @@
 // The list scrolls a row at a time, smoothly: the rows are a few buttons (the rows shown, one
 // coming in and a spare) that move as the list moves and take the next track's name as they leave
 // at one end and come back at the other, out of sight. Rows near the window's edges fade (their
-// alpha) rather than being cut off, as the TV programme list's do. Holding a tab, or the D-pad's
-// up or down, keeps it moving with the TV list's rhythm: a row in 13 frames, the next in 7, then
-// one every 4. The list has headings (the channel's jingles, each game's music and jingles: rows
-// in the dialogs' grey that can't be chosen); L and R jump from one to the next.
+// alpha) rather than being cut off, as the TV programme list's do. A tab scrolls a row as its push
+// starts; held, it keeps the list moving with the TV list's rhythm, as the D-pad's up or down held
+// does: a row in 13 60ths of a second, the next in 7, then one every 4 (the TV list's frames,
+// counted in time: engine/ui/drag_scroll.h). A touch on the rows drags them, and a flick sends them
+// coasting. The list has headings (the channel's jingles, each game's music and jingles: rows in
+// the dialogs' grey that can't be chosen); L and R jump from one to the next, and so does a tap on
+// a heading.
 //
 // The track playing has its row marked: a cyan bar with the name in white and ♪ before it (∥ and
 // a grey bar when paused, ♪ blinking while the player switches to it). The bar is a row layout of
@@ -27,7 +30,10 @@
 // the channel its Focus takes the text and line from grey 80 to black; the designers' files had
 // orange, 209,133,35): its Focus and Push animations are given the room's cyan instead while the
 // screen is open (the colour keys of the animations in the archive the channel caches for every
-// user of the layout), and given back before the rows go.
+// user of the layout), and their line's heights in the bottom screen's pixels (1 at rest, 2
+// focused: engine/ui/list_window.h row_lines_to_pixels), and given back before the rows go. The
+// rows (and the playing bar) sit on the bottom screen's pixels as they scroll (row_pixel_snap),
+// so that every row's line is drawn, as thick as every other's.
 #include "engine/soundplayer/track_list.h"
 
 #include <algorithm>
@@ -40,6 +46,7 @@
 #include "engine/system/host_scene.h"
 #include "engine/ui/drag_scroll.h"
 #include "engine/ui/game.h"
+#include "engine/ui/list_window.h"
 #include "engine/ui/lyt.h"
 
 namespace engine::soundplayer {
@@ -81,6 +88,9 @@ const f32 FONT_W = 29, FONT_H = 34.58f;      // the message list's own row text 
 const f32 HEADER_FONT_W = 22.08f, HEADER_FONT_H = 26.22f;  // the dialogs' text size
 const f32 TAB_LAYOUT_H = 44;          // the tabs' height in their layout (Profile_Up_Btn's Pic_Btn)
 const f32 TAB_SCALE = 0.8f, TAB_H = TAB_LAYOUT_H * TAB_SCALE;
+const f32 TAB_Y = (WINDOW_H + TAB_H) / 2 - 1;  // the tabs' middles, above and below the window's
+// the tabs' hit area (their Bound_Btn, 230 x 60 in their layout), around their middles
+const f32 TAB_HIT_W = 230 * TAB_SCALE, TAB_HIT_H = 60 * TAB_SCALE;
 const u32 NAME_CHARS = 32;            // room in each text box
 // widths inside the window: 1 / the location adjust's scale (set as the list is made)
 f32 wide = 1;
@@ -93,10 +103,12 @@ const char16_t NOTE = 0x266A, PAUSE = 0x2225;  // ♪ ∥ (the font has no ▶ �
 
 const u32 SOUND_UNKNOWN = 0xFFFFFFFEu;
 
-// the scroll rhythm (frames a row), as the TV programme list's Up/Down animations: the first
-// row, the second, every one after
-const int RHYTHM[] = {13, 7, 4};
-int rhythm(int step) { return RHYTHM[std::min(step, 2)]; }
+// the scroll rhythm (60ths of a second a row), as the TV programme list's Up/Down animations (their
+// frames at the Wii's 60 a second): the first row, the second, every one after
+const f32 RHYTHM[] = {13, 7, 4};
+f32 rhythm(int step) { return RHYTHM[std::min(step, 2)]; }
+const f32 SETTLE = 8;  // the glide onto the nearest row when a drag is let go (60ths of a second)
+const f32 BLINK = 8;   // ♪'s blink while the player switches: on, off (60ths of a second)
 
 // ---- the message board's focus colour in the rows' animations, made the room's cyan
 
@@ -218,16 +230,25 @@ struct TrackList::Impl {
     char16_t bar_mark = 0;
 
     // scrolling: `top` is the entry the list is going to have at the top, `pos` where it is now
-    // (in rows); a glide takes pos from where it was to top
+    // (in rows); a glide takes pos from where it was to top over glide_len 60ths of a second (0:
+    // none)
     int top = 0;
     f32 pos = 0;
-    f32 glide_from = 0;
-    int glide_t = 0, glide_frames = 0;
+    f32 glide_from = 0, glide_t = 0, glide_len = 0;
     bool glide_ease = false;
-    int tab_dir = 0, tab_steps = 0;                 // a tab held
-    f32 tab_x = 0, tab_y = 0;                       // where the pointer pressed it
-    int pad_dir = 0, pad_steps = 0, pad_timer = 0;  // the D-pad held
-    u16 shoulders = 0;                              // L and R held at the last frame
+    int tab_dir = 0, tab_steps = 0;  // a tab held: its way, the rows it has scrolled
+    f32 tab_timer = 0;               // 60ths of a second to its next row
+    f32 tab_x = 0, tab_y = 0;        // where the pointer pressed it
+    u32 touch_tab = 0;               // the tab the touch going on came down on (tab_touch)
+    u32 taken_tab = 0;               // a tab's press taken as the touch came down, its push awaited
+    bool taken_read = false;         // a game read has carried the touch's A since
+    u64 taken_at = 0;                // when it was taken (guest::timebase)
+    bool touched = false;            // the touch screen touched at the last update
+    int pad_dir = 0, pad_steps = 0;  // the D-pad held, likewise
+    f32 pad_timer = 0;
+    u16 shoulders = 0;               // L and R held at the last frame
+    engine::ui::Ticker ticker;       // the 60ths of a second since the last update (dt)
+    f32 dt = 0, clock = 0;           // (clock: their sum, for the blink)
 
     int highlight = 0;      // the D-pad's highlight (an entry)
     bool pad_mode = false;  // the D-pad has been used since the pointer last moved
@@ -236,21 +257,30 @@ struct TrackList::Impl {
 
     int chosen = -1;
     bool opened = false;  // its FadeIn has started (the rows can be used)
+    bool gone = false;    // the scene is going (leaving())
     engine::ui::DragScroll drag;  // the touch dragging the rows
     int frames = 0;
 
-    std::vector<std::pair<u32, u32>> recoloured;  // animation words changed, and what they were
+    std::vector<std::pair<u32, u32>> edited;  // animation words changed, and what they were
 
     int max_top() const { return std::max(0, (int)entries.size() - VISIBLE); }
     int entry_of_sound(u32 id) const;
     void assign(Row& r, int entry);
-    void glide(int frames, bool ease);
-    void scroll_to_show(int entry, int frames, bool ease);
-    void move_highlight(int dir, int frames);
+    void glide(f32 len, bool ease);
+    void scroll_by(int dir, f32 len, bool ease);
+    void scroll_to_show(int entry, f32 len, bool ease);
+    void move_highlight(int dir, f32 len);
+    f32 jump_glide(int t) const;
     void jump_heading(int dir);
+    void tap_heading(f32 y);
+    void take_over();
+    void tab_press(u32 tab);
+    bool on_tab(u32 tab, f32 x, f32 y) const;
+    void tab_touch();
     void follow_music(const Music& music);
     void input();
     void advance();
+    f32 row_y(int entry) const;
     void place_rows();
     void place_bar(const Music& music);
     void pose_highlight();
@@ -307,8 +337,11 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
         r.panes.make(button_layout(r.button));
         show(r.panes.date, false);
         r.focus = find_anim(button_layout(r.button), "Focus");
-        recolour(r.focus, m.recoloured);
-        recolour(find_anim(button_layout(r.button), "Push"), m.recoloured);
+        const u32 push = find_anim(button_layout(r.button), "Push");
+        recolour(r.focus, m.edited);
+        recolour(push, m.edited);
+        engine::ui::row_lines_to_pixels(r.focus, m.edited);
+        engine::ui::row_lines_to_pixels(push, m.edited);
         pose(button_layout(r.button), r.focus, 0);
         engine::system::hook_button(r.button);
         game::group_add(r.button, group);
@@ -321,8 +354,7 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
     m.up = button_new(UP_LEX, m.window, "Loc_Text", cursor);
     m.down = button_new(DOWN_LEX, m.window, "Loc_Text", cursor);
     for (u32 tab : {m.up, m.down}) {
-        f32 y = (WINDOW_H + TAB_H) / 2 - 1;
-        move(button_root(tab), 0, tab == m.up ? y : -y);
+        move(button_root(tab), 0, tab == m.up ? TAB_Y : -TAB_Y);
         scale(button_root(tab), TAB_SCALE, TAB_SCALE);
         set_sounds(tab, SE_OVER_M, SE_CLICK_S);
         engine::system::hook_button(tab);
@@ -339,8 +371,8 @@ TrackList::TrackList(u32 cursor, u32 group) : impl_(new Impl) {
 
 TrackList::~TrackList() {
     Impl& m = *impl_;
-    // the animations' colours back, while the archive holding them is still in use
-    for (auto it = m.recoloured.rbegin(); it != m.recoloured.rend(); ++it)
+    // the animations' colours and line heights back, while the archive holding them is still in use
+    for (auto it = m.edited.rbegin(); it != m.edited.rend(); ++it)
         guest::store32(it->first, it->second);
     button_delete(m.down);
     button_delete(m.up);
@@ -376,17 +408,26 @@ void TrackList::Impl::assign(Row& r, int entry) {
     }
 }
 
-// pos glides to top over n frames (eased in and out, or at an even speed: one of several rows
-// in a row)
-void TrackList::Impl::glide(int n, bool ease) {
+// pos glides to top over len 60ths of a second (eased in and out, or at an even speed: one of
+// several rows in a row), from where it is
+void TrackList::Impl::glide(f32 len, bool ease) {
     glide_from = pos;
     glide_t = 0;
-    glide_frames = std::max(1, n);
+    glide_len = std::max(len, 1.0f);
     glide_ease = ease;
 }
 
+// a row up or down, if there is one
+void TrackList::Impl::scroll_by(int dir, f32 len, bool ease) {
+    int t = std::min(std::max(top + dir, 0), max_top());
+    if (t == top)
+        return;
+    top = t;
+    glide(len, ease);
+}
+
 // the list scrolls as little as it takes to show this entry
-void TrackList::Impl::scroll_to_show(int entry, int n, bool ease) {
+void TrackList::Impl::scroll_to_show(int entry, f32 len, bool ease) {
     int t = top;
     if (entry < t)
         t = entry;
@@ -396,11 +437,11 @@ void TrackList::Impl::scroll_to_show(int entry, int n, bool ease) {
     if (t == top)
         return;
     top = t;
-    glide(n, ease);
+    glide(len, ease);
 }
 
 // the D-pad's highlight one entry up or down (over the heading), the list following it
-void TrackList::Impl::move_highlight(int dir, int n) {
+void TrackList::Impl::move_highlight(int dir, f32 n) {
     int h = highlight;
     if (h < top || h > top + VISIBLE - 1)
         h = dir > 0 ? top : top + VISIBLE - 1;  // out of sight (scrolled away): back at the edge
@@ -412,6 +453,11 @@ void TrackList::Impl::move_highlight(int dir, int n) {
         return;
     highlight = h;
     scroll_to_show(h, n, n >= RHYTHM[0]);
+}
+
+// a jump's glide to top t (L, R, a heading tapped): longer the further it goes (60ths of a second)
+f32 TrackList::Impl::jump_glide(int t) const {
+    return (f32)std::min(std::max(10 + std::abs(t - (int)pos) / 2, 13), 30);
 }
 
 // L and R: the highlight to the first track under the next heading, or the one before (the list's
@@ -434,8 +480,98 @@ void TrackList::Impl::jump_heading(int dir) {
     int t = std::min(std::max(highlight - (highlight > 0 && entries[highlight - 1] < 0 ? 1 : 0), 0), max_top());
     if (t != top) {
         top = t;
-        glide(std::min(std::max(10 + std::abs(t - (int)pos) / 2, 13), 30), true);
+        glide(jump_glide(t), true);
     }
+}
+
+// A tap on a heading (a grey row, no button) jumps as R does from there: to the next heading, its
+// first track highlighted and the heading at the list's top (from the last heading, to that one),
+// the pointer sent away as by the D-pad, so that A plays the highlight. The tap's A, still to come
+// for the game's cursor, presses nothing: the rows are held a moment.
+void TrackList::Impl::tap_heading(f32 y) {
+    const int e = (int)std::lround(pos + (WINDOW_Y + FIRST_Y - y) / PITCH);
+    if (e < 0 || e >= (int)entries.size() || entries[e] >= 0)
+        return;
+    int next = e;
+    for (int k = e + 1; k < (int)entries.size(); k++) {
+        if (entries[k] < 0) {
+            next = k;
+            break;
+        }
+    }
+    if (next + 1 >= (int)entries.size())
+        return;
+    drag.hold();
+    pad_mode = true;
+    guest::input_pointer_away();
+    highlight = next + 1;
+    const int t = std::min(next, max_top());
+    if (t != top) {
+        top = t;
+        glide(jump_glide(t), true);
+    }
+}
+
+// another input (a tab, the D-pad, L or R) takes the list from a coast: it settles on the nearest
+// row, unless that input moves it on
+void TrackList::Impl::take_over() {
+    if (drag.halt()) {
+        top = std::min(std::max((int)std::lround(pos), 0), max_top());
+        glide(SETTLE, true);
+    }
+}
+
+// A tab's push starts: a row that way at once (gliding on from where the list is, at the rhythm's
+// second pace, if a row is still gliding in: taps in quick succession each scroll a row), and on
+// with the rhythm while it is held (input()).
+void TrackList::Impl::tab_press(u32 tab) {
+    take_over();
+    tab_dir = tab == up ? -1 : 1;
+    tab_steps = 1;
+    tab_timer = rhythm(0);
+    game::pointer_at(tab_x, tab_y);
+    const bool gliding = glide_len > 0;
+    scroll_by(tab_dir, gliding ? rhythm(1) : rhythm(0), !gliding);
+}
+
+// the point (layout units) is on the tab's hit area
+bool TrackList::Impl::on_tab(u32 tab, f32 x, f32 y) const {
+    const f32 ty = WINDOW_Y + (tab == up ? TAB_Y : -TAB_Y);
+    return std::fabs(x - WINDOW_X) <= TAB_HIT_W / 2 && std::fabs(y - ty) <= TAB_HIT_H / 2;
+}
+
+// A touch coming down on a tab scrolls at once (tab_press), whether or not the game's cursor takes
+// it as a press: the cursor takes none on a button until its focus is back, some 13 frames after its
+// last push began (the tab's push, 7, then 6 more), and would drop every other tap of a quick
+// succession. Its push, when it comes (in the cursor's update after the game's read that carries
+// the touch's A: its second read), gives the press its look and its click and is no press of its own
+// (on_push_start). Whether it came is known at the update after that read's: the input changes
+// anywhere in the guest's code, so a read may come one update later than the touch was seen here.
+// When it doesn't come (or no read carries the touch's A within half a second), the click is played
+// here.
+void TrackList::Impl::tab_touch() {
+    if (taken_tab) {
+        if (taken_read || guest::timebase() - taken_at > guest::TB_HZ / 2) {
+            play_sound(taken_tab, sound_label(SE_CLICK_S));
+            taken_tab = 0;
+        } else if ((game::buttons_triggered() & game::PAD_A) && guest::wiimote_a_from_touch()) {
+            taken_read = true;
+        }
+    }
+    f32 x, y;
+    const bool touching = engine::ui::touch_point(x, y);
+    if (!touching) {
+        touch_tab = 0;
+    } else if (!touched && opened && !gone) {
+        for (u32 tab : {up, down}) {
+            if (on_tab(tab, x, y) && active(tab) && enabled(tab)) {
+                touch_tab = taken_tab = tab;
+                taken_read = false, taken_at = guest::timebase();
+                tab_press(tab);
+            }
+        }
+    }
+    touched = touching;
 }
 
 // The track changed (from the list, the controls, left and right): its row comes into sight,
@@ -452,12 +588,14 @@ void TrackList::Impl::follow_music(const Music& music) {
         top = std::min(std::max(0, highlight - VISIBLE / 2 + 1), max_top());
         pos = (f32)top;
     } else if (e >= 0) {
+        take_over();  // (from a coast or a drag's settling: the playing row comes into sight all the same)
         highlight = e;
-        scroll_to_show(e, std::min(std::max(10 + 2 * std::abs(e - top), 13), 36), true);
+        scroll_to_show(e, (f32)std::min(std::max(10 + 2 * std::abs(e - top), 13), 36), true);
     }
 }
 
-// the D-pad and the tabs (the pointer and A on the rows are the cursor's)
+// the D-pad, L and R, and a tab held (the pointer and A on the rows are the cursor's; a tab's press
+// is its push's start, tab_press)
 void TrackList::Impl::input() {
     u32 pressed = game::buttons_triggered(), held = game::buttons_held();
     f32 px, py;
@@ -467,72 +605,81 @@ void TrackList::Impl::input() {
     pointer_x = px;
     pointer_y = py;
 
-    // L and R: from heading to heading
+    // L and R: from heading to heading. They, and the D-pad, send the pointer away from the
+    // screen, as a remote pointed away, so that the cursor drops the focus it had and A plays the
+    // highlight.
     u16 shoulders_held = guest::wiimote_input().pad & (guest::PAD_L | guest::PAD_R);
     u16 shoulders_pressed = shoulders_held & ~shoulders;
     shoulders = shoulders_held;
     if (shoulders_pressed) {
         pad_mode = true;
+        guest::input_pointer_away();
+        take_over();
         jump_heading(shoulders_pressed & guest::PAD_R ? 1 : -1);
     }
 
-    // up and down: the highlight moves at once, again after 13 frames, after 7, then every 4
+    // up and down: the highlight moves at once, again after 13 60ths of a second, after 7, then
+    // every 4
     if (pressed & (game::PAD_UP | game::PAD_DOWN)) {
         pad_dir = (pressed & game::PAD_UP) ? -1 : 1;
         pad_steps = 1;
         pad_timer = rhythm(0);
         pad_mode = true;
+        guest::input_pointer_away();
+        take_over();
         move_highlight(pad_dir, rhythm(0));
     } else if (pad_dir && (held & (pad_dir < 0 ? game::PAD_UP : game::PAD_DOWN))) {
-        if (--pad_timer <= 0) {
-            int n = rhythm(pad_steps++);
-            pad_timer = n;
+        pad_timer -= dt;
+        if (pad_timer <= 0) {
+            const f32 n = rhythm(pad_steps++);
+            pad_timer += n;
             move_highlight(pad_dir, n);
         }
     } else {
         pad_dir = 0;
     }
 
-    // A on a tab scrolls a row; held there, it scrolls on (the tab loses its focus while its push
-    // plays: the pointer staying where it was pressed keeps it held)
-    if (!tab_dir && (pressed & game::PAD_A)) {
-        for (u32 tab : {up, down}) {
-            if (focused(tab) && enabled(tab) && active(tab)) {
-                tab_dir = tab == up ? -1 : 1;
-                tab_steps = 0;
-                tab_x = px;
-                tab_y = py;
-            }
-        }
-    }
+    // A tab held scrolls on with the rhythm, at an even speed: by the touch that came down on it,
+    // while it stays on it; by A, while the pointer stays where it pressed it (the tab loses its
+    // focus while its push plays).
     if (tab_dir) {
         u32 tab = tab_dir < 0 ? up : down;
-        bool still = std::fabs(px - tab_x) < 0.03f && std::fabs(py - tab_y) < 0.03f;
-        if (!(held & game::PAD_A) || !still || !enabled(tab)) {
+        f32 tx, ty;
+        const bool still = std::fabs(px - tab_x) < 0.03f && std::fabs(py - tab_y) < 0.03f;
+        const bool on = touch_tab ? touch_tab == tab && engine::ui::touch_point(tx, ty) && on_tab(tab, tx, ty)
+                                  : (held & game::PAD_A) && still;
+        if (!on || !enabled(tab)) {
             tab_dir = 0;
-        } else if (!glide_frames) {
-            int t = std::min(std::max(top + tab_dir, 0), max_top());
-            if (t != top) {
-                top = t;
-                glide(rhythm(tab_steps), tab_steps == 0);
-                tab_steps++;
+        } else {
+            tab_timer -= dt;
+            if (tab_timer <= 0) {
+                const f32 n = rhythm(tab_steps++);
+                tab_timer += n;
+                scroll_by(tab_dir, n, false);
             }
         }
     }
 }
 
 void TrackList::Impl::advance() {
-    if (!glide_frames)
+    if (glide_len <= 0)
         return;
-    glide_t++;
-    f32 f = (f32)glide_t / (f32)glide_frames;
+    glide_t += dt;
+    f32 f = std::min(glide_t / glide_len, 1.0f);
     if (glide_ease)
         f = f * f * (3 - 2 * f);
     pos = glide_from + ((f32)top - glide_from) * f;
-    if (glide_t >= glide_frames) {
+    if (glide_t >= glide_len) {
         pos = (f32)top;
-        glide_frames = 0;
+        glide_len = 0;
     }
+}
+
+// an entry's row's place (its centre's y under the window's centre) at the list's scroll position,
+// on the bottom screen's pixels
+f32 TrackList::Impl::row_y(int entry) const {
+    const f32 y = FIRST_Y - ((f32)entry - pos) * PITCH;
+    return y + engine::ui::row_pixel_snap(WINDOW_Y + y - PITCH / 2);
 }
 
 // every row button at its entry's place: slot k shows the entry e = k (mod SLOTS) among the
@@ -552,7 +699,7 @@ void TrackList::Impl::place_rows() {
         if (r.entry != e)
             assign(r, e);
         f32 part = shown_part(pos, e);
-        move(r.panes.root, 0, FIRST_Y - ((f32)e - pos) * PITCH);
+        move(r.panes.root, 0, row_y(e));
         set_alpha(r.panes.root, (u8)(part * 255.0f + 0.5f));
         show(r.panes.root, part > 0);
         set_active(r.button, opened && !r.header && part >= 0.5f && !drag.holding());
@@ -584,8 +731,8 @@ void TrackList::Impl::place_bar(const Music& music) {
             paint(bar.bar, lit ? PAUSED_BAR_LIT : PAUSED_BAR);
         else
             paint(bar.bar, lit ? CYAN_PUSH : CYAN);
-        set_alpha(bar.date, state == PlayState::SWITCHING && (frames / 8) % 2 ? 80 : 255);
-        move(root, 0, FIRST_Y - ((f32)e - pos) * PITCH);
+        set_alpha(bar.date, state == PlayState::SWITCHING && (int)(clock / BLINK) % 2 ? 80 : 255);
+        move(root, 0, row_y(e));
         set_alpha(root, (u8)(part * 255.0f + 0.5f));
         show(root, true);
     }
@@ -619,31 +766,39 @@ void TrackList::Impl::pose_highlight() {
 void TrackList::update(const Music& music) {
     Impl& m = *impl_;
     m.frames++;
+    m.dt = m.ticker.tick();
+    m.clock += m.dt;
     if (!m.opened && screen_may_open(m.frames)) {
         m.opened = true;
         play(m.window, m.fade_in);
     }
     m.follow_music(music);
+    m.tab_touch();
     if (m.opened) {
         const engine::ui::screen::Region rows{WINDOW_X - WINDOW_W / 2, WINDOW_Y + VISIBLE * PITCH / 2, WINDOW_W,
                                               VISIBLE * PITCH};
-        switch (m.drag.update(rows, m.pos, PITCH, m.max_top())) {
+        switch (m.drag.update(rows, m.pos, PITCH, m.max_top(), m.dt)) {
         case engine::ui::DragScroll::Step::DRAG:
-            m.glide_frames = 0, m.tab_dir = 0;
+        case engine::ui::DragScroll::Step::COAST:
+            m.glide_len = 0, m.tab_dir = 0;
             m.top = (int)std::lround(m.pos);
             break;
         case engine::ui::DragScroll::Step::LET_GO:
             m.top = std::min(std::max((int)std::lround(m.pos), 0), m.max_top());
-            m.glide(8, true);
+            m.glide(SETTLE, true);
             break;
+        case engine::ui::DragScroll::Step::TAP: m.tap_heading(m.drag.tap_y()); break;
         case engine::ui::DragScroll::Step::NONE: break;
         }
         m.input();
     }
-    // the pointer on a row: the highlight is there
-    for (const Impl::Row& r : m.rows)
-        if (focused(r.button) && r.entry >= 0 && !r.header)
-            m.highlight = r.entry;
+    // the pointer on a row: the highlight is there (not when the D-pad, L or R have moved it since
+    // the pointer last moved: the cursor keeps the focus it had until the pointer, sent away, is
+    // read as gone)
+    if (!m.pad_mode)
+        for (const Impl::Row& r : m.rows)
+            if (focused(r.button) && r.entry >= 0 && !r.header)
+                m.highlight = r.entry;
 
     m.advance();
     m.place_rows();
@@ -658,10 +813,24 @@ void TrackList::update(const Music& music) {
 
 void TrackList::draw() { layout_draw(impl_->window); }
 
+void TrackList::leaving() {
+    impl_->gone = true;
+    impl_->tab_dir = 0;
+}
+
+// A tab's push scrolls at once (tab_press), unless it is that of a touch already taken (tab_touch).
 // A row's push: what it showed when the push started is what was chosen (the list can glide on
 // during the push, the D-pad changing the track, and give the row to another entry).
 bool TrackList::on_push_start(u32 button) {
-    for (Impl::Row& r : impl_->rows) {
+    Impl& m = *impl_;
+    if (button == m.up || button == m.down) {
+        if (button == m.taken_tab)
+            m.taken_tab = 0;  // (pressed as the touch came down: tab_touch)
+        else if (m.opened)
+            m.tab_press(button);
+        return true;
+    }
+    for (Impl::Row& r : m.rows) {
         if (r.button == button) {
             r.pushed_entry = r.entry >= 0 && !r.header ? r.entry : -1;
             return true;

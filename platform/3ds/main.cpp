@@ -2,10 +2,11 @@
 // content/, nand/ as tools/stage_data.py makes them from the user's own WAD) lives on the SD card
 // in sdmc:/3ds/noma.
 //
-// Controls (a Wii Remote held pointing at the screen): touch the bottom screen to point,
-// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote. Left alone for 3 s, the
-// pointer leaves the screen, as a remote put down does. The remote's HOME button has no
-// counterpart: the Wii's HOME Button Menu isn't part of the port (engine/system).
+// Controls (a Wii Remote held pointing at the screen): touch the bottom screen to point and press,
+// A B 1(X) 2(Y) + (START) - (SELECT) and the D-pad as on the remote. Half a second after a touch
+// (3 s after the circle pad moved it) the pointer leaves the screen, as a remote put down does.
+// The remote's HOME button has no counterpart: the Wii's HOME Button Menu isn't part of the port
+// (engine/system).
 #include <3ds.h>
 #include <citro3d.h>
 #include <sys/stat.h>
@@ -26,6 +27,7 @@
 #include "gx_pica.h"
 #include "runtime/hw/gx/raster.h"
 #include "engine/input/remote.h"
+#include "engine/room/panel.h"
 #include "runtime/hw/ios/ios.h"
 #include "runtime/runtime.h"
 
@@ -865,8 +867,9 @@ static void poll_input() {
         touchPosition t;
         hidTouchRead(&t);
         s_in.touch_x = t.px, s_in.touch_y = t.py;
-        s_in.x = (float)t.px / 160.0f - 1.0f;
-        s_in.y = (float)t.py / 120.0f - 1.0f;
+        // (the pixel's middle)
+        s_in.x = ((float)t.px + 0.5f) / 160.0f - 1.0f;
+        s_in.y = ((float)t.py + 0.5f) / 120.0f - 1.0f;
     }
     // the circle pad: the stick in stick mode, else it moves the pointer (at full tilt 0.03 of the
     // screen a frame, as before; slower from the dead zone's edge in)
@@ -893,17 +896,23 @@ static void poll_input() {
     circlePosition cs;
     hidCstickRead(&cs);
     read_stick(cs, CSTICK_DEAD, &s_in.cam_x, &s_in.cam_y);
-    // The pointer stays where the stylus left it, so a menu that opens while the pointer is over
-    // it (the room's その他 panel) never closed, and buttons stayed highlighted. A Wii Remote put
-    // down or pointed away has no pointer, and the room hides its menus: here the pointer leaves
-    // the screen 3 s after the last touch or circle pad move (time to tap, then press A), and the
-    // next one brings it back. A doesn't: what was under the pointer, coming back, isn't ready
-    // for a press yet (the room bar slides in first). Scripted runs keep it on the screen.
+    // The pointer stays where the stylus left it, so the button last touched would keep its
+    // focused look, and a menu opened under it would see it pointed at. A Wii Remote put down or
+    // pointed away has no pointer: here the pointer leaves the screen half a second after the last
+    // touch (its press made by then: a held touch's as it came down, a tap's a read or two after
+    // it, engine/input/remote.cpp; a button's push under way finishes without the pointer), 3 s
+    // after the circle pad last moved it (time to move it, then press A), 3 s after a touch too in
+    // the channel's own scenes on the bottom screen (engine::room::away(): the theater shows its
+    // movie's controls only while the pointer is there), and the next touch or
+    // move brings it back (A doesn't). The game's cursor takes a touch's pointer at once, a
+    // remote's after it settles (runtime/patches/overlays.cpp). Scripted runs keep it on the
+    // screen.
     static u64 s_used;
+    static bool s_touched;  // the pointer was last moved by a touch
     u64 now = host_time_us();
     if ((held & KEY_TOUCH) || nudged)
-        s_used = now;
-    s_in.pointing = now - s_used < 3000000 || input_script_active();
+        s_used = now, s_touched = (held & KEY_TOUCH) != 0;
+    s_in.pointing = now - s_used < (s_touched && !engine::room::away() ? 500000u : 3000000u) || input_script_active();
     // NOMA_INPUT in env.txt: scripted presses on top (unattended runs in an emulator); a scripted
     // P(x;y) moves the pointer once, and touching or the circle pad moves it on from there
     if (input_script_active())

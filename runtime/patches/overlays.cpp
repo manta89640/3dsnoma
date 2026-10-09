@@ -144,8 +144,16 @@ void app_Application_Draw(u32 r3) {
     app_Exit_Draw(r3 + 0x330);
 }
 
+// layout::Cursor: +0x288 the updates it still waits, once the pointer is back on the screen, before
+// it places itself, hit-tests and so takes a press where the pointer is (10, set while the pointer
+// is away: a remote's pointer settles as it comes back onto the screen). A touch is exactly where
+// it is, and its A comes at its second read (engine/input/remote.cpp): inside the wait the cursor
+// hasn't hit-tested where the touch is, the press is lost, and a held A doesn't come down again
+// while the touch lasts. So the touch's pointer is taken at once; the circle pad's keeps the wait.
 u32 layout_Cursor_Update(u32 r3, u32 r4, u32 r5, u32 r6, u32 r7, u32 r8, u32 r9, u32 r10, f64 f1, f64 f2, f64 f3,
                          f64 f4, f64 f5, f64 f6, f64 f7, f64 f8) {
+    if (guest::input_pointer_from_touch())
+        guest::store32(r3 + 0x288, 0);
     u32 r = layout_Cursor_Update_orig(r3, r4, r5, r6, r7, r8, r9, r10, f1, f2, f3, f4, f5, f6, f7, f8);
     const bool shown = guest::input_pointer_by_stick();
     for (u32 layout : {0x8u, 0x130u})

@@ -20,6 +20,9 @@ public:
     // list's? (then it acts)
     bool on_push_start(u32 button);
     bool on_pushed(u32 button);
+    // the scene is going (the game's cursor is locked through its fade): the list takes no more
+    // touches or held tabs of its own
+    void leaving();
     // the track (an index into catalog()) chosen since the last call, or -1
     int take_chosen();
     // the track the list's highlight is on (A plays it when the pointer is away from the screen)

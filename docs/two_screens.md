@@ -72,15 +72,26 @@ draw, and drawn on the bottom screen without its hand.
 
 `engine/input/remote.cpp` feeds the game's KPAD from the 3DS's controls:
 
-- touch: the pointer, and a tap is A for the game's cursor (after its 10-frame hold-off,
-  `TAP_READY`), so a tap presses what it is on;
+- touch: the pointer, and A held from its second read (`TAP_READY` 2: the first read puts the
+  pointer there) until it lifts, as the Wii pressed at A-down: held arrows repeat (the channel's
+  `layout::RepeatButton`s, the lists' tabs); the game's cursor takes a touch's pointer at once,
+  skipping the 10 updates a remote's pointer settles for (`layout_Cursor_Update`,
+  runtime/patches/overlays.cpp: `input_pointer_from_touch`);
+- a touch that begins on a list's rows (`input_set_drag_area`, renewed by the list every frame)
+  presses only as a tap at its release; once it is a drag (`input_mark_drag`) it presses nothing,
+  the pointer held where it began and taken away when it lets go;
+- the pointer leaves half a second after a touch, 3 s after the circle pad or a touch in the
+  channel's own screens (platform/3ds/main.cpp); a D-pad move of a list's highlight sends it away at
+  once (`input_pointer_away`), so A presses the highlight;
+- on Wuhu Island the jump is the A button's own (`wiimote_a_button_pressed/held`): a touch holds the
+  game's A for the bottom screen's menus;
 - the circle pad moves the pointer (out of stick mode), inside the claimed region too
   (`WiimoteInput::nudge_x/y`);
 - the Wii hand (each `layout::Cursor`'s layouts) shows only while the circle pad moves the pointer
   (`input_pointer_by_stick`, `layout_Cursor_Update`); the room's hand is drawn by its panel on the
   bottom screen;
 - presses between two of the game's reads are kept for the next (`wiimote_take_pressed`);
-- a drag on a list scrolls it and is no tap (`engine/ui/drag_scroll.h`, `input_cancel_tap`).
+- a drag on a list scrolls it and coasts when flicked (`engine/ui/drag_scroll.h`).
 
 ## Making a bottom-screen part
 

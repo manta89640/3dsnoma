@@ -5,7 +5,8 @@
 // (shoulder buttons, which only native scenes read: "5:[L]:2" holds L for 2 s); the 3DS's names
 // for the others, as the platform maps them: [X] (= 1), [Y] (= 2), [START] (= +), [SELECT] (= -).
 // "T(x;y)" touches the bottom screen at pixel x, y (0..319, 0..239) for the event's seconds (a tap:
-// 0.15 s), and the pointer goes where the touch points, as the 3DS's own touch moves it;
+// 0.15 s; "T(x;y):2" holds it 2 s, which inside a scene's region is A held, engine/input/remote.cpp),
+// and the pointer goes where the touch points, as the 3DS's own touch moves it;
 // "T(x0;y0;x1;y1)" drags from x0, y0 to x1, y1 over the event's seconds;
 // "P(x;y)" moves the pointer to x, y (-1..1) once, as a touch
 // would: the platform's own input (the touch screen, the circle pad) moves it on; "P(off)" takes it
@@ -220,7 +221,8 @@ void input_script_apply(WiimoteInput& in) {
                 py = py < 0 ? 0 : py > 239 ? 239 : py;
                 in.touching = true;
                 in.touch_x = (u16)px, in.touch_y = (u16)py;
-                in.x = px / 160.0f - 1.0f, in.y = py / 120.0f - 1.0f;  // (as platform/3ds/main.cpp's touch)
+                // (the pixel's middle, as platform/3ds/main.cpp's touch)
+                in.x = (in.touch_x + 0.5f) / 160.0f - 1.0f, in.y = (in.touch_y + 0.5f) / 120.0f - 1.0f;
                 s_off = false;
             }
         } else if (ev.stick) {

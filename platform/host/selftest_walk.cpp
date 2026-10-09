@@ -663,55 +663,228 @@ void selftest_input() {
         in.touch_y, in.x, in.y, ok ? "ok" : "MISMATCH");
 }
 
-// NOMA_SELFTEST=input, the game's reads (KPADReadEx) against the platform's input set every retrace:
-// a press and its release between two reads seen held at one read and let go at the next; a tap
-// (touch, let go) as A once the pointer has been on the screen for 11 reads, held for one read; no
-// tap in stick mode
+// NOMA_SELFTEST=input, the game's reads (KPADReadEx) against the platform's input set every retrace
+// (engine/input/remote.cpp): a press and its release between two reads seen held at one read and
+// let go at the next. Outside a region (the top screen's pointer): a tap (touch, let go) as A for one
+// read, at the second read that shows its pointer (one between two reads: the read after the one
+// that moves the pointer there); none in stick mode. Inside one (the bottom screen's): the pointer at
+// the touched pixel's middle from the touch's first read, A held from its second until it lifts (the
+// touch's, not the A button's), the island's stick mode too; a touch too short for a second read as
+// a tap; a touch just after a tap as a press of its own (A up between); one that begins in a drag
+// area as A only at its release, and none once it is a drag, whose pointer stays where it began
+// until the next touch; a drag area not renewed forgotten; nothing from a touch the region changed
+// under. The game's cursor takes the touch's pointer at once (input_pointer_from_touch: touching,
+// or its tap's A to come; the hold-off it skips, runtime/patches/overlays.cpp, would lose a held
+// touch's press), a nudge's after it settles; input_pointer_away takes the pointer off until a
+// touch or a nudge; the stick as the D-pad gives only the directions asked for.
 void selftest_kpad() {
     const u32 st = 0x81600000;  // (a KPADStatus in guest memory nothing else uses here)
     g::KPADInitEx(0, 0);
+    struct Read {
+        u32 hold, trig;
+        f32 x, y;
+        bool valid, touch;  // the pointer on the screen; the A the touch's
+    };
     auto read = [&]() {
         g::KPADReadEx(0, st, 1, 0);
-        return std::pair<u32, u32>(guest::load32(st + 0x00), guest::load32(st + 0x04));  // hold, trigger
+        Read r;
+        r.hold = guest::load32(st + 0x00), r.trig = guest::load32(st + 0x04);
+        const u32 x = guest::load32(st + 0x20), y = guest::load32(st + 0x24);
+        std::memcpy(&r.x, &x, 4), std::memcpy(&r.y, &y, 4);
+        r.valid = guest::load8(st + 0x5E) != 0;
+        r.touch = wiimote_a_from_touch();
+        return r;
     };
     WiimoteInput in;
     in.buttons = 0, in.pointing = true;
-    bool ok = true;
+    auto set = [&]() { wiimote_set_input(in); };
+    // (the pointer where platform/3ds/main.cpp puts a touch: the pixel's middle, on the top screen)
+    auto touch = [&](u16 x, u16 y) {
+        in.touching = true, in.touch_x = x, in.touch_y = y;
+        in.x = (x + 0.5f) / 160.0f - 1.0f, in.y = (y + 0.5f) / 120.0f - 1.0f;
+        set();
+    };
+    auto lift = [&]() { in.touching = false, set(); };
+    auto reads = [&](int n) {
+        for (int i = 0; i < n; i++)
+            read();
+    };
+    int checks = 0;
+    std::string failed;
+    auto check = [&](bool ok, const char* what) {
+        checks++;
+        if (!ok)
+            failed += (failed.empty() ? "" : "; ") + std::string(what);
+    };
+
     // a B press and release between two reads
-    wiimote_set_input(in);
+    set();
     read();
-    in.buttons = WM_B, wiimote_set_input(in);
-    in.buttons = 0, wiimote_set_input(in);
-    auto r1 = read(), r2 = read();
-    ok &= r1.first == WM_B && r1.second == WM_B && r2.first == 0;
-    // a tap: the A press waits for the pointer's 11th read on the screen, then lasts one read
-    for (int i = 0; i < 20; i++)
-        read();  // (the pointer has been on the screen for a while)
-    in.touching = true, in.touch_x = 100, in.touch_y = 50, wiimote_set_input(in);
-    read();
-    in.touching = false, wiimote_set_input(in);
-    auto t1 = read(), t2 = read();
-    ok &= t1.first == WM_A && t1.second == WM_A && t2.first == 0;
-    // a tap just after the pointer came back: A at its 11th read
-    in.pointing = false, wiimote_set_input(in), read();
-    in.pointing = true, in.touching = true, wiimote_set_input(in), read();
-    in.touching = false, wiimote_set_input(in);
+    in.buttons = WM_B, set();
+    in.buttons = 0, set();
+    const Read b1 = read(), b2 = read();
+    check(b1.hold == WM_B && b1.trig == WM_B && b2.hold == 0, "a press between reads");
+
+    // outside a region, a tap: A for the one read after it ends (the pointer on the screen a while)
+    reads(5);
+    touch(100, 50);
+    bool none = read().hold == 0;
+    lift();
+    const Read t1 = read(), t2 = read();
+    check(none && t1.hold == WM_A && t1.trig == WM_A && t1.touch && t2.hold == 0, "a tap outside a region");
+    // a tap just after the pointer came back: A at its 2nd read
+    in.pointing = false, set(), read();
+    in.pointing = true, touch(100, 50), read();
+    lift();
     int at = 0;
     for (int i = 2; i <= 14 && !at; i++)
-        if (read().second == WM_A)
+        if (read().trig == WM_A)
             at = i;
-    ok &= at == 11;
+    check(at == 2, "a tap's A at the pointer's 2nd read");
+    // a tap between two reads, elsewhere: the first read moves the pointer there, the next gives A
+    reads(2);
+    touch(300, 200), lift();
+    const Read q1 = read(), q2 = read();
+    check(q1.hold == 0 && q2.trig == WM_A && q2.x == q1.x && q2.y == q1.y && std::fabs(q1.x - 300.5f / 160 + 1) < 1e-5f,
+          "a tap between reads: the pointer there a read before its A");
     // stick mode: a tap is no press
     input_set_stick_mode(true);
-    in.touching = true, wiimote_set_input(in), read();
-    in.touching = false, wiimote_set_input(in);
-    bool none = true;
-    for (int i = 0; i < 14; i++)
-        none &= read().first == 0;
+    touch(100, 50), read();
+    lift();
+    none = true;
+    for (int i = 0; i < 6; i++)
+        none &= read().hold == 0;
     input_set_stick_mode(false);
-    ok &= none;
-    log("selftest input: KPAD reads: press between reads hold %X/%X, tap A %X then %X, a tap at read %d, stick mode %s: %s",
-        r1.first, r2.first, t1.first, t2.first, at, none ? "no press" : "PRESSED", ok ? "ok" : "MISMATCH");
+    check(none, "no tap in stick mode");
+
+    // inside a region (the bottom screen's, engine/ui/screen.h BOTTOM): a held touch, the pointer
+    // there at its first read (the pixel's middle), A from its second, held, until it lifts
+    const f32 left = -304, top = 172, width = 1600.0f / 3, height = 400;
+    input_set_touch_region(true, left, top, width, height);
+    reads(3);
+    touch(160, 177);
+    const Read h1 = read();
+    const f32 px = (left + 160.5f / 320.0f * width) / 304.0f, py = -(top - 177.5f / 240.0f * height) / 228.0f;
+    check(h1.hold == 0 && std::fabs(h1.x - px) < 1e-5f && std::fabs(h1.y - py) < 1e-5f,
+          "a touch's first read: the pointer at the pixel's middle, no A");
+    bool held = true;
+    for (int i = 2; i <= 6; i++) {
+        const Read r = read();
+        held &= r.hold == WM_A && r.trig == (i == 2 ? WM_A : 0u) && r.touch;
+    }
+    check(held, "a held touch: A held from its 2nd read, the touch's");
+    lift();
+    const Read h7 = read(), h8 = read();
+    check(h7.hold == 0 && h7.trig == 0 && h8.hold == 0, "a held touch let go: A let go, no tap after");
+    // the A button pressed while the touch holds A: not the touch's alone
+    touch(160, 177), reads(2);
+    in.buttons = WM_A, set();
+    const Read ab = read();
+    in.buttons = 0, lift(), reads(2);
+    check((ab.hold & WM_A) && !ab.touch, "the A button with a touch: not the touch's");
+    // the A button let go while a touch is down: A up for a read, then the touch's own press
+    in.buttons = WM_A, set(), read();
+    touch(160, 177), read();
+    in.buttons = 0, set();
+    const Read u1 = read(), u2 = read();
+    lift(), reads(2);
+    check(u1.hold == 0 && u2.hold == WM_A && u2.trig == WM_A && u2.touch,
+          "the A button let go during a touch: then the touch's press");
+    // a touch too short for a second read: a tap
+    touch(160, 177), read();
+    lift();
+    const Read s1 = read(), s2 = read();
+    check(s1.hold == WM_A && s1.trig == WM_A && s1.touch && s2.hold == 0, "a touch gone before its 2nd read: a tap");
+
+    // a touch that begins in a drag area (renewed every frame, as a list's rows): no A while it
+    // lasts, A for one read after it ends
+    auto area = []() { input_set_drag_area(20, 30, 260, 160); };
+    area();
+    touch(100, 80);
+    none = true;
+    for (int i = 0; i < 5; i++)
+        none &= read().hold == 0, area();
+    lift();
+    const Read d1 = read(), d2 = read();
+    area();
+    check(none && d1.hold == WM_A && d1.trig == WM_A && d1.touch && d2.hold == 0,
+          "a touch in a drag area: A only at its release");
+    // ... and a drag (input_mark_drag): no A at all, the pointer kept where it began
+    touch(100, 80);
+    const Read g1 = read();
+    area(), touch(100, 120), read(), input_mark_drag(), area();
+    touch(100, 150);
+    const Read g3 = read();
+    lift();
+    const Read g4 = read(), g5 = read();
+    check((g1.hold | g3.hold | g4.hold | g5.hold) == 0 && g3.x == g1.x && g3.y == g1.y && g5.x == g1.x &&
+              g5.y == g1.y,
+          "a drag: no A, the pointer where it began");
+    // a drag area not renewed for two reads (three have passed) is forgotten: a touch there holds A,
+    // and the pointer goes where it is again
+    touch(100, 90);
+    const Read e1 = read(), e2 = read();
+    lift(), reads(2);
+    check(e2.hold == WM_A && e2.trig == WM_A && e1.y != g1.y, "a drag area forgotten, the pointer free again");
+    // a touch the region changes under (the scene it was aimed at gone) presses nothing
+    touch(160, 177), read();
+    input_set_touch_region(true, -304, 228, 608, 456);
+    none = true;
+    for (int i = 0; i < 3; i++)
+        none &= read().hold == 0;
+    lift();
+    for (int i = 0; i < 3; i++)
+        none &= read().hold == 0;
+    check(none, "a touch the region changed under: no press");
+
+    // the game's cursor takes the touch's pointer at once (overlays.cpp layout_Cursor_Update): while
+    // touching and while its tap's A is to come, not once it is given, nor for a nudge's pointer
+    in.pointing = false, set(), reads(2);
+    in.pointing = true, touch(200, 100);
+    const bool c1 = input_pointer_from_touch();
+    read();
+    lift();
+    const bool c2 = input_pointer_from_touch();
+    const Read c3 = read();
+    const bool c4 = input_pointer_from_touch();
+    in.pointing = false, set(), read();
+    in.pointing = true, in.nudge_x = 0.01f, set(), in.nudge_x = 0;
+    const bool c5 = input_pointer_from_touch();
+    reads(2);
+    check(c1 && c2 && c3.trig == WM_A && !c4 && !c5, "the cursor taking the touch's pointer at once");
+
+    // input_pointer_away: off the screen until a touch or a nudge
+    input_pointer_away();
+    const Read a1 = read();
+    set();
+    const Read a2 = read();
+    in.nudge_x = 0.01f, set(), in.nudge_x = 0;
+    const Read a3 = read();
+    input_pointer_away(), read();
+    touch(200, 100);
+    const Read a4 = read();
+    lift(), reads(2);
+    check(!a1.valid && !a2.valid && a3.valid && a4.valid, "the pointer away until a touch or a nudge");
+
+    // stick mode in a region (the island's): a touch is A held, the touch's (no jump); the stick as
+    // the D-pad gives only the directions asked for
+    input_set_stick_mode(true);
+    touch(20, 225), read();
+    const Read i2 = read();
+    lift(), reads(2);
+    check(i2.hold == WM_A && i2.touch, "stick mode in a region: a touch holds A");
+    input_set_stick_as_dpad(true, WM_UP | WM_DOWN);
+    in.stick_x = 1, in.stick_y = 1, set();
+    const Read k1 = read();
+    in.stick_x = -1, in.stick_y = -1, set();
+    const Read k2 = read();
+    in.stick_x = in.stick_y = 0, set(), read();
+    input_set_stick_as_dpad(false);
+    input_set_stick_mode(false);
+    input_set_touch_region(false, 0, 0, 0, 0);
+    check(k1.hold == WM_UP && k2.hold == WM_DOWN, "the stick as the D-pad: up and down only");
+
+    log("selftest input: KPAD reads, %d checks: %s%s", checks, failed.empty() ? "ok" : "MISMATCH: ", failed.c_str());
 }
 
 void selftest_walk() {

@@ -104,9 +104,9 @@ f32 clamp1(f32 v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
 // the move stick (the circle pad); the camera: the New 3DS's C-stick, or L and R to turn it round
 // the Mii (R to the right); B held sprints (ZR too on a New 3DS: an Old 3DS has only B), the D-pad's
 // up and down look up and down and its left and right bring it in and out, Y (the remote's 2)
-// brings it round behind the Mii, A jumps (the A button's: a tap on the bottom screen's Home tab is
-// a press there, no jump). (NOMA_INPUT on the host: S(x;y), C(x;y), [L], [R], [ZR], B, the D-pad's
-// U, D, L, R, 2 and A.)
+// brings it round behind the Mii, A jumps (the A button's: a touch on the bottom screen, the Home
+// tab or the menus, is a press there and A held as long as it lasts, no jump and no higher one).
+// (NOMA_INPUT on the host: S(x;y), C(x;y), [L], [R], [ZR], B, the D-pad's U, D, L, R, 2 and A.)
 Controls read_controls() {
     Controls c;
     c.held = game::buttons_held();
@@ -120,9 +120,10 @@ Controls read_controls() {
     c.zoom = on(game::PAD_RIGHT) - on(game::PAD_LEFT);
     c.fast_run = (in.pad & guest::PAD_ZR) != 0 || (c.held & game::PAD_B) != 0;
     c.behind = (c.pressed & game::PAD_TWO) != 0;
-    const bool tapped = guest::wiimote_last_read_tapped();
-    c.jump = (c.pressed & game::PAD_A) != 0 && !tapped;
-    c.jump_held = (c.held & game::PAD_A) != 0 && !tapped;
+    // (the A button's own: a thumb resting on the bottom screen holds the game's A, which must
+    // neither jump nor keep the A button from jumping)
+    c.jump = guest::wiimote_a_button_pressed();
+    c.jump_held = guest::wiimote_a_button_held();
     c.vehicle = (c.pressed & game::PAD_ONE) != 0;
     return c;
 }

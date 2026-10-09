@@ -5,14 +5,15 @@
 // (which hit-tests the buttons). On the 3DS's two screens (engine/ui/screen.h): the top one has the
 // stage, where the household's Miis dance, and the title of what plays over it; the bottom one the
 // channel's list window of tracks, the video player's buttons and the Home tab, which the touch
-// screen works directly (a tap presses what it is on; a drag isn't scrolling yet: the list's tabs
-// are). The cursor isn't drawn: there is nothing to point at on the top screen. It is reached from
+// screen works directly (a touch presses what it is on; a touch on the list's rows drags them). The
+// cursor isn't drawn: there is nothing to point at on the top screen. It is reached from
 // the room's bar (runtime/patches/menus.cpp) through the room's circle wipe, and goes back with a
 // white fade, after which the room is made again and its music comes back by itself.
 //
-// Buttons: the D-pad's up and down move the list's highlight, A plays the highlighted track (when
-// nothing was touched for a while), left and right play the previous and next track, START
-// pauses and resumes, SELECT stops, B goes back to the room.
+// Buttons: the D-pad's up and down (or the circle pad tilted up or down) move the list's
+// highlight, sending the pointer away from the screen, and A plays the highlighted track while the
+// pointer is away; L and R jump from heading to heading; left and right play the previous and next
+// track, START pauses and resumes, SELECT stops, B goes back to the room.
 #include "engine/soundplayer/sound_player.h"
 
 #include "engine/soundplayer/catalog.h"
@@ -83,13 +84,17 @@ SoundPlayerScene::SoundPlayerScene() {
     game::bottom_set_mode(bottom_, game::BOTTOM_HOME, false);
     engine::system::hook_button(bottom_ + game::BOTTOM_HOME_BTN_02);
     engine::ui::screen::claim(BOTTOM_REGION);
-    guest::input_set_stick_mode(true);  // (the circle pad doesn't move a pointer about)
+    // The circle pad doesn't move a pointer about: tilted up or down it is the D-pad's up and down
+    // (the list's highlight), not left or right (which would change the track).
+    guest::input_set_stick_mode(true);
+    guest::input_set_stick_as_dpad(true, guest::WM_UP | guest::WM_DOWN);
     // the room left a white screen behind (its circle wipe): fade in from it
     game::wipe_in(game::WIPE_FADE_WHITE);
     guest::log("soundplayer: open, %u tracks, playing %d", (u32)tracks.size(), current_index());
 }
 
 SoundPlayerScene::~SoundPlayerScene() {
+    guest::input_set_stick_as_dpad(false);
     guest::input_set_stick_mode(false);
     engine::ui::screen::release();
     game::bottom_dtor_delete(bottom_);
@@ -216,6 +221,7 @@ void SoundPlayerScene::leave() {
         return;
     leaving_ = true;
     music_->leave();  // the player's piece stops as the screen goes
+    list_->leaving();
     guest::log("soundplayer: back to the room");
     game::change_scene_with_wipe(guest(), game::NAME_LIVING_ROOM_SCENE, game::WIPE_FADE_WHITE);
 }

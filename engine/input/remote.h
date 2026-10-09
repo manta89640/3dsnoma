@@ -40,8 +40,8 @@ struct WiimoteInput {
     float cam_x = 0.0f, cam_y = 0.0f;
     u16 pad = 0;               // the PAD_ bits held
     // The bottom screen's touch as it is (the pointer above is where it points on the top screen):
-    // held, and where, in the bottom screen's pixels (0..319 across, 0..239 down). For the native
-    // input layer to come (touch as a press, not a pointer); the game reads none of it.
+    // held, and where, in the bottom screen's pixels (0..319 across, 0..239 down). The game reads
+    // it only as remote.cpp makes it a press and a pointer; native scenes (a list's drag) read it.
     bool touching = false;
     u16 touch_x = 0, touch_y = 0;
     // how far the circle pad moved the pointer with this input (out of stick mode; in the pointer's
@@ -54,8 +54,9 @@ struct WiimoteInput {
 void wiimote_set_input(const WiimoteInput& in);
 bool input_old3ds();
 // For KPADReadEx (remote.cpp), at the game's read: the buttons pressed since the last read (a press
-// and its release between two reads still counts), and whether the touch screen was tapped (let go;
-// not in stick mode), which the game's cursor gets as A: a tap presses what it is on.
+// and its release between two reads still counts), and whether a touch that presses as a tap (see
+// wiimote_a_from_touch) has ended, which the game's cursor gets as A for one read: a tap presses
+// what it is on.
 u16 wiimote_take_pressed();
 bool wiimote_take_tap();
 
@@ -63,20 +64,50 @@ bool wiimote_take_tap();
 // region of the layouts' space (its left and top edges, width and height, in the channel's layout
 // units, y up): the game's pointer goes where the touch is in it, as the game's cursor reads the
 // pointer (x / 304, -y / 228 of the layout units), and stays inside it (the circle pad, out of
-// stick mode, moves it about there as it moves the pointer otherwise); a tap is a press there in
-// stick mode too.
+// stick mode, moves it about there as it moves the pointer otherwise); a touch is a press there in
+// stick mode too. A touch going on when the region changes (or its tap still to come) presses
+// nothing: it was aimed at what was there before.
 void input_set_touch_region(bool on, f32 left, f32 top, f32 width, f32 height);
 // whether the pointer was last moved by the circle pad (or a script), not by a touch: the pointer's
 // hand shows only then (what is touched is pointed at directly)
 bool input_pointer_by_stick();
+// whether the pointer is the touch's now (touching, or a tap's A still to come): the game's cursor
+// places itself there at once (runtime/patches/overlays.cpp layout_Cursor_Update), without the
+// settling it gives a remote's pointer coming back
+bool input_pointer_from_touch();
 // The stick (in stick mode) as the D-pad as well, while a scene's menus are up: tilted more than half
-// way, it holds the D-pad's direction for the game (its menus and lists move their highlight).
-void input_set_stick_as_dpad(bool on);
-// whether the A of the game's last read came from a tap (wiimote_take_tap), not the A button: a
-// scene that takes A for something else than pressing (a jump) leaves it out
-bool wiimote_last_read_tapped();
-// the tap just ended (or its A still waiting) is no press: a drag (engine/ui/drag_scroll.h)
+// way, it holds the D-pad's direction for the game (its menus and lists move their highlight); `dirs`
+// the directions it may give (WM_UP | WM_DOWN for a list whose left and right mean something else).
+void input_set_stick_as_dpad(bool on, u16 dirs = WM_UP | WM_DOWN | WM_LEFT | WM_RIGHT);
+// The touch is a press, as pointing and holding A was on the Wii: inside the claimed region, A goes
+// down at a touch's second read (the first places the pointer) and stays down until it lifts. A
+// touch that begins in a drag area (a list's rows: input_set_drag_area) presses only as a tap, A
+// for one read after it ends, and not at all once it has become a drag (input_mark_drag); so do a
+// touch outside a region (the top screen's pointer; none in stick mode) and one gone before its
+// second read.
+//
+// Whether the A of the game's last read came from the touch, not the A button (on every read of a
+// held touch): a scene that takes A for something else than pressing (a jump) leaves it out.
+bool wiimote_a_from_touch();
+// the A button's own state at the game's last read, the touch's A apart: held, and pressed since the
+// read before (a scene where the touch presses its buttons and A does something else: the island's jump)
+bool wiimote_a_button_held();
+bool wiimote_a_button_pressed();
+// a drag area for this frame, in the touch screen's pixels (x0, y0 inclusive, x1, y1 exclusive): the
+// scene showing a draggable list renews it every frame; one not renewed for two reads is forgotten,
+// and a new region (input_set_touch_region) forgets it at once. Whether a touch is in it is decided
+// where the touch begins.
+void input_set_drag_area(u16 x0, u16 y0, u16 x1, u16 y1);
+// the touch going on is a drag (engine/ui/drag_scroll.h): no press (none at its release, and a held
+// A, if it had one, let go), and the region's pointer goes back to where the touch began and stays
+// there (nothing else takes the focus under the finger) until the next touch begins
+void input_mark_drag();
+// the tap just ended (or its A still waiting) is no press: a drag (a second guard: input_mark_drag)
 void input_cancel_tap();
+// The D-pad (or the stick as one) moved a scene's highlight: the pointer leaves the screen, as a Wii
+// Remote pointed away, until the next touch or circle-pad nudge, so that the game's cursor drops the
+// focus it had and A presses the highlight.
+void input_pointer_away();
 // the input as the platform last set it: native scenes read the stick, the camera stick and the
 // pad here (and the buttons and the pointer, if they like)
 const WiimoteInput& wiimote_input();
