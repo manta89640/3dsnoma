@@ -229,6 +229,7 @@ PATCHED_NAMES = {
     "wii_ServerClock_ctor",  # the server clock: known only once a server has answered
     "scene_TitleScene_Opening_OnLogoEnd",  # TitleScene: the opening starts (held offline until it ends)
     "scene_TitleScene_Opening_OnOpeningEnd",  # ... and ends
+    "scene_TitleScene_Opening_Update",  # ... and a press skips the rest of it
     "room_ContentImage_Prefetch",  # the room's content images: none offline (records without an image)
     "g3d_living_Poster_ctor",  # the room's poster: hidden with none to show (engine/system/room_accessories.cpp)
     # nw4r::g3d's model draw, natively (engine/g3d/live_draw.cpp; the game's own stays for the

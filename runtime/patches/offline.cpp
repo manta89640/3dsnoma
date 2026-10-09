@@ -13,6 +13,7 @@ void comm_httpcache_Request_MakeUrl_orig(u32 r3, u32 r4);
 void room_ContentImage_Prefetch_orig(u32 r3, u32 r4);
 u32 scene_TitleScene_Opening_OnLogoEnd_orig(u32 r3);
 u32 scene_TitleScene_Opening_OnOpeningEnd_orig(u32 r3);
+void scene_TitleScene_Opening_Update_orig(u32 r3);
 u32 comm_ec_EcManager_UpdateOff_orig(u32 r3);
 void comm_ec_EcManager_AddRequest_orig(u32 r3, u32 r4);
 u32 comm_nwc24_Nwc24Manager_UpdateClosed_orig(u32 r3);
@@ -120,6 +121,17 @@ u32 scene_TitleScene_Opening_OnOpeningEnd(u32 r3) {
     if (M2C_FIELD(r3, gp<s32>, 0x0) == 2)
         M2C_FIELD(r3, gp<s32>, 0x4) = 1;
     return r;
+}
+
+// ... and A (or a tap, which the game's remote has as A) skips the rest of it: the state moves on
+// at the next update, as at the opening's end
+void scene_TitleScene_Opening_Update(u32 r3) {
+    const u32 controller = GV(u32, GA_input_Controller_sInstance);
+    if (M2C_FIELD(r3, gp<s32>, 0x0) == 2 && controller && (M2C_FIELD(controller, gp<u32>, 0xB44) & 0x800)) {
+        guest::log("title: the opening skipped");
+        M2C_FIELD(r3, gp<s32>, 0x4) = 1;
+    }
+    scene_TitleScene_Opening_Update_orig(r3);
 }
 
 // ---- background services. The channel keeps managers on threads of their own that work
