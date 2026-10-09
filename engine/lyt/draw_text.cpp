@@ -153,7 +153,9 @@ struct GlyphSlot {
     u32 code;  // 0: empty (glyphs are only looked up for characters from 0x20)
     Glyph glyph;
 };
-constexpr u32 GLYPH_SLOTS = 512;  // direct-mapped by the character's low bits
+// two ways a set, the set by a multiplicative hash of the character: by its low bits alone, kana
+// (from 0x3000, a multiple of the size) took the slots of the letters with the same low bits
+constexpr u32 GLYPH_SLOTS = 1024;
 GlyphSlot s_glyphs[GLYPH_SLOTS];
 Font s_glyph_font;  // the font the slots hold glyphs of
 
@@ -172,9 +174,13 @@ u32 adjust_index(const Font& f, u32 index) {
 // character's glyph where the character's sheet isn't loaded). Its char width is also what
 // Font::GetCharWidth gives for it (engine/ut/font.cpp char_widths: the same choice of glyph).
 const Glyph& glyph(const Font& f, u32 code) {
-    GlyphSlot& slot = s_glyphs[code & (GLYPH_SLOTS - 1)];
-    if (slot.code == code)
-        return slot.glyph;
+    GlyphSlot* set = &s_glyphs[((code * 0x9E3779B1u) >> 22) & (GLYPH_SLOTS - 2)];
+    if (set[0].code == code)
+        return set[0].glyph;
+    if (set[1].code == code)
+        return set[1].glyph;
+    set[1] = set[0];  // (the older of the two goes)
+    GlyphSlot& slot = set[0];
     u32 index = engine::ut::get_glyph_index(f.addr, code);
     u32 c = adjust_index(f, index);
     if ((u16)c == 0xFFFF) {

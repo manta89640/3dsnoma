@@ -255,7 +255,7 @@ struct Mat {
     u32 mat_color() const { return chan_ctrl() + ((f38 >> 6) & 4); }
     u32 tex_gens() const { return base(); }
     u32 swap_table() const { return mat_color() + ((f38 >> 5) & 4); }
-    u32 ind_srt() const { return res + (f38 >> 28) * 0x1C; }
+    u32 tex_srts() const { return res + (f38 >> 28) * 0x1C; }  // past the maps' capacity
     u32 tev_stages() const {
         return swap_table() + ((f38 >> 12) & 4) + ((f38 >> 4) & 4) + ((f38 >> 3) & 4) + ((f38 >> 13) & 0x1C) +
                ((f38 >> 18) & 3) * 0x14;
@@ -334,7 +334,9 @@ u32 material_setup_gx(u32 m, u32 modulate, u32 alpha) {
     }
     if (any_srt) {
         const u32 mtx = frame.sp + 0x8;
-        for (u32 i = 0, srt = t.res + t.n_tex_maps() * 0x1C; i < ((t.f3C >> 24) & 0xF); i++, srt += 0x14) {
+        // (the SRTs follow the maps' capacity, not their count: as the decompiled function and
+        // TexMap's accessor read them; the two differ once the game has lowered the count)
+        for (u32 i = 0, srt = t.tex_srts(); i < ((t.f3C >> 24) & 0xF); i++, srt += 0x14) {
             if (!srt_used[i])
                 continue;
             g::nw4r_lyt_CalcTextureMtx(mtx, srt);

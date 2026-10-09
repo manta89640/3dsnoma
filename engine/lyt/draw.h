@@ -64,20 +64,21 @@ struct LytTex {
 };
 
 // The GX state a run of quads is drawn with: everything a layout draw sets per pane. Plain words, all
-// of it zeroed before it is filled (states are compared with memcmp).
+// of it zeroed before it is filled (states are compared with memcmp: the fields that tell runs apart
+// most often, the textures, come first).
 struct LytState {
+    LytTex tex[LYT_MAX_MAPS];
+    u32 n_maps = 0;             // texture maps 0 .. n_maps - 1 above (what TREF's map numbers name)
+    u32 n_texgens = 0;          // GENMODE's texgen count: the texture coordinates the vertices carry
+    u32 n_chans = 1;            // GENMODE's colour channel count (1: the vertex colour is COLOR0A0)
+    u32 alpha_compare = 0;      // BP 0xF3
+    u32 zmode = 0;              // BP 0x40: 0 outside mask panes
+    u32 cmode0 = 0;             // BP 0x41: blend / logic op, dither, colour and alpha update
     // GENMODE's TEV stage count, the stages' colour and alpha combiners (the alpha ones with their
     // swap selects), TREF, KSEL (with the swap tables in its low bits), the colour registers
     // (reg[0] PREV is never set by a layout: 0; reg[1..3] C0-C2) and the konst colours; entries
     // past n_stages zero
     gx::TevRegs tev;
-    u32 n_texgens = 0;          // GENMODE's texgen count: the texture coordinates the vertices carry
-    u32 n_chans = 1;            // GENMODE's colour channel count (1: the vertex colour is COLOR0A0)
-    u32 n_maps = 0;             // texture maps 0 .. n_maps - 1 below (what TREF's map numbers name)
-    LytTex tex[LYT_MAX_MAPS];
-    u32 alpha_compare = 0;      // BP 0xF3
-    u32 zmode = 0;              // BP 0x40: 0 outside mask panes
-    u32 cmode0 = 0;             // BP 0x41: blend / logic op, dither, colour and alpha update
 };
 
 // One vertex, as GX's transform unit would have output it before the projection: the position in
@@ -145,8 +146,7 @@ struct Builder {
     // last run when it has that state, else in a run of their own
     LytVertex* add_quads(u32 state, u32 n) {
         u32 first = (u32)vertices.size();
-        vertices.resize(first + 4 * n);
-        ::memset(&vertices[first], 0, 4 * n * sizeof(LytVertex));
+        vertices.resize(first + 4 * n);  // (value-initialised: zeroed)
         if (!runs.empty() && runs.back().state == state && runs.back().first + runs.back().count == first)
             runs.back().count += 4 * n;
         else

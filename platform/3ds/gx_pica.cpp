@@ -261,8 +261,9 @@ u32 s_buf_base = 0x18000000;
 // ---- NOMA_GX_TIMERS=N (env.txt): the GPU thread's time in each part of the draw path, as
 // milliseconds per frame over N frames, with counts (svcGetSystemTick around every part costs
 // something itself, so only when asked); the profiler's scopes cover the same parts for free.
-// LYT is the whole of the native layouts' packets (PicaRenderer::lyt), the parts of their state
-// (tev, textures, upload, bind, pixel, consts, flush, xform) counted in those sections as well.
+// LYT is the native layouts' packets' own time (PicaRenderer::lyt: their vertices and indices, the
+// projection, the palette); the parts of their state are counted in their own sections (tev,
+// textures, upload, bind, pixel, consts, flush, xform), so that the sections add up to the frame.
 struct Timers {
     enum { PLAN, CONSTS, VERTICES, SLOTS, SUBMIT, FLUSH, TEV, TEXTURES, UPLOAD, BIND, PIXEL, XFORM, FRAME, END, CLEAR, READBACK, COPY, LYT, N };
     u64 ticks[N] = {};
@@ -300,6 +301,15 @@ struct Timed {
 static const char* const k_timer_names[Timers::N] = {"plan", "consts", "vertices", "slots", "submit", "flush", "tev",
                                                      "textures", "upload", "bind", "pixel", "xform", "frame", "end", "clear",
                                                      "readback", "copy", "lyt"};
+
+// the time in every section but LYT so far (what a packet spent in them comes off its own)
+inline u64 timers_but_lyt() {
+    u64 t = 0;
+    for (int k = 0; k < Timers::N; k++)
+        if (k != Timers::LYT)
+            t += T.ticks[k];
+    return t;
+}
 
 // at a frame's end: the frame's wall time; every N frames the averages
 void timers_frame_end() {
@@ -2600,6 +2610,7 @@ struct LytNow {
                              // whole packet's), the texture units' scales (the run's)
     PixelSetup pixel;
     bool pixel_set = false;  // pixel: set by this packet (before its first run the PICA's is unknown here)
+    bool consts_set = false; // consts: the PICA's (after that only the units' scales and bools change)
     s8 coord[3];             // per texture unit: the vertices' texture coordinate it takes (-1: none)
 };
 
@@ -2680,10 +2691,12 @@ void lyt_state(const engine::lyt::LytState& s, LytNow& now) {
         if (on && u > 0)
             c.bools |= u == 1 ? TNL_TG1 : TNL_TG2;
     }
-    if (!P.consts_valid || memcmp(&c, &P.consts, sizeof(c)) != 0) {
+    if (!now.consts_set ? !P.consts_valid || memcmp(&c, &P.consts, sizeof(c)) != 0
+                        : memcmp(c.tcscale, P.consts.tcscale, sizeof(c.tcscale)) != 0 || c.bools != P.consts.bools) {
         flush_batch();
         set_consts(c);
     }
+    now.consts_set = true;
 
     // (ZCONTROL's pixel format is the stream's: a layout doesn't set it)
     const PixelSetup px = pixel_setup(s.zmode, s.cmode0, g_gx.bp[BP_ZCONTROL], s.alpha_compare);
@@ -2702,6 +2715,7 @@ void PicaRenderer::lyt(const engine::lyt::LytPacket& p) {
         return;
     begin_frame();
     Timed timed(Timers::LYT);
+    const u64 nested0 = timers_on() ? timers_but_lyt() : 0;
     // (NOMA_PICA_STEP: each run goes to the GPU alone, as each GX draw does; the GX draws before the
     // packet first)
     auto step = [] {
@@ -2800,6 +2814,8 @@ void PicaRenderer::lyt(const engine::lyt::LytPacket& p) {
     // sent again. P.setup stays theirs.
     P.all_dirty = true;
     P.consts_plan = 0;
+    if (timers_on())  // (Timed adds the whole packet's time as it goes out of scope: LYT keeps its own)
+        T.ticks[Timers::LYT] -= timers_but_lyt() - nested0;
 }
 
 }  // namespace guest

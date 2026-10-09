@@ -862,11 +862,10 @@ private:
     };
 
     // the run's state: the material's, with the mask panes' Z mode and colour updates
-    u32 add_state(const LytMaterial& lm) {
-        LytState s = lm.state;
-        s.zmode = cur_.zmode;
-        s.cmode0 = (s.cmode0 & ~CMODE0_KEEP) | cur_.cmode0_keep;
-        return b_.add_state(s);
+    u32 add_state(LytMaterial& lm) {
+        lm.state.zmode = cur_.zmode;
+        lm.state.cmode0 = (lm.state.cmode0 & ~CMODE0_KEEP) | cur_.cmode0_keep;
+        return b_.add_state(lm.state);
     }
 
     // the vertex colours as DrawQuad_Alpha sends them
