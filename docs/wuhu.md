@@ -99,6 +99,7 @@ Paths are inside the extraction's `files/`; an archive's members after the colon
 | landmarks | `Stage/Shared/Activity.carc:LandMarkData/LandMarkData.exbin` | the Flyover's 80 named places | markers, the warps' names |
 | camera shots | `Stage/Shared/SeqData.carc:Map/WS2_seq1_IslandCamParam.exbin` | the title sequence's 15 ground-level shots | markers |
 | the WSR Mii's body | `Common/Kokeshi/common.carc:G3D/WS2_avaA1.brres` | k's check (head_set's height) | the inventory |
+| effect pictures | `Effect/{Jsk,Swf,Glf,Can}Scene/effect.carc:WS2_effect_*.breft` (16 textures) | splashes, rings and spray of a Mii in the water | the water effects' atlas (WAFX) |
 
 The island's materials use light set 0 and fog 0 (off); props light set 1; flags light set 6; the
 open sea's two materials fog 1. No island material references `lm_0`/`lm_1` (character light maps).
@@ -489,6 +490,46 @@ ground-level day (research env_choice/env.md, its set (f), decoded from the file
   moves (2,257 bilinear lookups), the trails' ribbons a frame (192 vertices on the waves), the moored
   boats' poses (5 height queries each). NOMA_G3D_STATS counts the wave grids and trails drawn; the
   island's frame line says `sea grid` and `trails`.
+
+## Water effects
+
+`tools/wuhu/stage_wuhu.py` (WATER_FX*, `stage_water_fx`), `tools/g3d/reft.py`, `convert.AtlasTexture`;
+drawn by `engine/g3d/water_fx.h`.
+
+- WSR has no swimming Mii: its splashes and ripples are particles of its effect library (emitters in
+  each scene's `.breff`, textures in the `.breft` beside it, `Effect/<scene>/effect.carc`). The
+  island draws them natively, as quads and patches the World makes each frame; the emitters' numbers
+  are in `water_fx.cpp`, and only the pictures are staged.
+- 16 pictures from four archives' REFT files (version 11: a texture's header is 0x40 bytes, its image
+  after it). From Jsk: the spray's flipbook (`ws2f_waterSp00`-`15`, every third), a drop
+  (`rk_mizutama1`), a foam puff (`ws2f_waterSand0`) and a foam disc (`rk_hamon2`). From Swf: the
+  crown's wall (`ws2n_water01`), a big entry's rings (`ws2n_drop_wave`, 128 x 128) and bubbles
+  (`ws2n_bubble01`). From Glf: a thin ring (`pc_glf_ripple_bl02`). From Can: the swimmer's bow
+  spray (`ws2n_water_splash1`, `3`, `5`).
+- One 256 x 256 IA8 atlas (`waterfx_atlas`), LA8 once baked, 3 levels, 172,032 bytes. It holds
+  4 x 4 cells of 64 texels.
+  - Each picture is resampled to 60 x 60 with a tent filter. IA8 pictures have their intensity
+    weighted by alpha; I8 ones keep intensity = alpha, as GX reads them.
+  - A 2-texel border round each picture repeats its edge texels. A picture is then sampled at its
+    rim as a clamped texture is, so copies laid side by side meet without a seam (the crown's wall:
+    `ws2n_water01` repeats down its rows).
+  - Each level is box-filtered within its cell, so no neighbour's texels reach a picture. At the
+    smallest level the border is half a texel.
+  - The stager checks that the GX texels decode back to the pictures at every level.
+- Two materials, `#waterfx_mul` and `#waterfx_erode`, made from the cruiser wake's `m_nami_ef` as
+  the trails' is. They keep its blending and its depth test (less or equal, not written: an overlay).
+  - One stage: colour K0 + (vertex - K0) x texture, WSR's blend between a particle's two colours. K0
+    is `#CED0D3`, `WS2_jsk_pocha_splash`'s secondary colour.
+  - Alpha is texture x vertex (multiply), or texture - vertex (erode: WSR's alpha by subtraction,
+    the particle's alpha a threshold that eats the picture away).
+  - Unlit, no fog, no culling, no texture matrix.
+- Four dynamic batches in the trails' vertex layout (24 bytes): 64 quads and 16 patches of 3 x 3
+  vertices for each material. They take 19,200 bytes of placeholder vertices and a box of +-64 units.
+  A quad's or patch's indices refer only to its own vertices, so the first n of them draw whole.
+- Section `WAFX`: one `WaterFx` of 292 bytes, holding the atlas, the four batches, their capacities
+  and each cell's rectangle. The section is optional. A package staged before it still loads, and the
+  island then draws no water effects. `island.json`'s `water_fx` lists each picture's archive,
+  texture, format, size and cell.
 
 ## Markers
 

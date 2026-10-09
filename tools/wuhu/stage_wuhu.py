@@ -29,6 +29,9 @@ What goes in (docs/wuhu.md has the reasons and the numbers; docs/wuhu_design.md 
   - the open sea (WS2_common_sea's plane away from the shores; sea2_dummy -> sea2_day) and
     WS2_common_vr (the sky, with the sun in it) as models; the island's, sea's, sky's, sun's and
     fountain's texture and colour animations.
+  - for the splashes, rings and spray of a Mii in the water (WAFX, WATER_FX): sixteen of WSR's
+    effect pictures (the REFT files of Effect/*/effect.carc) in one IA8 atlas, two materials and four
+    dynamic batches.
   - the ground-level day environment (Bic F0's lights and light sets; the fog table, but no material
     fogged), k = 10, markers (spawn, landmarks, camera presets, the exploration menu's warps, each
     checked on the collision) and the island's collision (WS2_common_island1..5.kcl, tree trunks as
@@ -65,8 +68,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.join(ROOT, "tools/g3d"))
 import brres  # noqa: E402
 import convert  # noqa: E402
+import gxtex  # noqa: E402
 import ng3d  # noqa: E402
 import nintendo_formats as nf  # noqa: E402
+import reft  # noqa: E402
 import shadow_decals  # noqa: E402
 import shadows  # noqa: E402
 from ng3d import NONE16  # noqa: E402
@@ -255,6 +260,41 @@ WAKES = {33: ("Cruiser/G3D/WS2_common_cruiser_ef.brres", "WS2_common_cruiser_ef"
 WAKE_CLASS = 0xFFFB  # (0xFFFE the parachute, 0xFFFD and 0xFFFC the Mii's shadow stand-ins)
 TRAIL_CLASSES = (7, 8, 33, 40)
 TRAIL = dict(boats=4, samples=24, spacing=14.0, life=5.0, spread=7.0, speed=70.0)
+
+# The water effects (engine/g3d/water_fx.h draws them; the package's WAFX section). WSR has no swimming
+# Mii: its splashes and ripples are its effect library's particles, drawn here natively from their
+# pictures. WATER_FX_REFT: the effect archives they come from (Effect/<scene>/effect.carc, each a .breff
+# of emitters beside a REFT of textures). WATER_FX_PICTURES: the atlas's cells in WaterFxCell's order
+# (archive, texture, what for: the emitter it is taken from). WATER_FX: the atlas (cols x cols cells of
+# `cell` texels, a picture filling one but a `border` repeating its edge, `levels` levels: the border
+# half a texel at the smallest, so neither a level's box filter nor its sampling takes in a
+# neighbour), the batches' capacities (water_fx.cpp's caps: quads in the air, 3 x 3 patches on the
+# water), the colour the materials blend toward where the picture is dark (K0: WS2_jsk_pocha_splash's
+# secondary colour, c0sec) and the placeholder box (its batches' bbox: the overlay pull is limited by it).
+WATER_FX_REFT = {"jsk": ("Effect/JskScene/effect.carc", "WS2_effect_jsk.breft"),
+                 "swf": ("Effect/SwfScene/effect.carc", "WS2_effect_swf.breft"),
+                 "glf": ("Effect/GlfScene/effect.carc", "WS2_effect_glf.breft"),
+                 "can": ("Effect/CanScene/effect.carc", "WS2_effect_can.breft")}
+WATER_FX_PICTURES = [
+    ("jsk", "ws2f_waterSp00", "spray, flipbook frame 1 of 6 (WS2_jsk_pocha_splash: 00-16, every third)"),
+    ("jsk", "ws2f_waterSp03", "spray, frame 2"),
+    ("jsk", "ws2f_waterSp06", "spray, frame 3"),
+    ("jsk", "ws2f_waterSp09", "spray, frame 4"),
+    ("jsk", "ws2f_waterSp12", "spray, frame 5"),
+    ("jsk", "ws2f_waterSp15", "spray, frame 6"),
+    ("jsk", "rk_mizutama1", "a drop (WS2_jsk_pocha_drop)"),
+    ("jsk", "ws2f_waterSand0", "a foam puff (WS2_jsk_pocha_awa)"),
+    ("swf", "ws2n_water01", "the crown's wall (WS2_swf_watcolumn01's crowns)"),
+    ("swf", "ws2n_drop_wave", "a big entry's concentric rings (WS2_swf_watcolumn01's waves; 128 x 128)"),
+    ("glf", "pc_glf_ripple_bl02", "a thin ring (WS2_glf_ikepocha's WS2_glf_ike01_hamon: the swimmer's rings)"),
+    ("swf", "ws2n_bubble01", "bubbles (WS2_swf_watcolumn01's)"),
+    ("can", "ws2n_water_splash1", "the swimmer's bow spray, flipbook frame 1 of 3 (WS2_can_water_line_duck)"),
+    ("can", "ws2n_water_splash3", "bow spray, frame 2"),
+    ("can", "ws2n_water_splash5", "bow spray, frame 3"),
+    ("jsk", "rk_hamon2", "a foam disc (WS2_jsk_miiAppearSrf: treading water, coming up)"),
+]
+WATER_FX = dict(cols=4, cell=64, border=2, levels=3, air_quads=64, surf_patches=16, secondary=(0xCE, 0xD0, 0xD3),
+                box=64.0)
 
 # Wedge Island (Island_16) is in the cells like the rest of the island: its full model and sea rim
 # (Water16) at levels 0-1, island_R's light model of it (Island_16b_model, as WSR's ground-level
@@ -2000,9 +2040,75 @@ class Stager:
                                trails=T, shade=SEA_SHADE, sky=SEA_SKY, sun=[float(v) for v in sun],
                                uv_map=[[float(v) for v in m] for m in uv_map], uv_fit_error=uv_err)
 
+    def stage_water_fx(self):
+        """The water effects' data (WAFX; WATER_FX* above, engine/g3d/water_fx.h): WSR's effect pictures
+        in one IA8 atlas (convert.AtlasTexture, checked to decode back to what was put in), the two
+        materials (water_fx_material: multiply and erode) and the four dynamic batches (a placeholder
+        buffer of the trails' layout and their fixed indices): quads in the air (4 vertices: top left,
+        top right, bottom left, bottom right; triangles a, a+1, a+2 and a+2, a+1, a+3, the trails') and
+        patches on the water (3 x 3 vertices row by row, eight triangles meeting at the middle one, so
+        that a patch lifted there is symmetric), each pair one batch a material."""
+        pkg = self.pkg
+        W = WATER_FX
+        atlas = convert.AtlasTexture("waterfx_atlas", W["cols"], W["cell"], W["border"], W["levels"])
+        files, cells, pictures = {}, [], []
+        for key, name, use in WATER_FX_PICTURES:
+            if key not in files:
+                files[key] = reft.read(self.wsr.get(*WATER_FX_REFT[key]))
+            t = files[key][name]
+            rgba = t.rgba()
+            # (GX's I4 and I8 are one value, read as intensity and alpha alike)
+            cells.append(list(atlas.add(rgba[..., 0], None if t.fmt in (0, 1) else rgba[..., 3])))
+            pictures.append(dict(archive=WATER_FX_REFT[key][0], file=WATER_FX_REFT[key][1], texture=name,
+                                 format=gxtex.FORMATS[t.fmt], size=[t.width, t.height], use=use, uv=cells[-1]))
+        if len(cells) != ng3d.WATER_FX_CELLS:
+            raise SystemExit("the water effects have %d pictures for %d cells" % (len(cells), ng3d.WATER_FX_CELLS))
+        for level in range(atlas.levels):
+            w, h, _ = atlas.level_size(level)
+            if not np.array_equal(gxtex.decode(atlas.level_data(level), w, h, atlas.fmt),
+                                  atlas.texture_rgba(atlas.name, level)):
+                raise SystemExit("the water effects' atlas doesn't decode back to its pictures (level %d)" % level)
+        tex = self.cv.texture(atlas, atlas.name)
+        # the materials: the cruiser wake's m_nami_ef made over, as the trails' is (stage_wakes)
+        r = self.wake_brres(33)
+        ef = r.models["WS2_common_cruiser_ef"]
+        mats = []
+        for variant, erode in (("waterfx_mul", False), ("waterfx_erode", True)):
+            mi = self.cv.material(r, ef, ef.materials[0], variant=variant)
+            water_fx_material(pkg.materials[mi], tex, pkg.textures[tex].levels, W["secondary"], erode)
+            mats.append(mi)
+        nq, npt = W["air_quads"], W["surf_patches"]
+        quad = [0, 1, 2, 2, 1, 3]
+        patch = []
+        for row in range(2):
+            for col in range(2):
+                tl = 3 * row + col
+                tr, bl, br = tl + 1, tl + 3, tl + 4
+                patch += [tl, tr, br, tl, br, bl] if (row + col) % 2 == 0 else [tl, tr, bl, bl, tr, br]
+        box = np.array([[-W["box"]] * 3, [W["box"]] * 3])
+        layout = ng3d.VA_POS | ng3d.VA_CLR | ng3d.VA_UV0
+        batches = []
+        for n, per, idx in ((nq, 4, quad), (npt, 9, patch)):
+            for mi in mats:
+                batches.append(self.raw_batch(mi, bytes(24 * per * n), per * n, layout, 24, ng3d.VB_UV_FLOAT,
+                                              [per * k + i for k in range(n) for i in idx], box, ng3d.BATCH_DYNAMIC))
+        pkg.water_fx = ng3d.Rec("WaterFx", version=ng3d.WATER_FX_VERSION, texture=tex, batch=batches, air_quads=nq,
+                                surf_patches=npt, n_cells=ng3d.WATER_FX_CELLS, cell=cells)
+        placeholder = 2 * 24 * (4 * nq + 9 * npt)
+        self.inv["water_fx"] = dict(
+            atlas=dict(texture=tex, name=atlas.name, size=[atlas.width, atlas.height], gx_format="IA8",
+                       levels=pkg.textures[tex].levels, cell=W["cell"], border=W["border"]),
+            cells=pictures, materials=[pkg.string(pkg.materials[mi].name) for mi in mats],
+            batches=dict(zip(("air_mul", "air_erode", "surf_mul", "surf_erode"), batches)),
+            air_quads=nq, surf_patches=npt, secondary="#%02X%02X%02X" % W["secondary"], placeholder_bytes=placeholder)
+        self.say("water effects: %d of WSR's effect pictures (%s) in a %dx%d IA8 atlas of %d levels; materials "
+                 "multiply and erode; batches %s (%d quads and %d patches a material, %d bytes of placeholder "
+                 "vertices)" % (len(cells), ", ".join(WATER_FX_REFT[k][0] for k in files), atlas.width, atlas.height,
+                                pkg.textures[tex].levels, ", ".join(map(str, batches)), nq, npt, placeholder))
+
     def raw_batch(self, material, data, count, attrs, stride, vflags, idx, P, bflags=0):
-        """A batch of its own (no model, no cell: the sea's grid and trails) over a vertex buffer of
-        `data` (count vertices of this layout), with these indices; its box from P."""
+        """A batch of its own (no model, no cell: the sea's grid and trails, the water effects) over a
+        vertex buffer of `data` (count vertices of this layout), with these indices; its box from P."""
         pkg = self.pkg
         vb = pkg.add("vertex_buffers", count=count, attrs=attrs, stride=stride, flags=vflags, uv_scale=[0.0, 0.0],
                      pos_origin=[0.0, 0.0, 0.0], pos_scale=0.0)
@@ -2136,6 +2242,37 @@ def trail_material(M):
     M.chan_alpha = (M.chan_alpha & ~3) | 1
 
 
+def water_fx_material(M, texture, levels, secondary, erode):
+    """A water effect's material, made from the cruiser wake's m_nami_ef as the trails' is (its blending
+    over what is there, and its depth test, less or equal and not written: an overlay, which the
+    renderers pull toward the eye): one stage over the atlas, clamped and mipmapped; its colour WSR's
+    blend between a particle's two colours by the picture's intensity, K0 + (RASC - K0) x TEXC (K0 the
+    secondary colour, the vertices' the primary); its alpha the picture's times the vertices'
+    (multiply), or the picture's less the vertices' (erode: WSR's alpha by subtraction, the particle's
+    alpha a threshold eating the picture away; konst alpha 1); the channel's colour and alpha the
+    vertices', unlit; translucent, no fog, no culling, no texture matrix (nothing scrolls it)."""
+    if (M.zmode & 0x1F) != 0x07 or (M.blend & 0xFE3) != (1 | 5 << 5 | 4 << 8):
+        raise SystemExit("the wake's material isn't what the water effects are made from (z mode %x, blend %x)" % (
+            M.zmode, M.blend))
+    M.flags = ng3d.MAT_XLU
+    M.n_stages, M.n_texgens, M.n_chans, M.n_ind, M.cull = 1, 1, 1, 0, 0
+    M.color_env[0] = tev_color_word(14, 10, 8, 15)
+    M.alpha_env[0] = (tev_alpha_word(7, 5, 6, 4) | 1 << 18) if erode else tev_alpha_word(7, 5, 4, 7)
+    # TREF: stage 0 samples map 0 with coordinate 0 and takes colour channel 0; KSEL: its konst
+    # colour K0 (0x0C), konst alpha 1 (0)
+    M.tref[0] = tev_field(M.tref[0], 0, 12, 1 << 6)
+    M.ksel[0] = tev_field(tev_field(M.ksel[0], 4, 5, 0x0C), 9, 5, 0)
+    M.tev_konst[0] = list(secondary) + [255]
+    M.chan_color = (M.chan_color & ~3) | 1
+    M.chan_alpha = (M.chan_alpha & ~3) | 1
+    M.maps = [ng3d.Rec("TexMap", texture=NONE16) for _ in range(ng3d.MAX_TEX_MAPS)]
+    M.maps[0] = ng3d.Rec("TexMap", texture=texture, wrap_s=0, wrap_t=0, min_filter=5, mag_filter=1,
+                         max_lod=float(levels - 1))
+    M.texgens = [ng3d.Rec("TexGen", matrix=NONE16, post_mtx=NONE16) for _ in range(ng3d.MAX_TEXGENS)]
+    M.texgens[0].type, M.texgens[0].source = 1, 4      # MTX2x4 from TEX0
+    M.n_tex_mtx = 0
+
+
 def batch_triangles(pkg, bi, M=None):
     """A batch's triangles (n, 3, 3) as float64, decoded (VA_POS16 too), moved by M (4x4) if given."""
     b = pkg.batches[bi]
@@ -2264,6 +2401,7 @@ def main(argv=None):
     st.stage_anims()
     kcl = st.stage_collision()
     st.stage_sea(kcl)
+    st.stage_water_fx()
     st.stage_env()
     st.stage_markers(kcl)
     if not a.no_pvs:

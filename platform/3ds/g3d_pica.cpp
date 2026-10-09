@@ -258,12 +258,14 @@ inline bool same_words(const u32 (&a)[N], const u32 (&b)[N]) {
 // drawn; the first is logged.
 const u32 ITEM_WORDS = 2048, GX_RESERVE_WORDS = 64u << 10;
 
-// The vertex data made each frame (the sea's: the wave grid's amplitudes, the boats' trails: native_draw.h
-// DRAW_SEA_GRID, DRAW_DYNAMIC), copied into a ring in linear memory where the GPU reads it, flushed
-// from the CPU's cache. A frame takes about 14 KB (9 KB of the grid's amplitudes, 4.6 KB of trails), so
-// a part of the ring is written again five frames later at the soonest: the GPU has drawn the frame
-// that read it by then (gx_pica.cpp's frame start waits for the frame before).
-const u32 RING_BYTES = 64u << 10;
+// The vertex data made each frame (the sea's: the wave grid's amplitudes, the boats' trails and the water
+// effects: native_draw.h DRAW_SEA_GRID, DRAW_DYNAMIC), copied into a ring in linear memory where the GPU
+// reads it, flushed from the CPU's cache. A frame takes about 14 KB (9 KB of the grid's amplitudes, 4.6 KB
+// of trails) and the water effects' live vertices (water_fx.h: typically 3-4 KB, at most 19 KB with every
+// batch full), at most 33 KB. The GPU may still draw the frame before while a frame is made (gx_pica.cpp's
+// overlap: only the frame before last has surely finished), so the ring holds that frame's data and this
+// one's with room to spare: a part of it is written again three frames later at the soonest.
+const u32 RING_BYTES = 128u << 10;
 
 const f32 k_identity24[2][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}};
 
@@ -1703,12 +1705,29 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
             }
             continue;
         }
-        // (a dynamic item's vertices: the packet's, into the ring)
+        // (a dynamic item's vertices: the packet's, into the ring -- all from the start, or its range of
+        // them, drawn with its first indices only: `drawn` the batch as drawn)
         u32 dynamic_pa = 0;
+        fmt::Batch ranged;
+        const fmt::Batch* drawn = &b;
         if (it.flags & g3::DRAW_DYNAMIC) {
             const fmt::VertexBuffer& fvb = p.package->vertex_buffers()[b.vbuf];
-            if (p.dynamic.size() < (size_t)fvb.count * fvb.stride ||
-                !(dynamic_pa = ring_put(p.dynamic.data(), fvb.count * fvb.stride)))
+            const u8* src = p.dynamic.data();
+            u32 bytes = fvb.count * fvb.stride;
+            if (it.range != 0xFFFF) {
+                if (it.range >= p.dynamic_ranges.size())
+                    continue;
+                const g3::DynamicRange& dr = p.dynamic_ranges[it.range];
+                if ((size_t)dr.at + dr.bytes > p.dynamic.size() || !dr.n_indices || dr.n_indices > b.n_indices)
+                    continue;
+                src += dr.at, bytes = dr.bytes;
+                ranged = b;
+                ranged.n_indices = dr.n_indices;
+                drawn = &ranged;
+            } else if (p.dynamic.size() < bytes) {
+                continue;
+            }
+            if (!(dynamic_pa = ring_put(src, bytes)))
                 continue;
             st_.dynamic_draws++;
         }
@@ -1814,13 +1833,13 @@ void PicaBackend::draw(const g3::Packet& p, const g3::GxView& view) {
                 position_rows(p, it.matrix, vb, smap_.fade, 2, 1);
             rows_uv_[0] = vb.uv_scale[0], rows_uv_[1] = vb.uv_scale[1];
         }
-        draw_batch(*r, b);
-        st_.draws++, st_.triangles += b.n_indices / 3, st_.indices += b.n_indices;
+        draw_batch(*r, *drawn);
+        st_.draws++, st_.triangles += drawn->n_indices / 3, st_.indices += drawn->n_indices;
         st_.prelit_draws += m.prelit;
         f32 rows[3][4];
         u32 fog_color;
         if (!sky && m.fog && fog_rows(p, view, m, b, vb, key.pull, rows, &fog_color)) {
-            fog_pass(m, b, *r, rows, fog_color);
+            fog_pass(m, *drawn, *r, rows, fog_color);
             st_.fog_draws++;
         }
     }

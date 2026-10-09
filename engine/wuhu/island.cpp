@@ -45,6 +45,17 @@
 // runs). NOMA_WUHU_PLACEHOLDER=1: the stand-in content instead (content_placeholder.cpp: the scene's
 // shell without the package).
 //
+// The water (docs/wuhu.md): the World draws the splashes and the swimmer's rings and spray
+// (engine/g3d/water_fx.h) where the package has them, from what the frame tells it before its job: a
+// splash where the player went in (Player::water_entry: its strength by how fast it fell, against a
+// fall from the deepest drop the Mii may take; walking in down a shore only a ring), a smaller one over
+// a boat's side, one at each stroke's hand going in (IslandMii::strokes: a frame late, the Mii is
+// posed after the job starts), and the swimmer itself every frame. The Mii plays its plunge going in
+// and its climb out onto a quay (MiiMotion's entry_speed, climbed_out). Splashes and rings follow the
+// waves on the sea's own level only (not on the lakes and pools, which have none), as the swimmer is
+// drawn. (NOMA_WUHU_WATER_FX_TEST=1, water_fx.cpp's: splashes of each strength in turn while the Mii
+// treads water, for judging their look.)
+//
 // Shadows (docs/wuhu.md "Shadows"): the package's decals (WSR's silhouettes under the trees and props,
 // the cars' under them) are drawn always; the shadow map about the Mii (world.h: the trees, props,
 // windmills, vehicles and the Mii itself casting) unless NOMA_WUHU_SHADOWS=0, NOMA_WUHU_SHADOW_MAP=N
@@ -60,6 +71,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/world.h"
@@ -107,6 +119,15 @@ constexpr u16 WAKE_CLASS = 0xFFFBu;
 const char* const WAKE_MODEL = "WS2_common_cruiser_ef#driven";
 // how the load's progress is shared: the file's reading, the rest of the worker's work, the Mii
 constexpr f32 SHARE_READ = 0.7f, SHARE_BUILD = 0.1f, SHARE_MII = 0.2f;
+// The splashes' strength: the speed going in over a fall's from the deepest drop the Mii may take
+// (PlayerParams::max_drop: about 104 units a second), within these; a jump off the plaza's sea front
+// (72 units over the sea: about 200 units a second) is the strongest. Over a boat's side:
+// DROP_IN_STRENGTH, the Mii going in as fast. A stroke's hand: HAND_STRENGTH. Entries are nudged
+// ENTRY_LEAD of the Mii's height along the way it went.
+constexpr f32 SPLASH_WEAKEST = 0.15f, SPLASH_STRONGEST = 1.5f, DROP_IN_STRENGTH = 0.35f, HAND_STRENGTH = 0.2f;
+constexpr f32 ENTRY_LEAD = 0.2f;
+// a surface within this of the sea's level is the sea's (its waves); else a lake's or a pool's
+constexpr f32 SEA_LEVEL_SLACK = 1.0f;
 
 f32 ms_between(u64 a, u64 b) { return (f32)(b - a) / 1000.0f; }
 
@@ -215,6 +236,9 @@ private:
     void update_parachute();
     void update_shadows();
     void update_sea(const engine::g3d::Camera& cam);
+    bool on_sea(f32 surface) const;
+    void splash(Vec3 at, f32 strength, f32 yaw, f32 speed, u8 kind);
+    void update_water(Vec3 drawn);
     Vec3 controlled_position() const;
     bool in_car() const { return vehicles_ && vehicles_->driven() != Vehicles::NONE && !vehicles_->boat(); }
     f32 controlled_yaw() const;
@@ -258,6 +282,10 @@ private:
     bool built_ready_[2] = {false, false};
     u64 world_us_ = 0, waited_us_ = 0;   // the World's time (wherever it ran), the game's waits for it
     bool on_helper_ = false;             // (the last frame's World ran on the helper)
+    // the water's: splashes for the World before the next job (at the collision's surface: the waves'
+    // offset is added then), the Mii's entry speed for a swim begun over a boat's side
+    std::vector<engine::g3d::WaterSplash> splashes_;
+    f32 drop_in_speed_ = 0;
 };
 
 Island::~Island() {
@@ -368,6 +396,13 @@ void Island::finish_loading() {
         guest::log("wuhu: the sea: %s, the boats' trails %s, the driven boat's wake %s%s", sea ? "waves" : "flat",
                    trails ? "on" : "none", wake_instance_ != NONE32 ? "there" : "missing",
                    trails && wake_instance_ != NONE32 ? "" : " (the package was staged before them)");
+    }
+    if (const fmt::WaterFx* fx = package_->water_fx()) {
+        const fmt::Texture& atlas = package_->textures()[fx->texture];
+        guest::log("wuhu: water effects: there (atlas %ux%u, %u cells)%s", (unsigned)atlas.width,
+                   (unsigned)atlas.height, (unsigned)fx->n_cells, world_->water_fx() ? "" : ", but not drawn");
+    } else {
+        guest::log("wuhu: water effects: missing (the package was staged before them)");
     }
     vehicles_ = std::make_unique<Vehicles>(*world_, *package_, *collision_);
     const u64 t1 = guest::host_time_us();
@@ -531,6 +566,11 @@ bool Island::leave_vehicle() {
         // (`at` is at the vehicle's bottom: a boat's is about the water's surface)
         Vec3 feet;
         if (boat && player_->place_swimming(at, vehicles_->yaw())) {
+            // (over the side: a small splash, and the Mii plunges in as fast)
+            const f32 surface = player_->position().y + player_->water_depth();
+            const f32 v = DROP_IN_STRENGTH * std::sqrt(2.0f * pp.gravity * pp.max_drop);
+            splash(Vec3{at.x, surface, at.z}, DROP_IN_STRENGTH, vehicles_->yaw(), 0, engine::g3d::WaterSplash::DROP_IN);
+            drop_in_speed_ = v * TICK * k_;
             out = true;
             break;
         }
@@ -655,12 +695,74 @@ void Island::update_sea(const engine::g3d::Camera& cam) {
     }
 }
 
+// a water surface (the collision's) on the sea, whose waves the swimmer and the splashes ride
+bool Island::on_sea(f32 surface) const {
+    return world_->sea().valid() && std::fabs(surface - world_->sea().params().level) < SEA_LEVEL_SLACK;
+}
+
+// a splash for the World before its next job: `at` on the collision's water surface, the way and the
+// speed (island units a second) the Mii went
+void Island::splash(Vec3 at, f32 strength, f32 yaw, f32 speed, u8 kind) {
+    engine::g3d::WaterSplash s;
+    s.at = at;
+    s.strength = strength;
+    s.dir_x = std::sin(yaw * DEG), s.dir_z = std::cos(yaw * DEG);
+    s.speed = speed;
+    s.scale = player_->params().height / WSR_MII_HEIGHT;
+    s.kind = kind;
+    s.on_sea = on_sea(at.y);
+    splashes_.push_back(s);
+}
+
+// The water's part of the frame, before the World's job: the player's way into the water this update
+// as a splash (or a ring, walking in), then the frame's splashes on the waves and the swimmer
+// (`drawn`: its feet as drawn) into the World.
+void Island::update_water(Vec3 drawn) {
+    const bool on_foot = vehicles_->driven() == Vehicles::NONE;
+    const PlayerParams& pp = player_->params();
+    if (const WaterEntry* e = on_foot ? player_->water_entry() : nullptr) {
+        static const char* const CAUSES[] = {"fall", "jump", "leap", "glide", "slide", "wade"};
+        static_assert(sizeof(CAUSES) / sizeof(CAUSES[0]) == (size_t)WaterCause::WADE + 1, "a name a cause");
+        const bool wade = e->cause == WaterCause::WADE;
+        const f32 strength = wade ? 0.0f
+                                  : std::min(std::max(-e->vy / std::sqrt(2.0f * pp.gravity * pp.max_drop),
+                                                      SPLASH_WEAKEST),
+                                             SPLASH_STRONGEST);
+        const f32 lead = e->speed > 0 ? ENTRY_LEAD * pp.height : 0.0f;
+        const Vec3 at{e->at.x + std::sin(e->yaw * DEG) * lead, e->surface, e->at.z + std::cos(e->yaw * DEG) * lead};
+        splash(at, strength, e->yaw, e->speed * 60.0f,
+               wade ? engine::g3d::WaterSplash::RING : engine::g3d::WaterSplash::ENTRY);
+        guest::log("wuhu: water: splash cause %s strength %.2f (in at %.1f units a second down, %.1f along) at "
+                   "(%.1f, %.1f, %.1f)%s", CAUSES[(int)e->cause], strength, -e->vy, e->speed * 60.0f, at.x, at.y,
+                   at.z, on_sea(at.y) ? " on the sea" : "");
+    }
+    const bool swimming = on_foot && player_->swimming();
+    // (on the waves where the sea has them: at the time the World's frame is made for)
+    const f32 t = (f32)frame_ * TICK, level = world_->sea().valid() ? world_->sea().params().level : 0.0f;
+    for (engine::g3d::WaterSplash& s : splashes_) {
+        if (s.on_sea)
+            s.at.y += world_->sea_height(s.at.x, s.at.z, t) - level;
+        world_->water_splash(s);
+    }
+    splashes_.clear();
+    engine::g3d::Swimmer sw;
+    sw.on = swimming;
+    sw.at = drawn;
+    sw.surface = drawn.y + player_->water_depth();
+    sw.yaw_deg = player_->yaw();
+    sw.speed = player_->speed() * 60.0f;
+    sw.scale = pp.height / WSR_MII_HEIGHT;
+    sw.on_sea = swimming && on_sea(player_->position().y + player_->water_depth());
+    world_->set_swimmer(sw);
+}
+
 void Island::warp(u32 marker) {
     if (!world_ || marker >= package_->markers().count)
         return;
     take_job();
     park_vehicle();
     sand_->end_trail();
+    splashes_.clear();
     place_at(package_->markers()[marker]);
 }
 
@@ -716,11 +818,13 @@ void Island::update(const Controls& controls, bool frozen) {
     update_parachute();
     update_shadows();
     update_sea(cam);
-    // (a swimmer drawn on the waves: its body stays on the collision's surface; asked of the World
-    // here, before its job)
+    // (a swimmer on the sea drawn on its waves: its body stays on the collision's surface; asked of the
+    // World here, before its job; the lakes and pools have no waves)
     Vec3 drawn = at;
-    if (vehicles_->driven() == Vehicles::NONE && player_->swimming() && world_->sea().valid())
+    if (vehicles_->driven() == Vehicles::NONE && player_->swimming() &&
+        on_sea(player_->position().y + player_->water_depth()))
         drawn.y += world_->sea_height(at.x, at.z, (f32)frame_ * TICK) - world_->sea().params().level;
+    update_water(drawn);
     if (++log_frames_ >= log_every_)
         log_frame();
     // the ground under the eye, for the visibility rows (none within their height: below it), by the
@@ -770,8 +874,28 @@ void Island::update(const Controls& controls, bool frozen) {
         motion.rise = p.vertical_speed() / std::max(p.jump_speed(), 1e-3f);
         motion.air_time = (f32)p.air_ticks() * TICK;
         motion.depth = p.water_depth() * k_;
+        // (into the water by a fall or a jump, or over a boat's side: how fast; out onto a shore)
+        if (const WaterEntry* e = p.water_entry())
+            motion.entry_speed = e->cause == WaterCause::WADE ? 0.0f : std::max(-e->vy, 0.0f) * TICK * k_;
+        if (p.swimming() && drop_in_speed_ > 0)
+            motion.entry_speed = drop_in_speed_;
+        if (const WaterExit* x = p.water_exit()) {
+            motion.climbed_out = true;
+            motion.over_surface = x->over_surface * k_;
+        }
     }
+    drop_in_speed_ = 0;
     mii_->update(engine::g3d::scaled(cam, k_), feet * k_, yaw, motion);
+    // its stroke's hands into the water: splashes for the next frame's World (its job is out now)
+    if (motion.kind == MiiMotion::SWIM && mii_->strokes()) {
+        const f32 surface = player_->position().y + player_->water_depth();
+        for (int side = 0; side < 2; side++)
+            if (mii_->strokes() >> side & 1) {
+                const Vec3 w = mii_->wrist(side) * (1.0f / k_);
+                splash(Vec3{w.x, surface, w.z}, HAND_STRENGTH, player_->yaw(), player_->speed() * 60.0f,
+                       engine::g3d::WaterSplash::HAND);
+            }
+    }
 }
 
 // The job (on the helper): the World's frame and both passes' packets, as update() and the two
@@ -837,14 +961,16 @@ void Island::log_frame() {
     static_assert(sizeof(STATES) / sizeof(STATES[0]) == (size_t)PlayerState::SWIM + 1, "a name a state");
     guest::log("wuhu: fps %.1f, %s, cells %u/%u (visibility row of cell %d hid %u), instances %u (%u posed, %u out "
                "of view or under a pixel), items %u+%u (%u details culled), tris %u, combiners %u+%u cached, shadow "
-               "casters %u (%u instances, %u tris), receivers %u, decals faded %u, sea grid %u, trails %u, pos (%.1f, "
-               "%.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f pitch %.0f at %.1f",
+               "casters %u (%u instances, %u tris), receivers %u, decals faded %u, sea grid %u, trails %u, water %u "
+               "quads %u patches, pos (%.1f, %.1f, %.1f) ground 0x%04X; yaw %.0f, %s, walked %.0f, camera yaw %.0f "
+               "pitch %.0f at %.1f",
                fps, world, (unsigned)s.cells_visible, (unsigned)s.cells_total, s.pvs_cell, (unsigned)s.cells_pvs_hidden,
                (unsigned)s.instances_visible, (unsigned)s.poses, (unsigned)s.instances_small, (unsigned)s.items_opaque,
                (unsigned)s.items_translucent, (unsigned)s.details_culled, (unsigned)s.triangles,
                (unsigned)s.translations, (unsigned)s.translations_cached, (unsigned)s.shadow_casters,
                (unsigned)s.shadow_instances, (unsigned)s.shadow_triangles, (unsigned)s.shadow_receivers,
-               (unsigned)s.shadow_faded, (unsigned)s.sea_grid, (unsigned)s.trails, p.x, p.y, p.z,
+               (unsigned)s.shadow_faded, (unsigned)s.sea_grid, (unsigned)s.trails, (unsigned)s.water_quads,
+               (unsigned)s.water_patches, p.x, p.y, p.z,
                (unsigned)player_->ground_attribute(), controlled_yaw(),
                vehicles_->driven() != Vehicles::NONE ? (vehicles_->boat() ? "boat" : "car") : STATES[(int)player_->state()],
                player_->distance(), camera_->yaw(), camera_->pitch(), camera_->distance());

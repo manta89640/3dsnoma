@@ -83,6 +83,7 @@ constexpr u32 SEC_CVIS = tag('C', 'V', 'I', 'S');  // cell visibility: a bit row
 constexpr u32 SEC_CAST = tag('C', 'A', 'S', 'T');
 constexpr u32 SEC_SHDW = tag('S', 'H', 'D', 'W');
 constexpr u32 SEC_SEAW = tag('S', 'E', 'A', 'W');  // Sea (one, optional), then its amplitude map
+constexpr u32 SEC_WAFX = tag('W', 'A', 'F', 'X');  // WaterFx (one, optional)
 
 // ---------------------------------------------------------------- textures
 // PICA texel formats (the numbering of citro3d's GPU_TEXCOLOR)
@@ -484,5 +485,35 @@ struct Sea {
     u32 reserved[4];
 };
 static_assert(sizeof(Sea) == 256, "Sea");
+
+// ---------------------------------------------------------------- the water effects (optional: SEC_WAFX)
+// The splashes, rings and spray of a Mii in the water (engine/g3d/water_fx.h), made each frame as quads
+// in the air and patches lying on the water, textured from one atlas of Wii Sports Resort's effect
+// pictures. Four dynamic batches (BATCH_DYNAMIC) in the trails' vertex layout (f32 position, colour,
+// f32 texture coordinates: 24 bytes), two of quads and two of patches, each pair one batch a material:
+// multiply (the texture's alpha times the vertices') and erode (the texture's alpha less the
+// vertices': WSR's alpha by subtraction, the particle's alpha a threshold that eats the picture away).
+// Both colour a texel between K0 (the secondary colour) and the vertex's by the texture's intensity.
+// A quad is 4 vertices (top left, top right, bottom left, bottom right) and the triangles a, a+1, a+2
+// and a+2, a+1, a+3; a patch is 3 x 3 vertices, row by row, and eight triangles meeting at the middle
+// one. Each refers only to its own vertices, so the first n of a batch are drawn as its first 6n
+// (quads) or 24n (patches) indices.
+// The cells, in this order (water_fx.h's WaterFxCell): 0-5 the spray's flipbook, 6 a drop, 7 a foam
+// puff, 8 the crown's wall, 9 the concentric rings of a big entry, 10 a thin ring, 11 bubbles, 12-14
+// the swimmer's bow spray (a flipbook), 15 a foam disc. A cell's rectangle is its picture's whole
+// extent, (u0, v0) the corner of its first row and column as the source stores it; round the picture
+// the atlas repeats its edge texels, so that it is sampled there as a clamped texture would be.
+constexpr int WATER_FX_VERSION = 1;
+constexpr int WATER_FX_CELLS = 16;
+struct WaterFx {
+    u16 version;                  // WATER_FX_VERSION
+    u16 texture;                  // the atlas (TEXS index)
+    u16 batch[4];                 // AIR_MUL, AIR_ERODE, SURF_MUL, SURF_ERODE: BATCH_DYNAMIC
+    u16 air_quads, surf_patches;  // capacities a batch (64, 16)
+    u16 n_cells, pad;             // WATER_FX_CELLS
+    f32 cell[WATER_FX_CELLS][4];  // u0, v0, u1, v1 in the atlas, in WaterFxCell order (water_fx.h)
+    u32 reserved[4];
+};
+static_assert(sizeof(WaterFx) == 292, "WaterFx");
 
 }  // namespace engine::g3d::fmt

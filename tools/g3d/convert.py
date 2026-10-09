@@ -184,7 +184,6 @@ def _depalette(tex, palette_raw, plt_fmt, lod):
     return _tile_gx(vals, w, h, *gxtex.BLOCK[g]), g
 
 
-# a model drawn as a part of another (Converter.model's parts)
 class PaintedTexture:
     """A brres texture with changes painted over it, as a texture source tex_override takes ({name:
     (PaintedTexture, name)}): paint(rgba (h, w, 4) uint8) -> rgba, applied to level 0; the result is
@@ -222,6 +221,95 @@ class PaintedTexture:
         return self.rgba[lod]
 
 
+def _resample(img, n):
+    """img (h, w) float -> (n, n): each texel the mean of the source's under it, weighted by a tent as
+    wide as a texel of the result (at least one of the source's), so that a picture shrunk to half its
+    size or less doesn't alias."""
+    def weights(s):
+        scale = s / n
+        centre = (np.arange(n) + 0.5) * scale - 0.5
+        w = np.maximum(0.0, 1.0 - np.abs(np.arange(s)[None, :] - centre[:, None]) / max(1.0, scale))
+        return w / w.sum(1, keepdims=True)
+    return weights(img.shape[0]) @ img @ weights(img.shape[1]).T
+
+
+def _box(img):
+    return (img[0::2, 0::2] + img[1::2, 0::2] + img[0::2, 1::2] + img[1::2, 1::2]) / 4
+
+
+class AtlasTexture:
+    """Pictures packed into one GX IA8 atlas, a texture source Converter.texture takes (as
+    PaintedTexture's): `cols` x `cols` square cells of `cell` texels, row by row, each picture resampled
+    to fill its cell but a border of `border` texels that repeats the picture's edge texels (so that a
+    picture is sampled at its rim as a clamped texture is, and no neighbour's texels reach it), in
+    `levels` levels, each box-filtered from the one above within its cell (the border at least half a
+    texel at the smallest). A picture is its intensity and alpha, or its intensity alone for GX's I8,
+    whose one value the TEV reads as both: that one is resampled and filtered as one value (it stays
+    alpha = intensity), the others with their intensity weighted by alpha (no fringe of whatever
+    intensity transparent texels hold)."""
+
+    def __init__(self, name, cols, cell, border, levels):
+        if cell % (1 << (levels - 1)) or 2 * border < 1 << (levels - 1) or 2 * border >= cell:
+            raise ValueError("%s: cells of %d with a border of %d can't have %d levels" % (name, cell, border, levels))
+        self.name, self.fmt = name, 3           # GX IA8: alpha, then intensity, a texel
+        self.textures = {name: self}
+        self.cols, self.cell, self.border, self.levels = cols, cell, border, levels
+        self.width = self.height = cols * cell
+        self.min_lod, self.max_lod = 0.0, float(levels - 1)
+        self.cells = []                         # a cell's levels, each (intensity, alpha) as floats
+
+    def add(self, intensity, alpha=None):
+        """A picture ((h, w) intensity, and its alpha or None: GX's I8) into the next cell -> the cell's
+        rectangle in the atlas's texture coordinates (u0, v0, u1, v1): the picture's whole extent, (u0,
+        v0) the corner of its first row and column."""
+        k = len(self.cells)
+        if k == self.cols * self.cols:
+            raise ValueError("%s is full (%d cells)" % (self.name, k))
+        inner = self.cell - 2 * self.border
+        i = np.asarray(intensity, np.float64)
+        if alpha is None:
+            i = a = _resample(i, inner)
+        else:
+            a0 = np.asarray(alpha, np.float64)
+            a = _resample(a0, inner)
+            i = np.where(a > 0, _resample(i * a0, inner) / np.maximum(a, 1e-9), _resample(i, inner))
+        levels = [(np.pad(i, self.border, mode="edge"), np.pad(a, self.border, mode="edge"))]
+        for _ in range(1, self.levels):
+            i, a = levels[-1]
+            if alpha is None:
+                levels.append((_box(i),) * 2)
+            else:
+                a2 = _box(a)
+                levels.append((np.where(a2 > 0, _box(i * a) / np.maximum(a2, 1e-9), _box(i)), a2))
+        self.cells.append(levels)
+        cy, cx = divmod(k, self.cols)
+        x0, y0 = cx * self.cell + self.border, cy * self.cell + self.border
+        return (x0 / self.width, y0 / self.height, (x0 + inner) / self.width, (y0 + inner) / self.height)
+
+    def _level(self, level):
+        """The atlas's level as (intensity, alpha) uint8; cells without a picture clear."""
+        c = self.cell >> level
+        out = np.zeros((2, self.height >> level, self.width >> level))
+        for k, levels in enumerate(self.cells):
+            cy, cx = divmod(k, self.cols)
+            out[:, cy * c:(cy + 1) * c, cx * c:(cx + 1) * c] = levels[level]
+        out = np.clip(np.rint(out), 0, 255).astype(np.uint8)
+        return out[0], out[1]
+
+    def level_size(self, lod):
+        w, h = self.width >> lod, self.height >> lod
+        return w, h, w * h * 2
+
+    def level_data(self, lod):
+        i, a = self._level(lod)
+        return _tile_gx(a.astype(np.uint16) << 8 | i, i.shape[1], i.shape[0], 4, 4)
+
+    def texture_rgba(self, name, lod=0):
+        i, a = self._level(lod)
+        return np.stack([i, i, i, a], -1)
+
+
+# a model drawn as a part of another (Converter.model's parts)
 Part = namedtuple("Part", "name brres model matrix hidden tex_override", defaults=(None, (), None))
 
 

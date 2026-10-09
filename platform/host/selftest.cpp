@@ -1235,6 +1235,8 @@ void selftest_g3d();  // selftest_g3d.cpp
 void selftest_g3drender();  // selftest_g3drender.cpp (the software backend; a package's views if there is one)
 void selftest_walk();   // selftest_walk.cpp (needs the island's collision files: not in "all")
 void selftest_vehicles();  // selftest_vehicles.cpp (needs the staged island package: not in "all")
+void selftest_water_fx();  // selftest_water_fx.cpp (the water effects; the staged island's if there is one)
+void selftest_water();     // selftest_water.cpp (the island's water entries and exits; needs its collision files: not in "all")
 void selftest_input();  // selftest_walk.cpp
 void selftest_kpad();   // selftest_walk.cpp
 
@@ -1278,6 +1280,10 @@ bool run_selftest(const std::string& name) {
         selftest_walk();
     else if (name == "vehicles")
         selftest_vehicles();
+    else if (name == "waterfx")
+        selftest_water_fx();
+    else if (name == "water")
+        selftest_water();
     else if (name == "input")
         selftest_input(), selftest_kpad();
     else if (name == "all") {
@@ -1301,6 +1307,7 @@ bool run_selftest(const std::string& name) {
         selftest_tex();
         selftest_g3d();
         selftest_g3drender();
+        selftest_water_fx();
     }
     else
         return false;

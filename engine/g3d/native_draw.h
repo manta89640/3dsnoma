@@ -43,6 +43,17 @@ struct DrawItem {
     u16 matrix;        // Packet::matrices index (0 = identity, the static world)
     u16 mat_state;     // Packet::mat_states index, or 0xFFFF: the material as packaged
     u16 flags;         // DRAW_* below
+    // a DRAW_DYNAMIC item's vertices: Packet::dynamic_ranges index, or 0xFFFF: the packet's `dynamic`
+    // from its start, as many as its batch's buffer holds, all its batch's indices (the trails)
+    u16 range = 0xFFFF;
+};
+// A DRAW_DYNAMIC item's part of the packet's vertices (Packet::dynamic_ranges): `bytes` of `dynamic`
+// from `at` (16-byte aligned: the 3DS GPU's ring keeps that alignment), and the first `n_indices` of
+// its batch's indices, which use only the vertices there (the World's water effects, water_fx.h: a
+// batch of quads or patches each of whose indices refer only to its own vertices, the first n of them
+// drawn). So several such items share the packet's vertices, each copying and drawing only what it uses.
+struct DynamicRange {
+    u32 at, bytes, n_indices;
 };
 enum : u16 {
     DRAW_SKY = 1,         // the sky dome: follows the camera, no depth test or write, drawn first
@@ -54,7 +65,8 @@ enum : u16 {
     DRAW_SEA_GRID = 2,
     DRAW_SEA_MASKED = 4,
     DRAW_DYNAMIC = 8,     // its vertices are the packet's `dynamic` (fmt::BATCH_DYNAMIC: its batch's
-                          // layout and indices), positions about its matrix's translation
+                          // layout and indices; DrawItem::range: which of them), positions about its
+                          // matrix's translation
     DRAW_SHADOW_RECEIVER = 16,  // the shadow map darkens it (Packet::shadow; material.h shadow_receiver)
     DRAW_SHADOW_FADE = 32,      // a shadow decal the shadow map covers part of: faded out there
 };
@@ -182,7 +194,8 @@ struct Packet {
         u8 stencil = 1;
         std::vector<u8> amp;
     } sea;
-    std::vector<u8> dynamic;       // a DRAW_DYNAMIC item's vertices
+    std::vector<u8> dynamic;       // the DRAW_DYNAMIC items' vertices
+    std::vector<DynamicRange> dynamic_ranges;  // (DrawItem::range)
 
     void reset();                  // empty, for the next frame (keeps the vectors' memory)
 };

@@ -1067,10 +1067,22 @@ void SoftBackend::Impl::setup(const Packet& p, const GxView& view, Stats& st) {
         const Material& m = p.materials[b.material];
         if (m.pixel.cull_gx == 3)
             continue;
-        // (its vertices: the package's; the packet's for a dynamic item; the wave grid's made here)
+        // (its vertices: the package's; the packet's for a dynamic item, all from the start or its range
+        // of them with its first indices; the wave grid's made here)
         fmt::VertexBuffer vb = pkg.vertex_buffers()[b.vbuf];
         const u8* data = pkg.at(vb.data);
-        if (di.flags & DRAW_DYNAMIC) {
+        u32 n_indices = b.n_indices;
+        const bool ranged = (di.flags & DRAW_DYNAMIC) && di.range != 0xFFFF;
+        if (ranged) {
+            if (di.range >= p.dynamic_ranges.size() || !vb.stride)
+                continue;
+            const DynamicRange& r = p.dynamic_ranges[di.range];
+            if ((size_t)r.at + r.bytes > p.dynamic.size() || r.n_indices > b.n_indices)
+                continue;
+            data = p.dynamic.data() + r.at;
+            vb.count = r.bytes / vb.stride;
+            n_indices = r.n_indices;
+        } else if (di.flags & DRAW_DYNAMIC) {
             if (p.dynamic.size() < (size_t)vb.count * vb.stride)
                 continue;
             data = p.dynamic.data();
@@ -1088,7 +1100,10 @@ void SoftBackend::Impl::setup(const Packet& p, const GxView& view, Stats& st) {
         }
         const u16* idx = pkg.indices().data + b.first_index;
         st.items++;
-        for (u32 k = 0; k + 2 < b.n_indices; k += 3) {
+        for (u32 k = 0; k + 2 < n_indices; k += 3) {
+            // (a range's indices refer to its own vertices: nothing past it is read for one that doesn't)
+            if (ranged && (idx[k] >= vb.count || idx[k + 1] >= vb.count || idx[k + 2] >= vb.count))
+                continue;
             const Vtx& v0 = vertex(it, vb, data, idx[k]);
             const Vtx& v1 = vertex(it, vb, data, idx[k + 1]);
             const Vtx& v2 = vertex(it, vb, data, idx[k + 2]);

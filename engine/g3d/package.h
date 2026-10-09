@@ -12,10 +12,11 @@
 // sizes, GX -> PICA conversions, vertex layouts and strides, compact positions' origin and scale),
 // node trees (a parent comes before its children), LOD chains (no loops), keys (in frame order),
 // the cells' visibility rows (CVIS: a row a cell, a bit for every cell), the shadows (CAST: each
-// caster a run of a caster batch's indices; SHDW: one, its light in LITE) and the sea (SEAW: its
-// map's size, its batches). The first problem found is
-// the reason given. A version 1 package (from before compact positions, prelit materials and the
-// visibility rows) is refused with that reason: the island is staged again.
+// caster a run of a caster batch's indices; SHDW: one, its light in LITE), the sea (SEAW: its
+// map's size, its batches) and the water effects (WAFX: its atlas and cells, its four batches' layout
+// and indices). The first problem found is the reason given. A version 1 package (from before
+// compact positions, prelit materials and the visibility rows) is refused with that reason: the
+// island is staged again.
 #pragma once
 
 #include <cstdint>
@@ -97,6 +98,9 @@ public:
     // (amp_size[0] x amp_size[1] bytes, a row of x a z after another)
     const fmt::Sea* sea() const { return sea_; }
     const u8* sea_amplitude() const { return sea_ ? (const u8*)(sea_ + 1) : nullptr; }
+    // the water effects' atlas, batches and cells (fmt::WaterFx), or nullptr if the package has none
+    // (it was staged before them)
+    const fmt::WaterFx* water_fx() const { return water_fx_; }
 
     // A texture as the GPU takes it: its PICA format and every level, in place in the file, or
     // converted at load (fmt::TEX_GX_RAW, engine/g3d/texture.h) and kept beside it.
@@ -162,6 +166,7 @@ private:
     bool check_anims(std::string* error);
     bool check_env(std::string* error);
     bool check_sea(std::string* error);
+    bool check_water_fx(std::string* error);
     void index_names();
 
     u8* data_ = nullptr;
@@ -170,6 +175,7 @@ private:
     const fmt::Env* env_ = nullptr;
     const fmt::ShadowEnv* shadow_env_ = nullptr;
     const fmt::Sea* sea_ = nullptr;
+    const fmt::WaterFx* water_fx_ = nullptr;
     // textures converted at load: index -> its image (texels in `converted_`)
     struct Converted {
         u32 texture;

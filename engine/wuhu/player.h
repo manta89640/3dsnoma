@@ -68,6 +68,26 @@ struct PlayerInput {
 
 enum class PlayerState : u8 { WAIT, WALK, RUN, FALL, JUMP, SWIM };
 
+// How the Mii came into deep water: off the ground falling, jumping, leaping at a sprint, under the
+// parachute, sliding down a slope; or walking in down a shore (no fall at all)
+enum class WaterCause : u8 { FALL, JUMP, LEAP, GLIDE, SLIDE, WADE };
+
+// A swim's start, as it was going in (Player::water_entry): for the splash and the Mii's plunge
+struct WaterEntry {
+    Vec3 at;          // the swimmer's feet, where it began
+    f32 surface;      // the water's surface there
+    f32 vy;           // the vertical speed going in (island units a second, up: < 0 falling in; WADE 0)
+    f32 speed;        // along the way it went, island units a frame, before the water slowed it
+    f32 yaw;          // that way (degrees, as yaw())
+    WaterCause cause;
+};
+
+// A swim's end on a shore or a quay (Player::water_exit): how far the feet rose from the swimmer's
+// onto the ground, and how high that ground is over the water's surface (< 0: waded out, under it)
+struct WaterExit {
+    f32 climbed, over_surface;
+};
+
 // a box the body can't enter (a parked car or boat): centred at `centre` on x/z, its own x axis
 // (cos_yaw, -sin_yaw) and z axis (sin_yaw, cos_yaw) on x/z, from `bottom` to `top`
 struct Obstacle {
@@ -113,6 +133,10 @@ public:
     int air_ticks() const { return airborne_ ? air_ticks_ : 0; }
     f32 jump_speed() const { return std::sqrt(2.0f * p_.gravity * p_.jump_height); }
     bool swimming() const { return swimming_; }
+    // a swim begun in the last update(), the first if more than one (warps and place_swimming give
+    // none: nothing went into the water); a swim ended on a shore in it
+    const WaterEntry* water_entry() const { return entry_valid_ ? &entry_ : nullptr; }
+    const WaterExit* water_exit() const { return exit_valid_ ? &exit_ : nullptr; }
     void set_obstacles(std::vector<Obstacle> obstacles) { obstacles_ = std::move(obstacles); }
     u16 ground_attribute() const { return ground_attr_; }
     f32 water_depth() const { return depth_; }  // of the water over the feet (0: dry)
@@ -137,6 +161,8 @@ private:
     bool deep_water(f32 x, f32 z, f32 water_top, f32 water_bottom, f32 floor_top, f32* surface) const;
     f32 swim_feet(f32 x, f32 z, f32 surface) const;
     void start_swim(Vec3 at, f32 surface);
+    void start_swim(Vec3 at, f32 surface, WaterCause cause, f32 vy, f32 speed, f32 yaw);
+    WaterCause air_cause() const;
     bool blocked(Vec3 feet) const;
     bool landing_ok(f32 x, f32 z, f32 from_y, f32 lowest) const;
     Vec3 push(Vec3 sphere) const;
@@ -149,6 +175,7 @@ private:
     void fall(f32 frames, bool jump_held);
     void swim(const PlayerInput& in, f32 frames);
     bool swim_step(Vec3 d, f32* surface);
+    bool climb_out(Vec3 d, f32 surface);
 
     const engine::collision::World& world_;
     PlayerParams p_;
@@ -164,6 +191,9 @@ private:
     // what's solid near the body, gathered once a walking tick (push() checks it covers a sphere)
     mutable engine::collision::Nearby near_;
     std::vector<Obstacle> obstacles_;
+    WaterEntry entry_{};
+    WaterExit exit_{};
+    bool entry_valid_ = false, exit_valid_ = false;
 };
 
 // angles in degrees, wrapped into (-180, 180]

@@ -22,6 +22,9 @@
 //   * the trails behind moving boats (fmt::INST_TRAIL instances: each one's path sampled as it goes,
 //     the samples fading with their age) as one item first in the translucent pass, ribbons on the
 //     waves (DRAW_DYNAMIC: the packet's vertices), the nearest Sea::trail_boats of them;
+//   * the water effects (water_fx.h: splashes, the swimmer's rings and spray), if the package has them
+//     (fmt::WaterFx): their patches on the water right after the trails, their quads in the air after
+//     every other translucent item (DRAW_DYNAMIC, each batch a range of the packet's vertices);
 //   * of all these, a detail batch (fmt::BATCH_DETAIL) only within Env::detail_distance (times the
 //     LOD scale) of the eye, and an animated instance only where its meshes are in view as posed and
 //     a pixel across on the 3DS's screen (its bounding sphere spans the path they move on).
@@ -62,6 +65,7 @@
 #include "engine/g3d/native_draw.h"
 #include "engine/g3d/package.h"
 #include "engine/g3d/sea.h"
+#include "engine/g3d/water_fx.h"
 #include "engine/math/vecmath.h"
 
 namespace engine::g3d {
@@ -102,6 +106,8 @@ struct WorldStats {
     u32 shadow_faded = 0;         // decal items faded within it
     u32 sea_grid = 0;           // the sea's wave grid drawn (1) or not
     u32 trails = 0;             // the ribbons of the trails item (0: none drawn)
+    u32 water_quads = 0;        // the water effects' quads in the air (a crown's wall: 16 of them)
+    u32 water_patches = 0;      // ... and patches on the water
 };
 
 // what a World's speed-ups do (all on by default; off: as it was without them, for comparisons)
@@ -163,6 +169,13 @@ public:
     // normal (what a boat rides; Sea::height)
     const Sea& sea() const;
     f32 sea_height(f32 x, f32 z, double seconds, Vec3* normal = nullptr) const;
+
+    // The water effects (water_fx.h), if the package has them (fmt::WaterFx; else these do nothing): a
+    // splash to make at the next update, and the swimmer (every frame: its rings, bow spray and foam).
+    // Thread rule as set_instance_transform.
+    bool water_fx() const;
+    void water_splash(const WaterSplash& splash);
+    void set_swimmer(const Swimmer& swimmer);
 
     // The shadow map: `size` texels a side (0: none: the decals are drawn whole), if the package has
     // shadows (SHDW); and the point its square is about (package units), each frame before the cull.

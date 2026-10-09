@@ -27,10 +27,21 @@ The clips, all on Wii no Ma's body (Male_Body and Female_Body have one skeleton)
   Drive    the driving seat: WSR's pln_ava_wait (Island Flyover's pilot) seated, the arms from
   Helm     jsk_ava_drivepose (Jet Ski: a steering axis, frame 0 full left, 10 straight, 20 full
            right) in the body's frame; Helm the same arms on Wait's standing pose (a boat's wheel).
-  Swim     made here: a front crawl, the body pitched face down, the back at the water's surface (98
-           units over the feet, the swimmer's 0.62 of the height: engine/wuhu/player.cpp SWIM_SINK),
-           the arms a stroke each in 48 frames, the flutter kick three beats a stroke.
+  Swim     made here: a front crawl, the body 65 degrees from upright face down, the water's surface 98
+           units over the feet (the swimmer's 0.62 of the height: engine/wuhu/player.cpp SWIM_SINK) at
+           the chin; the hands in at frames 0 and 24 of 48, each arm's pull under the body with the
+           forearm ahead of the upper arm, its recovery with the elbow high over the back; the body
+           rolling toward the pulling arm, a breath to the right while the right arm recovers, the
+           flutter kick three beats a stroke.
+  Paddle   WSR's jsk_ava_turnover (Jet Ski: the rider thrown off, the arms windmilling) turned face
+           down, its root at the height that keeps the chin over the water: a head-up paddle, 20
+           frames, the hands in at 17 and 4 (offered beside the crawl: NOMA_WUHU_SWIM=paddle).
   Tread    made here: upright, the arms sculling, the legs cycling, 60 frames looped.
+  Plunge   going in feet first: WSR's swf_ava_deadA (Swordplay's knock-out pose: arms up in a V, the
+           legs together), then slerped into Tread's first frame over 12, 30 frames played once (the
+           dip under the water is the island's, by how fast the Mii went in).
+  Float    WSR's wkb_ava_startwait (Wakeboarding's deep-water start: floating, knees up) with
+           Tread's sculling arms on its chest, 60 frames looped, the water's line 22 over its origin.
 WSR's clips are moved onto Wii no Ma's body as research found both skeletons alike (the same T pose):
 each mapped bone's world rotation is the WSR bone's times a constant rest offset (the identity for
 the root, chest and head, a half turn about the bone for the limbs), every other bone keeps its rest
@@ -363,39 +374,88 @@ def steering(body, wsr, base_G, base_t):
     return poses
 
 
+def unit(v):
+    v = np.asarray(v, dtype=float)
+    return v / np.linalg.norm(v)
+
+
+def aim(G0, d):
+    """a limb bone's rest rotation G0 (the bone along its own x) turned the shortest way to lie
+    along d"""
+    a, b = G0[:, 0], unit(d)
+    axis, c = np.cross(a, b), float(a @ b)
+    s = np.linalg.norm(axis)
+    if s < 1e-9:
+        if c > 0:
+            return G0
+        # (opposite: half a turn about any axis across the bone)
+        p = np.cross(a, [0.0, 1.0, 0.0] if abs(a[1]) < 0.9 else [1.0, 0.0, 0.0])
+        axis, s, c = p / np.linalg.norm(p), 1.0, -1.0
+        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        return (np.eye(3) + 2 * K @ K) @ G0
+    k = axis / s
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return (np.eye(3) + s * K + (1 - c) * K @ K) @ G0
+
+
+SWIM_PITCH = 65.0        # the crawl's body: face down, this far from upright
+SWIM_ROLL = 25.0         # its roll toward the pulling arm, each way
+SWIM_ROOT = (84.0, -18.0)   # its hips' height over the feet's point and how far behind it
+CATCH = 0.5              # the arm's reach under the spine's line (radians)
+
+
 def swim(body, n=48):
-    """a front crawl: n frames a cycle (two arm strokes)"""
+    """A front crawl: n frames a cycle, the left hand's entry at frame 0 and the right's at n / 2.
+
+    In the body's own frame (x the Mii's left, y up its spine, z out of its chest) an arm's stroke
+    is 60 % pull, 40 % recovery: the pull sweeps the hand from ahead of the head down under the body
+    and in toward its middle to the hip, the forearm ahead of the upper arm (the catch's early
+    vertical forearm); the recovery lifts the elbow out over the back and the side while the forearm
+    hangs toward the water (a high elbow), and reaches forward to the next entry. The body rolls
+    toward the pulling arm, the hips less than the chest; while the right arm recovers the head turns
+    to that side for a breath, once a cycle; the legs kick three beats a stroke, opposite."""
     poses = []
     for f in range(n):
         u = f / n
-        roll = 22.0 * math.sin(2 * math.pi * u)
-        W = rot("x", 78.0) @ rot("y", roll)          # face down, rolling with the strokes
-        G = {"Skl_Root": W @ body.G0("Skl_Root"), "Chest": W @ body.G0("Chest"),
-             "Hip": W @ body.G0("Hip"), "Head": W @ rot("x", -35.0) @ rot("y", -0.6 * roll) @ body.G0("Head")}
-        for side, phase, down in (("L", 0.0, -90.0), ("R", 0.5, 90.0)):
+        # (the left shoulder lowest at the middle of its pull, u 0.3; the right at 0.8)
+        roll = -SWIM_ROLL * math.cos(2 * math.pi * (u - 0.3))
+        W = rot("x", SWIM_PITCH) @ rot("y", roll)
+        Wh = rot("x", SWIM_PITCH) @ rot("y", 0.6 * roll)
+        # the breath: the right arm recovers over u 0.1 .. 0.5
+        breath = math.sin(math.pi * (u - 0.1) / 0.4) ** 2 if 0.1 <= u < 0.5 else 0.0
+        turn = -65.0 * breath - 0.5 * roll * (1.0 - breath)
+        G = {"Skl_Root": Wh @ body.G0("Skl_Root"), "Chest": W @ body.G0("Chest"), "Hip": Wh @ body.G0("Hip"),
+             "Head": W @ rot("y", turn) @ rot("x", -30.0 + 10.0 * breath) @ body.G0("Head")}
+        for side, s, phase in (("L", 1.0, 0.0), ("R", -1.0, 0.5)):
             v = (u + phase) % 1.0
-            # the arm's swing in the body: reach over the head (-180), the pull under the body to the
-            # hip (0) over 60 % of the stroke, the recovery out of the water over the back
+            # (the reach: along the spine, turned CATCH toward the chest, which lays it level ahead)
+            reach = (0.15 * s, math.cos(CATCH), math.sin(CATCH))
             if v < 0.6:
-                th = -180.0 + 180.0 * (v / 0.6)
-                bend = 25.0 * math.sin(math.pi * v / 0.6)
+                p = v / 0.6
+                th = CATCH + (math.pi - CATCH) * p         # ahead, under the body, at the hip (pi)
+                th2 = th + math.radians(40.0) * math.sin(math.pi * p)
+                inward = s * (0.15 - 0.3 * math.sin(math.pi * p))
+                d1 = (inward, math.cos(th), math.sin(th))
+                d2 = (1.3 * inward, math.cos(th2), math.sin(th2))
             else:
                 w = (v - 0.6) / 0.4
-                th = 180.0 * w
-                bend = 95.0 * math.sin(math.pi * w)
-            A = rot("x", th) @ rot("z", down)
-            B = rot("x", th - bend) @ rot("z", down)
-            G["Arm_%s1" % side] = W @ A @ body.G0("Arm_%s1" % side)
-            G["Arm_%s2" % side] = W @ B @ body.G0("Arm_%s2" % side)
-            G["Wrist_%s" % side] = W @ B @ body.G0("Wrist_%s" % side)
+                # from the hip to the reach, bowed out over the back and the side
+                bow = 1.6 * math.sin(math.pi * w)
+                d1 = unit((1.0 - w) * np.array([0.15 * s, -1.0, 0.0]) + w * np.array(reach) +
+                          bow * np.array([0.8 * s, 0.0, -0.55]))
+                hang = math.sin(math.pi * w)
+                d2 = d1 * (1.0 - hang) + hang * unit((s * 0.25, 0.4, 0.88))
+            G["Arm_%s1" % side] = W @ aim(body.G0("Arm_%s1" % side), d1)
+            G["Arm_%s2" % side] = W @ aim(body.G0("Arm_%s2" % side), d2)
+            G["Wrist_%s" % side] = W @ aim(body.G0("Wrist_%s" % side), d2)
             # the flutter kick: three beats a stroke, the legs opposite
             k = math.sin(2 * math.pi * (3 * u + (0.5 if side == "R" else 0.0)))
             hip, knee = -8.0 + 14.0 * k, 12.0 + 10.0 * max(-k, 0.0)
-            G["Foot_%s1" % side] = W @ rot("x", -hip) @ body.G0("Foot_%s1" % side)
-            G["Foot_%s2" % side] = W @ rot("x", -hip + knee) @ body.G0("Foot_%s2" % side)
-            G["Ankle_%s" % side] = W @ rot("x", -hip + knee + 40.0) @ body.G0("Ankle_%s" % side)
-        # the hips 12 under the surface, a little behind the feet's point: the swimmer lies over it
-        poses.append((G, np.array([0.0, SURFACE - 12.0, -18.0])))
+            G["Foot_%s1" % side] = Wh @ rot("x", -hip) @ body.G0("Foot_%s1" % side)
+            G["Foot_%s2" % side] = Wh @ rot("x", -hip + knee) @ body.G0("Foot_%s2" % side)
+            G["Ankle_%s" % side] = Wh @ rot("x", -hip + knee + 40.0) @ body.G0("Ankle_%s" % side)
+        # the hips under the surface, a little behind the feet's point: the swimmer lies over it
+        poses.append((G, np.array([0.0, SWIM_ROOT[0], SWIM_ROOT[1]])))
     return poses
 
 
@@ -423,6 +483,56 @@ def tread(body, n=60):
     return poses
 
 
+JSK = ("Stage/JskScene/Jsk.carc", "G3D/WS2_jsk_ava.brres")
+WKB = ("Stage/JskScene/Wkb.carc", "G3D/WS2_wkb_ava.brres")
+SWF = ("Stage/SwfScene/Common.carc", "G3D/WS2_swf_ava.brres")
+PADDLE_PITCH, PADDLE_ROOT = 50.0, 85.0   # the paddle's lean face down, its root's height
+PLUNGE_BLEND = 12                        # the plunge's frames into treading water
+
+
+def paddle(body, wsr):
+    """WSR's jsk_ava_turnover (Jet Ski: the rider thrown off, the arms windmilling one after the other,
+    the legs kicking) turned face down about x, its root at a height that keeps the chin over the
+    water: a head-up paddle, 20 frames looped, the hands' catches at 17 (left) and 4 (right)"""
+    return [(turned(G, rot("x", PADDLE_PITCH)), np.array([t[0], PADDLE_ROOT, t[2]]))
+            for G, t in wsr_clip(body, wsr, *JSK, "WS2_jsk_ava_turnover")]
+
+
+def world_rotations(body, G, t):
+    """every clip node's world rotation of a pose (the knees' helpers left to Body.locals)"""
+    W = body.rig.pose(override=body.locals(G, t))
+    return {n: W[n][:3, :3] for n in CLIP_NODES if not n.startswith("Knee_")}
+
+
+def plunge(body, wsr, into):
+    """Going into the water feet first: WSR's swf_ava_deadA (arms up in a V, the legs together, the body
+    upright: a pencil jump's pose), then PLUNGE_BLEND frames slerped into `into` (treading water's first
+    pose), its root's height eased the same way; played once"""
+    poses = wsr_clip(body, wsr, *SWF, "WS2_swf_ava_deadA")
+    A, ta = world_rotations(body, *poses[-1]), poses[-1][1]
+    B, tb = world_rotations(body, *into), into[1]
+    for k in range(1, PLUNGE_BLEND + 1):
+        e = k / PLUNGE_BLEND
+        e = e * e * (3 - 2 * e)
+        G = {n: quat_matrix(slerp(quat(A[n]), quat(B[n]), e)) for n in A}
+        poses.append((G, ta + (tb - ta) * e))
+    return poses
+
+
+def floating(body, wsr, arms):
+    """Floating, knees up: WSR's wkb_ava_startwait (Wakeboarding's deep-water start: the water's line
+    about 22 over the clip's origin), 60 frames looped, its arms on the tow handle replaced by `arms`'
+    (treading water's sculling arms, frame by frame, carried on the float's chest)"""
+    poses = []
+    for (G, t), (A, _) in zip(wsr_clip(body, wsr, *WKB, "WS2_wkb_ava_startwait"), arms):
+        to_base = G["Chest"] @ A.get("Chest", body.G0("Chest")).T
+        P = dict(G)
+        for b in ARMS:
+            P[b] = to_base @ A[b]
+        poses.append((P, t))
+    return poses
+
+
 def build(noma, wsr, say=print):
     body = Body(noma)
     clips = []
@@ -442,7 +552,11 @@ def build(noma, wsr, say=print):
     standing = body.world(wait, 0)
     want.append(("Helm", steering(body, wsr, standing[0], standing[1]), False))
     want.append(("Swim", swim(body), True))
-    want.append(("Tread", tread(body), True))
+    want.append(("Paddle", paddle(body, wsr), True))
+    treading = tread(body)
+    want.append(("Tread", treading, True))
+    want.append(("Plunge", plunge(body, wsr, treading[0]), False))
+    want.append(("Float", floating(body, wsr, treading), True))
     made = []
     for name, poses, loop in want:
         clip, locs = make_clip(body, name, poses, loop)

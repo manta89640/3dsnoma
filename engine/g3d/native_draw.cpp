@@ -106,6 +106,7 @@ void Packet::reset() {
     casters.clear();
     sea.amp.clear();
     dynamic.clear();
+    dynamic_ranges.clear();
 }
 
 GxView native_draw_view() {

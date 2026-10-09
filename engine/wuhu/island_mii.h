@@ -15,7 +15,9 @@
 // Wii Sports Resort: WSR's parachute, fall, pilot and jet-ski poses moved onto Wii no Ma's body, the
 // jump and landings without their own rise, a swim stroke and treading water), the archive's, given
 // to the actor manager as one more animation file ("Island") in place of Vote, Send_DSi and
-// Sit_Sofa.
+// Sit_Sofa. In the water: a plunge on the way in, a stroke, treading water (then floating), and the
+// room's Seiza_Out (getting up from kneeling) to climb out onto a quay; the body eased between the
+// swimmer's height and the walker's, and bobbed under by how fast it went in.
 //
 // Its guest objects are made a step a frame while the island loads (make_step) and freed in the
 // reverse order by the destructor: the channel's heaps are stacks.
@@ -51,6 +53,10 @@ struct MiiMotion {
     f32 rise = 0;            // AIR: vertical speed over a jump's take-off speed (1 taking off, < 0 down)
     f32 air_time = 0;        // AIR: seconds since the feet left the ground
     f32 depth = 0;           // SWIM: the water's depth over the feet
+    f32 entry_speed = 0;     // SWIM: how fast it went in (down, a sixtieth), on the update the swim began
+                             // by a fall, a jump or over a boat's side (0: else, or waded in)
+    bool climbed_out = false;  // GROUND: out of the water onto a shore this update
+    f32 over_surface = 0;    //   the ground's height there over the water's surface (< 0: waded out)
     f32 steer = 0;           // CAR, BOAT: the stick's x, -1 (left) .. 1 (right)
 };
 
@@ -87,6 +93,11 @@ public:
     void draw_opaque();
     void draw_translucent();
 
+    // The swimming stroke's hands going into the water in the last update: bit 0 the left, bit 1 the
+    // right; and where the posed body had each wrist then (guest units)
+    u8 strokes() const { return strokes_; }
+    engine::math::Vec3 wrist(int side) const { return wrist_[side & 1]; }
+
     // The clips: what each is and how its frame goes is island_mii.cpp's table.
     enum Clip : u8 {
         IDLE, FIDGET_A, FIDGET_B, FIDGET_C, FIDGET_D,  // Wait, and a pass of Wait_A..D now and then
@@ -95,7 +106,10 @@ public:
         JUMP,                                          // a jump: take-off, rise, apex, fall, landing
         DROP,                                          // a fall off a ledge, then its landing
         FALL,                                          // a long fall (or a leap)
-        SLIDE, GLIDE, SWIM, TREAD, DRIVE, HELM,
+        SLIDE, GLIDE,
+        SWIM, TREAD,                                   // in the water: stroking, treading water
+        PLUNGE, FLOAT, CLIMB,                          // going in; floating still; climbing out
+        DRIVE, HELM,
         N_CLIPS
     };
     struct Source;
@@ -111,6 +125,9 @@ private:
     void add_archive();
     void write_camera(const engine::g3d::Camera& c);
     void measure_feet(engine::math::Vec3 at, f32 walked);
+    bool own(Clip c) const { return source_[c] != source_[IDLE]; }
+    engine::math::Vec3 place(const MiiMotion& m, engine::math::Vec3 at);
+    void read_wrists();
 
     u32 step_ = 0;
     u32 block_ = 0;
@@ -138,6 +155,17 @@ private:
     u32 fidgets_ = 0;
     bool landed_ = false;         // JUMP or DROP playing on from its touchdown
     f32 steer_ = 0;               // the stick's x, eased (the steering poses' axis)
+    f32 treading_ = 0;            // sixtieths treading water (or floating) since it last moved
+    // the body eased from where it was drawn over a change between the water and out of it (sixtieths
+    // since, guest units off then), and bobbed under after going in (sixtieths since, the dip's peak)
+    f32 ease_t_ = 1e6f;
+    engine::math::Vec3 ease_from_{0, 0, 0};
+    f32 dip_t_ = 1e6f, dip_peak_ = 0;
+    bool placed_ = false, was_swimming_ = false;
+    engine::math::Vec3 placed_at_{0, 0, 0};  // the body's last place (guest units)
+    u8 strokes_ = 0;
+    u32 wrist_node_[2] = {};
+    engine::math::Vec3 wrist_[2] = {};
     bool female_ = false;
     f32 height_scale_ = 1, aspect_ = 16.0f / 9.0f;
     u32 ticks_ = 0;               // sixtieths of a second since the Mii came (its blinks)

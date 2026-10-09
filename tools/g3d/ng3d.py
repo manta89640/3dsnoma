@@ -115,6 +115,9 @@ STRUCTS = {
             ("shade", "f32", (4,)), ("trail_boats", "u16", ()), ("trail_samples", "u16", ()),
             ("trail_spacing", "f32", ()), ("trail_life", "f32", ()), ("trail_spread", "f32", ()),
             ("trail_speed", "f32", ()), ("reserved", "u32", (4,))],
+    "WaterFx": [("version", "u16", ()), ("texture", "u16", ()), ("batch", "u16", (4,)), ("air_quads", "u16", ()),
+                ("surf_patches", "u16", ()), ("n_cells", "u16", ()), ("pad", "u16", ()), ("cell", "f32", (16, 4)),
+                ("reserved", "u32", (4,))],
 }
 
 # section tags, in the order this writer lays them out (small tables first, bulk data last)
@@ -127,8 +130,8 @@ SECTIONS = [
     ("SEC_LITE", "LITE", "Light"), ("SEC_LSET", "LSET", "LightSet"), ("SEC_FOGS", "FOGS", "Fog"),
     ("SEC_MARK", "MARK", "Marker"), ("SEC_COLL", "COLL", "Collision"), ("SEC_CYLS", "CYLS", "Cylinder"),
     ("SEC_CVIS", "CVIS", None), ("SEC_CAST", "CAST", "Caster"), ("SEC_SHDW", "SHDW", "ShadowEnv"),
-    ("SEC_SEAW", "SEAW", "Sea"), ("SEC_IDAT", "IDAT", "u16"), ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None),
-    ("SEC_BLOB", "BLOB", None),
+    ("SEC_SEAW", "SEAW", "Sea"), ("SEC_WAFX", "WAFX", "WaterFx"), ("SEC_IDAT", "IDAT", "u16"),
+    ("SEC_VDAT", "VDAT", None), ("SEC_TDAT", "TDAT", None), ("SEC_BLOB", "BLOB", None),
 ]
 # the Package attribute holding each array section's records
 SECTION_LISTS = {"TEXS": "textures", "MATS": "materials", "TMTX": "tex_mtx", "VTXB": "vertex_buffers",
@@ -164,7 +167,8 @@ ENUMS = {
     "FogType": dict(FOG_NONE=0, FOG_LINEAR=2),
     "MarkerKind": dict(MK_SPAWN=0, MK_LANDMARK=1, MK_CAMERA=2, MK_WARP=3),
 }
-CONSTANTS = dict(MAX_TEV_STAGES=16, MAX_TEX_MAPS=8, MAX_TEXGENS=8, MAX_CELL_LODS=3, SEA_WAVES=4)
+CONSTANTS = dict(MAX_TEV_STAGES=16, MAX_TEX_MAPS=8, MAX_TEXGENS=8, MAX_CELL_LODS=3, SEA_WAVES=4, WATER_FX_VERSION=1,
+                 WATER_FX_CELLS=16)
 # every enum value as a module constant (ng3d.TF_ETC1, ng3d.MAT_XLU, ...)
 for _e in ENUMS.values():
     globals().update(_e)
@@ -330,7 +334,8 @@ class Package:
     texture_data[i] (Texture i's bytes, all its levels), vertex_data[i] (VertexBuffer i's bytes),
     blobs[i] (Collision i's bytes). `indices` and `cell_batches` are lists of ints (u16); `cvis` is the
     CVIS section's bytes (Env.pvs_row_bytes a cell, bit j of row i at byte j >> 3, bit j & 7); `sea` the
-    SEAW section's Sea record (None: no section) and `sea_amp` its amplitude map's bytes."""
+    SEAW section's Sea record (None: no section) and `sea_amp` its amplitude map's bytes; `water_fx` the
+    WAFX section's WaterFx record (None: no section)."""
 
     def __init__(self):
         for attr in SECTION_LISTS.values():
@@ -342,6 +347,7 @@ class Package:
         self.texture_data, self.vertex_data, self.blobs = [], [], []
         self.cvis = b""
         self.sea, self.sea_amp = None, b""
+        self.water_fx = None
 
     # strings: offset in STRS, deduplicated
     def str(self, s):
@@ -373,6 +379,8 @@ class Package:
             return (self.shadow_env.pack(), 1) if self.shadow_env is not None else (b"", 0)
         if tag4 == "SEAW":
             return (self.sea.pack() + bytes(self.sea_amp), 1) if self.sea is not None else (b"", 0)
+        if tag4 == "WAFX":
+            return (self.water_fx.pack(), 1) if self.water_fx is not None else (b"", 0)
         if tag4 == "CVIS":
             rb = self.env.pvs_row_bytes if self.env is not None else 0
             return bytes(self.cvis), (len(self.cvis) // rb if rb else 0)
@@ -480,6 +488,10 @@ class Package:
             elif t4 == "SEAW":
                 p.sea = Rec.unpack("Sea", data, s.offset)
                 p.sea_amp = bytes(data[s.offset + sizeof("Sea"):s.offset + s.size])
+            elif t4 == "WAFX":
+                if s.count != 1 or s.size != sizeof("WaterFx"):
+                    raise ValueError("WAFX: %d records in %d bytes (one expected)" % (s.count, s.size))
+                p.water_fx = Rec.unpack("WaterFx", data, s.offset)
             elif t4 in SECTION_LISTS:
                 kind = kinds[t4]
                 n = sizeof(kind)
@@ -671,6 +683,8 @@ class Package:
                         sw.trail_batch, tb.flags, tb.n_indices, sw.trail_boats, sw.trail_samples))
             if not (sw.grid_radius > 0 and sw.grid_snap > 0):
                 bad.append("sea: grid radius %g, snap %g" % (sw.grid_radius, sw.grid_snap))
+        if self.water_fx is not None:
+            bad += self.check_water_fx()
         for i, m in enumerate(self.markers):
             s_ok("marker %d" % i, m.name)
             if m.kind > MK_WARP:
@@ -678,6 +692,41 @@ class Package:
         for i, c in enumerate(self.collisions):
             s_ok("collision %d" % i, c.name)
             in_sec("collision %d" % i, "BLOB", c.data, c.size)
+        return bad
+
+    def check_water_fx(self):
+        """The WAFX record's rules (engine/g3d/package.cpp check_water_fx): the version, the atlas, the
+        cells inside it, and four dynamic batches of the effects' vertex layout whose indices are their
+        quads' (4 vertices, 6 indices) or patches' (9, 24), each only of its own vertices."""
+        w, bad = self.water_fx, []
+        if w.version != WATER_FX_VERSION:
+            bad.append("water fx: version %d (this reads %d)" % (w.version, WATER_FX_VERSION))
+        if w.texture >= len(self.textures):
+            bad.append("water fx: texture %d of %d" % (w.texture, len(self.textures)))
+        if w.n_cells != WATER_FX_CELLS or not w.air_quads or not w.surf_patches:
+            bad.append("water fx: %d cells, %d quads, %d patches" % (w.n_cells, w.air_quads, w.surf_patches))
+        for c, (u0, v0, u1, v1) in enumerate(w.cell):
+            if not (0 <= u0 < u1 <= 1 and 0 <= v0 < v1 <= 1):
+                bad.append("water fx: cell %d (%g, %g)-(%g, %g)" % (c, u0, v0, u1, v1))
+        layout = VA_POS | VA_CLR | VA_UV0
+        for k, bi in enumerate(w.batch):
+            n, per_v, per_i = (w.air_quads, 4, 6) if k < 2 else (w.surf_patches, 9, 24)
+            if bi >= len(self.batches):
+                bad.append("water fx: batch %d of %d" % (bi, len(self.batches)))
+                continue
+            b = self.batches[bi]
+            vb = self.vertex_buffers[b.vbuf] if b.vbuf < len(self.vertex_buffers) else None
+            if vb is None or not b.flags & BATCH_DYNAMIC or vb.attrs != layout or vb.flags != VB_UV_FLOAT or \
+                    vb.stride != 24:
+                bad.append("water fx: batch %d isn't dynamic in the effects' layout" % bi)
+                continue
+            if b.n_indices != per_i * n or vb.count < per_v * n:
+                bad.append("water fx: batch %d: %d indices, %d vertices for %d" % (bi, b.n_indices, vb.count, n))
+                continue
+            for i, v in enumerate(self.indices[b.first_index:b.first_index + b.n_indices]):
+                if not i // per_i * per_v <= v < i // per_i * per_v + per_v:
+                    bad.append("water fx: batch %d: index %d (vertex %d) outside its own" % (bi, i, v))
+                    break
         return bad
 
     def records(self):
@@ -692,7 +741,7 @@ class Package:
                for lst in SECTION_LISTS.values()}
         out.update(env=self.env, shadow_env=self.shadow_env, strs=bytes(self.strs), texture_data=self.texture_data,
                    vertex_data=self.vertex_data, blobs=self.blobs, cvis=bytes(self.cvis), sea=self.sea,
-                   sea_amp=bytes(self.sea_amp))
+                   sea_amp=bytes(self.sea_amp), water_fx=self.water_fx)
         return out
 
     def summary(self):

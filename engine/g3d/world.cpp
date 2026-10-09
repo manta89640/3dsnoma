@@ -352,6 +352,8 @@ struct World::Impl {
     mutable double asked_t = NAN;
     mutable f32 asked_c[2] = {NAN, NAN};
     bool trails_ok = false;  // the trail batch's layout is the one the ribbons are written in
+    // ---- the water effects (water_fx.h; none if the package has no fmt::WaterFx)
+    std::unique_ptr<WaterFx> fx;
 
     explicit Impl(const Package& p) : pkg(p), sea(p) {}
 
@@ -375,6 +377,7 @@ struct World::Impl {
     Mtx34 root_now(u32 i) const;
     void sample_trails();
     u32 trail_vertices(Packet* p, const f32 origin[3]);
+    WaterFxView fx_view() const;
     Dyn& dyn_for(u32 m);
 };
 
@@ -558,6 +561,8 @@ void World::Impl::init() {
             trails.push_back(t);
         }
     }
+    if (pkg.water_fx())
+        fx.reset(new WaterFx(pkg));
     matrix_of.reserve(slots);
     state_of.reserve(mats.size());
     vis_cells.reserve(pkg.cells().count);
@@ -1123,6 +1128,23 @@ u32 World::Impl::trail_vertices(Packet* p, const f32 origin[3]) {
     return n;
 }
 
+// what the water effects are seen with this frame: the camera's eye and axes (as frustum() makes them),
+// the sea and its grid
+WaterFxView World::Impl::fx_view() const {
+    WaterFxView v;
+    Vec3 f = cam.target - cam.eye;
+    f = dot(f, f) == 0 ? Vec3{0, 0, -1} : normalize(f);
+    Vec3 r = cross(f, cam.up);
+    r = dot(r, r) == 0 ? Vec3{1, 0, 0} : normalize(r);
+    v.eye = cam.eye, v.right = r, v.up = cross(r, f);
+    v.tan_half_fovy = std::tan(cam.fovy_deg * 0.5f * 3.14159265f / 180.0f);
+    v.sea = sea.valid() ? &sea : nullptr;
+    v.grid_on = grid_on;
+    v.grid_c[0] = grid_c[0], v.grid_c[1] = grid_c[1];
+    v.seconds = frame / 60.0;
+    return v;
+}
+
 // a model's batches as candidates of their passes (the sky's all in the opaque pass, first)
 void World::Impl::add_model_items(const VisInst& v, f32 detail) {
     const fmt::Model& m = pkg.models()[v.model];
@@ -1345,9 +1367,10 @@ void World::Impl::build(Pass pass, Packet* p) {
     p->matrices.assign(k_identity, k_identity + 12);
     p->mat_states.clear();
     p->items.clear();
-    p->items.reserve(cs.size() + 2);
+    p->items.reserve(cs.size() + 6);
     p->sea.amp.clear();
     p->dynamic.clear();
+    p->dynamic_ranges.clear();
     u32 tris = 0;
     // (a material's dynamic state into the packet at its first use)
     auto state = [&](u16 material) -> u16 {
@@ -1395,6 +1418,26 @@ void World::Impl::build(Pass pass, Packet* p) {
             stats->trails = n;
         }
     }
+    // the water effects (water_fx.h): a batch's patches or quads an item, its vertices a range of the
+    // packet's, all about one translation; the patches on the water here (after the trails, under the
+    // shores' foam strips), the quads in the air after everything else
+    u16 fx_matrix = 0xFFFF;
+    const WaterFxView fv = fx && pi == 1 ? fx_view() : WaterFxView();
+    auto add_fx = [&](bool surface) {
+        WaterFxDraw d[2];
+        const u32 n = fx->build(p, surface, fv, d);
+        for (u32 i = 0; i < n; i++) {
+            if (fx_matrix == 0xFFFF)
+                fx_matrix = translated(fx->origin()[0], fx->origin()[1], fx->origin()[2]);
+            DrawItem it = {d[i].batch, fx_matrix, state(pkg.batches()[d[i].batch].material), DRAW_DYNAMIC};
+            it.range = (u16)p->dynamic_ranges.size();
+            p->dynamic_ranges.push_back(d[i].range);
+            p->items.push_back(it);
+            tris += d[i].triangles;
+        }
+    };
+    if (fx && pi == 1)
+        add_fx(true);
     for (u32 ci = 0; ci < cs.size(); ci++) {
         const Cand& c = cs[ci];
         DrawItem it = c.item;
@@ -1412,6 +1455,10 @@ void World::Impl::build(Pass pass, Packet* p) {
         tris += c.tris;
         if (pi == 0 && grid_on && ci + 1 == n_sky)
             add_grid();
+    }
+    if (fx && pi == 1) {
+        add_fx(false);
+        stats->water_quads = fx->quads(), stats->water_patches = fx->patches();
     }
     // the shadow map: both passes sample it, the opaque one draws it (its casters, before its items)
     p->casters.clear();
@@ -1604,6 +1651,18 @@ f32 World::sea_height(f32 x, f32 z, double seconds, Vec3* normal) const {
     return w.sea.height(x, z, w.asked, cx, cz, normal);
 }
 
+bool World::water_fx() const { return impl_->fx != nullptr; }
+
+void World::water_splash(const WaterSplash& splash) {
+    if (impl_->fx)
+        impl_->fx->splash(splash);
+}
+
+void World::set_swimmer(const Swimmer& swimmer) {
+    if (impl_->fx)
+        impl_->fx->set_swimmer(swimmer);
+}
+
 void World::set_lod_scale(f32 scale) {
     impl_->lod_scale = scale;
     impl_->dirty = true;
@@ -1621,6 +1680,8 @@ void World::update(f32 frame) {
     w.tick++;
     w.dirty = true;  // (instance poses)
     w.sample_trails();
+    if (w.fx)
+        w.fx->step(frame);
     if (w.dyn.empty())
         return;
     const Package& pkg = package_;

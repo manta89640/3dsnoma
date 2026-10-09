@@ -169,7 +169,7 @@ bool Package::check(std::string* error) {
         return fail(error, "SHDW holds %u records (one expected)", shdw->count);
     shadow_env_ = shdw && shdw->count ? (const fmt::ShadowEnv*)(data_ + shdw->offset) : nullptr;
     return check_textures(error) && check_geometry(error) && check_models(error) && check_world(error) &&
-           check_anims(error) && check_env(error) && check_sea(error);
+           check_anims(error) && check_env(error) && check_sea(error) && check_water_fx(error);
 }
 
 // a name: 0, or the start of a string in STRS (after a NUL)
@@ -536,6 +536,57 @@ bool Package::check_sea(std::string* error) {
                         b.n_indices, sea.trail_boats, sea.trail_samples);
     }
     sea_ = &sea;
+    return true;
+}
+
+// the water effects (WAFX, optional): one record, of the version this reads; the atlas in range and the
+// cells inside it; the four batches dynamic, in the layout the effects' vertices are made in (the
+// trails': f32 position, colour, f32 texture coordinates), each with the indices of its capacity of
+// quads (4 vertices) or patches (9), every quad's or patch's referring only to its own vertices, so that
+// drawing the first indices draws the first quads or patches whole
+bool Package::check_water_fx(std::string* error) {
+    const fmt::Section* s = section(fmt::SEC_WAFX);
+    if (!s || !s->size)
+        return true;
+    if (s->count != 1 || s->size != sizeof(fmt::WaterFx))
+        return fail(error, "WAFX: %u records in %u bytes (one expected)", s->count, s->size);
+    const fmt::WaterFx& w = *(const fmt::WaterFx*)(data_ + s->offset);
+    if (w.version != fmt::WATER_FX_VERSION)
+        return fail(error, "WAFX: version %u (this reads %d)", w.version, fmt::WATER_FX_VERSION);
+    if (w.texture >= textures().count)
+        return fail(error, "WAFX: texture %u of %u", w.texture, textures().count);
+    if (w.n_cells != fmt::WATER_FX_CELLS || !w.air_quads || !w.surf_patches)
+        return fail(error, "WAFX: %u cells (%d expected), %u quads, %u patches", w.n_cells, fmt::WATER_FX_CELLS,
+                    w.air_quads, w.surf_patches);
+    for (u32 c = 0; c < (u32)fmt::WATER_FX_CELLS; c++) {
+        const f32* r = w.cell[c];
+        if (!finite(r, 4) || !(r[0] >= 0 && r[0] < r[2] && r[2] <= 1) || !(r[1] >= 0 && r[1] < r[3] && r[3] <= 1))
+            return fail(error, "WAFX: cell %u (%g, %g)-(%g, %g)", c, (double)r[0], (double)r[1], (double)r[2],
+                        (double)r[3]);
+    }
+    const u32 layout = fmt::VA_POS | fmt::VA_CLR | fmt::VA_UV0;
+    for (u32 k = 0; k < 4; k++) {
+        const bool air = k < 2;
+        const u32 n = air ? w.air_quads : w.surf_patches, per_vertices = air ? 4 : 9, per_indices = air ? 6 : 24;
+        if (w.batch[k] >= batches().count)
+            return fail(error, "WAFX: batch %u of %u", w.batch[k], batches().count);
+        const fmt::Batch& b = batches()[w.batch[k]];
+        const fmt::VertexBuffer& vb = vertex_buffers()[b.vbuf];
+        if (!(b.flags & fmt::BATCH_DYNAMIC) || vb.attrs != layout || vb.flags != fmt::VB_UV_FLOAT || vb.stride != 24)
+            return fail(error, "WAFX: batch %u isn't dynamic in the effects' layout (flags %04X, attributes %02X, "
+                               "vertex flags %02X, stride %u)",
+                        w.batch[k], b.flags, vb.attrs, vb.flags, vb.stride);
+        if (b.n_indices != per_indices * n || vb.count < per_vertices * n)
+            return fail(error, "WAFX: batch %u: %u indices and %u vertices for %u %s", w.batch[k], b.n_indices,
+                        vb.count, n, air ? "quads" : "patches");
+        for (u32 i = 0; i < b.n_indices; i++) {
+            const u32 v = indices()[b.first_index + i], first = i / per_indices * per_vertices;
+            if (v < first || v >= first + per_vertices)
+                return fail(error, "WAFX: batch %u: index %u (vertex %u) isn't one of its %s's", w.batch[k], i, v,
+                            air ? "quad" : "patch");
+        }
+    }
+    water_fx_ = &w;
     return true;
 }
 

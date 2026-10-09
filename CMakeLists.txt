@@ -72,6 +72,7 @@ set(ENGINE_SOURCES
   engine/g3d/package.cpp
   engine/g3d/sea.cpp
   engine/g3d/texture.cpp
+  engine/g3d/water_fx.cpp
   engine/g3d/world.cpp
   engine/input/remote.cpp
   engine/lyt/lyt.cpp
@@ -243,7 +244,8 @@ else()
   add_executable(noma-host ${ENGINE_SOURCES} ${RUNTIME_SOURCES} platform/host/main.cpp platform/host/png.cpp
                            platform/host/selftest.cpp platform/host/selftest_g3d.cpp platform/host/selftest_walk.cpp platform/host/selftest_vehicles.cpp
                            engine/g3d/package_writer.cpp
-                           engine/g3d/soft_backend.cpp platform/host/selftest_g3drender.cpp)
+                           engine/g3d/soft_backend.cpp platform/host/selftest_g3drender.cpp
+                           platform/host/selftest_water_fx.cpp platform/host/selftest_water.cpp)
   target_include_directories(noma-host PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/runtime ${DECOMP_DIR}/include)
   target_link_libraries(noma-host noma_decomp)
   # ng3d-bake: a package's GX textures in their PICA formats, offline (tools/ng3d_bake.cpp)
